@@ -1,0 +1,35 @@
+# Secrets — never commit
+.env
+secrets/
+
+# Live databases — contain personal mail/message data
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Logs
+logs/
+
+# macOS cruft
+.DS_Store
+**/.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.mypy_cache/
+.ruff_cache/
+
+# Backup files
+*.bak
+
+# Claude Code session data
+.claude/
+
+# Docker override files with local secrets
+docker-compose.override.yml
+
+# Editor dirs
+.idea/
+.vscode/

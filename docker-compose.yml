@@ -1,0 +1,29 @@
+services:
+  mail-agent:
+    build:
+      context: ./agent
+    container_name: mail-agent
+    restart: unless-stopped
+    environment:
+      SETTINGS_FILE: /app/config/settings.toml
+      BRIDGE_URL: http://host.docker.internal:9100
+      BRIDGE_TOKEN_FILE: /run/secrets/bridge.token
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - ./config/settings.toml:/app/config/settings.toml:ro
+      - ./data:/app/data
+      - ./secrets/bridge.token:/run/secrets/bridge.token:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 2g
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080', timeout=5).read()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

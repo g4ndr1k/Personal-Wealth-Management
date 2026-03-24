@@ -1,0 +1,64 @@
+[bridge]
+host = "127.0.0.1"
+port = 9100
+log_level = "INFO"
+
+[auth]
+token_file = "/Users/g4ndr1k/agentic-ai/secrets/bridge.token"
+
+[mail]
+source = "mailapp"
+max_batch = 25
+max_body_text_bytes = 200000
+initial_lookback_days = 7
+
+[imessage]
+primary_recipient = "emanuel.adrianto@icloud.com"
+authorized_senders = ["emanuel.adrianto@icloud.com"]
+command_prefix = "agent:"
+max_alerts_per_hour = 60
+max_commands_per_hour = 60
+startup_notifications = true
+shutdown_notifications = false
+allow_same_account_commands = true
+
+[classifier]
+provider_order = ["ollama", "anthropic"]
+# Set to false to prevent any cloud API calls even if anthropic is in provider_order
+cloud_fallback_enabled = true
+generic_alert_on_total_failure = true
+
+[ollama]
+host = "http://host.docker.internal:11434"
+model_primary = "llama3.2:3b"
+timeout_seconds = 60
+
+[anthropic]
+enabled = true
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[agent]
+# Mail scan interval: 1800 = 30 minutes
+poll_interval_seconds = 1800
+# Command check interval: 30 seconds for responsive iMessage commands
+command_poll_interval_seconds = 30
+alert_on_categories = [
+  "transaction_alert",
+  "bill_statement",
+  "bank_clarification",
+  "payment_due",
+  "security_alert",
+  "financial_other"
+]
+
+# --- Future features (not implemented in v1) ---
+#[routing]
+#default_recipients = ["emanuel.adrianto@icloud.com"]
+#secondary_recipients = []
+#category_routes = {}
+
+#[future]
+#secondary_recipients_enabled = false
+#pdf_processing_enabled = false
+#web_ui_enabled = false
