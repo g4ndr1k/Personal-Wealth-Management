@@ -1,6 +1,6 @@
 # Agentic Mail Alert System — Build & Operations Guide
 
-**Version:** 1.1.3
+**Version:** 1.2.0
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase post-repair
 
@@ -137,7 +137,7 @@ The system alerts on:
 - Rotating bridge log file
 - Bearer token auth on all bridge endpoints except `/healthz`
 - ACK-token checkpoint system (mail + commands)
-- LaunchAgent plists for Ollama, bridge, Mail.app
+- LaunchAgent plists for Ollama, bridge, Mail.app, Docker agent
 
 ### Present but NOT integrated
 
@@ -168,24 +168,28 @@ brew install --cask docker
 
 Docker Desktop must be set to **"Start Docker Desktop when you log in"** so the agent container auto-starts after reboots.
 
-### Python 3.11+
+### Python 3.13 (Homebrew — single installation)
 
-The bridge uses `tomllib` (stdlib since Python 3.11). The macOS system Python at `/usr/bin/python3` is typically 3.9 and **will not work**.
-
-```bash
-# Verify Homebrew Python
-/opt/homebrew/bin/python3 --version      # must be 3.11+
-
-# Confirm tomllib and other deps load
-python3 -c "import tomllib, sqlite3, http.server, signal, re; print('OK')"
-```
-
-Record the full path — you'll need it for the LaunchAgent plist:
+The bridge uses `tomllib` (stdlib since Python 3.11). The macOS system Python at `/usr/bin/python3` is typically 3.9 and **will not work**. Install exactly one Python via Homebrew and nothing else:
 
 ```bash
-which python3
-# /opt/homebrew/bin/python3
+brew install python@3.13
 ```
+
+Homebrew installs `python3.13` but does **not** create an unversioned `python3` symlink automatically when multiple versions coexist. Create it manually:
+
+```bash
+ln -sf /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3
+```
+
+Verify:
+
+```bash
+/opt/homebrew/bin/python3 --version      # Python 3.13.x
+/opt/homebrew/bin/python3 -c "import tomllib, sqlite3; print('OK')"
+```
+
+> **Do not install Miniconda or the python.org PKG installer alongside Homebrew Python.** Both inject themselves ahead of Homebrew in `PATH` and break the bridge. Homebrew is the only Python manager needed here.
 
 ### Ollama model
 
@@ -214,12 +218,23 @@ The bridge process reads protected databases:
 ~/Library/Messages/chat.db
 ```
 
-When run via launchd, it does **not** inherit Terminal's TCC grants. You must grant FDA explicitly to the Python binary.
+When run via launchd, it does **not** inherit Terminal's TCC grants. You must grant FDA to the **actual Python binary** — macOS TCC does not follow symlinks.
 
-1. **System Settings → Privacy & Security → Full Disk Access**
-2. Click **+**, press **Cmd+Shift+G**
-3. Enter the full Python binary path (e.g. `/opt/homebrew/bin/python3`)
-4. Ensure the toggle is **ON**
+**Step 1 — Find the real binary path:**
+
+```bash
+realpath /opt/homebrew/bin/python3
+# Example: /opt/homebrew/Cellar/python@3.13/3.13.12_1/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+```
+
+**Step 2 — Grant FDA via drag-and-drop** (the `+` picker greys out versioned binaries):
+
+1. Open **Finder** → **Cmd+Shift+G** → paste the directory from Step 1 (everything up to `/bin/`)
+2. Keep **System Settings → Privacy & Security → Full Disk Access** visible alongside Finder
+3. **Drag** `python3.13` from Finder directly into the FDA list
+4. Toggle **ON**
+
+> ⚠️ **After every `brew upgrade python@3.13`**, the Cellar path changes (e.g. `3.13.12_1` → `3.13.13_1`). Remove the old FDA entry, run `realpath /opt/homebrew/bin/python3` again, and re-add the new path.
 
 ---
 
@@ -263,7 +278,8 @@ agentic-ai/
 ├── scripts/
 │   ├── post_reboot_check.sh      # Post-boot health check
 │   ├── tahoe_validate.sh         # Mail schema validator
-│   └── run_bridge.sh             # Bridge startup wrapper
+│   ├── run_bridge.sh             # Bridge startup wrapper
+│   └── start_agent.sh            # Docker agent startup wrapper (waits for Docker Desktop)
 ├── secrets/                      # Auth token (gitignored)
 │   └── bridge.token
 ├── .env                          # API keys (gitignored)
@@ -853,15 +869,16 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
 
 ## 15. LaunchAgents — Auto-Start on Reboot
 
-Three macOS LaunchAgents ensure everything starts after a login:
+Four macOS LaunchAgents ensure everything starts after a login:
 
 | Label | What it starts | KeepAlive |
 |---|---|---|
 | `com.agentic.ollama` | Ollama LLM server | `true` |
 | `com.agentic.bridge` | Bridge HTTP service | `true` |
-| `com.agentic.mailapp` | Mail.app | `false` |
+| `com.agentic.mailapp` | Mail.app | `false` (one-shot) |
+| `com.agentic.agent` | Docker agent container | `false` (one-shot) |
 
-The Docker agent does not need a LaunchAgent — Docker Desktop's `restart: unless-stopped` policy handles it.
+The agent LaunchAgent runs `scripts/start_agent.sh` which waits up to 120 seconds for Docker Desktop to be ready, then calls `docker compose up -d`. The container's own `restart: unless-stopped` policy handles subsequent restarts.
 
 ---
 
@@ -880,7 +897,7 @@ Create `~/Library/LaunchAgents/com.agentic.bridge.plist`:
 
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
+        <string>/opt/homebrew/bin/python3.13</string>
         <string>-m</string>
         <string>bridge.server</string>
     </array>
@@ -913,8 +930,7 @@ Create `~/Library/LaunchAgents/com.agentic.bridge.plist`:
 ```
 
 > **Critical:** Replace `YOUR_USERNAME` with your actual macOS username.
-> The `ProgramArguments` path **must** point to Python 3.11+.
-> Do **not** use `/usr/bin/python3` (system Python 3.9 — no `tomllib`).
+> Use `/opt/homebrew/bin/python3.13` (the versioned symlink). Do **not** use `/usr/bin/python3` (system Python 3.9 — no `tomllib`) or `/opt/homebrew/bin/python3` (the unversioned symlink does not satisfy TCC FDA checks).
 
 ---
 
@@ -996,6 +1012,46 @@ Create `~/Library/LaunchAgents/com.agentic.mailapp.plist`:
 
 ---
 
+### Docker Agent LaunchAgent plist
+
+Create `~/Library/LaunchAgents/com.agentic.agent.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agentic.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/YOUR_USERNAME/agentic-ai/scripts/start_agent.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- One-shot: docker compose up -d exits after starting the container. -->
+    <!-- KeepAlive is false — the container manages its own restarts.       -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/agentic-ai/logs/agent-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/agentic-ai/logs/agent-launchd-err.log</string>
+</dict>
+</plist>
+```
+
+> `scripts/start_agent.sh` polls `docker info` every 5 seconds until Docker Desktop is ready (max 120 s), then runs `docker compose up -d`. This avoids a race condition where Docker Desktop hasn't fully started at login time.
+
+---
+
 ### Load the LaunchAgents
 
 ```bash
@@ -1005,8 +1061,9 @@ mkdir -p ~/agentic-ai/logs
 launchctl load ~/Library/LaunchAgents/com.agentic.ollama.plist
 launchctl load ~/Library/LaunchAgents/com.agentic.bridge.plist
 launchctl load ~/Library/LaunchAgents/com.agentic.mailapp.plist
+launchctl load ~/Library/LaunchAgents/com.agentic.agent.plist
 
-# Verify all three are registered with a PID (not "-")
+# Verify all are registered (bridge and ollama should show a PID)
 launchctl list | grep agentic
 ```
 
@@ -1014,11 +1071,12 @@ launchctl list | grep agentic
 
 After login:
 
-1. **launchd** starts Ollama, bridge, and Mail.app in parallel
+1. **launchd** starts Ollama, bridge, Mail.app, and the agent startup script in parallel
 2. Bridge waits for Mail DB to be accessible before serving requests
-3. **Docker Desktop** starts and launches the agent container
-4. Agent retries bridge connectivity for up to ~3 minutes
-5. Once connected, agent sends startup iMessage and enters its main loop
+3. **`start_agent.sh`** waits for Docker Desktop to be ready (up to 120 s)
+4. Once Docker is ready, `docker compose up -d` starts the `mail-agent` container
+5. Agent retries bridge connectivity for up to ~3 minutes
+6. Once connected, agent sends startup iMessage and enters its main loop
 
 ### Post-reboot health check script
 
@@ -1161,13 +1219,17 @@ docker compose logs -f mail-agent      # follow in real time
 ### Restart services
 
 ```bash
-# Restart Docker agent
+# Restart Docker agent container
 cd ~/agentic-ai
 docker compose restart mail-agent
 
 # Reload bridge LaunchAgent
 launchctl unload ~/Library/LaunchAgents/com.agentic.bridge.plist
 launchctl load   ~/Library/LaunchAgents/com.agentic.bridge.plist
+
+# Re-run the agent startup script (if container stopped and Docker is running)
+launchctl unload ~/Library/LaunchAgents/com.agentic.agent.plist
+launchctl load   ~/Library/LaunchAgents/com.agentic.agent.plist
 
 # Check all LaunchAgent statuses
 launchctl list | grep agentic
@@ -1281,7 +1343,7 @@ chmod 600 ~/agentic-ai/secrets/bridge.token
 | OpenAI / Gemini | Provider files exist but raise `NotImplementedError` — not active |
 | Command rate limit | `max_commands_per_hour` in config is not enforced by current orchestrator code |
 | TCC / launch context | Bridge must run under launchd with FDA; does not inherit Terminal TCC grants |
-| System Python | macOS system Python 3.9 lacks `tomllib` and cannot run the bridge |
+| System Python | macOS system Python 3.9 lacks `tomllib` and cannot run the bridge; use Homebrew `python@3.13` only |
 | Attachments | `attachments` field always returns an empty array — not implemented |
 | Single instance | No coordination for running multiple bridge or agent instances |
 
@@ -1302,6 +1364,19 @@ launchctl list | grep agentic
 | `FileNotFoundError: No Mail Envelope Index found` | Python binary lacks Full Disk Access | Grant FDA in System Settings |
 | Exit code `1`, PID shows `-` | Generic startup crash | Check `bridge-launchd-err.log` for full traceback |
 | `RuntimeError: Bridge token file is empty` | `secrets/bridge.token` is empty or missing | Regenerate token (see §6 Step 2) |
+
+### Docker agent container not starting after reboot
+
+```bash
+cat ~/agentic-ai/logs/agent-launchd.log
+cat ~/agentic-ai/logs/agent-launchd-err.log
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Log shows `Docker not available after 120s` | Docker Desktop took too long / not set to start at login | Enable "Start Docker Desktop when you log in" in Docker Desktop settings |
+| Log shows `docker compose up exited with code 1` | Image not built yet | Run `cd ~/agentic-ai && docker compose build` |
+| Container shows `Exited` immediately | Bridge not running | Fix bridge first, then `docker compose up -d` |
 
 ### Agent stuck in `Restarting` loop
 
@@ -1360,6 +1435,16 @@ docker compose up -d
 
 ## 22. Version History
 
+### v1.2.0
+
+- Added: `com.agentic.agent` LaunchAgent — Docker agent container auto-starts on reboot via `scripts/start_agent.sh`
+- Added: `scripts/start_agent.sh` — waits up to 120 s for Docker Desktop before calling `docker compose up -d`
+- Changed: Bridge LaunchAgent `ProgramArguments` updated to `/opt/homebrew/bin/python3.13` (versioned symlink)
+- Changed: Python prerequisites — Homebrew `python@3.13` only; Miniconda and python.org PKG installer explicitly unsupported
+- Changed: Full Disk Access instructions — correct procedure is drag-and-drop of actual Cellar/Frameworks binary (TCC does not follow symlinks); added post-upgrade reminder
+- Fixed: Documented that `python3` unversioned symlink must be created manually when only `python@3.13` is installed
+- Fixed: Post-reboot startup order updated to include agent LaunchAgent step
+
 ### v1.1.3
 
 - Added: LaunchAgent plists for bridge, Mail.app, Ollama
@@ -1390,4 +1475,4 @@ docker compose up -d
 
 ---
 
-*Guide generated 2026-03-24 · validated against checked-in codebase post-repair*
+*Guide last updated 2026-03-24 · validated against checked-in codebase*
