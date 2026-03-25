@@ -27,6 +27,15 @@ provider_order = ["ollama", "anthropic"]
 # Set to false to prevent any cloud API calls even if anthropic is in provider_order
 cloud_fallback_enabled = true
 generic_alert_on_total_failure = true
+# Only process emails whose sender_email domain matches one of these.
+# All other senders are silently skipped before any LLM call is made.
+allowed_sender_domains = [
+  "maybank.co.id",
+  "cimbniaga.co.id",
+  "permatabank.co.id",
+  "bca.co.id",
+  "klikbca.com",
+]
 
 [ollama]
 host = "http://host.docker.internal:11434"

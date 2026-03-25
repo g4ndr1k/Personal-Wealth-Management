@@ -73,7 +73,7 @@ class Orchestrator:
                     break  # Stop batch, retry next cycle
 
                 self.stats.incr("emails_seen")
-                if result.provider == "apple_ml_prefilter":
+                if result.provider in ("apple_ml_prefilter", "domain_prefilter"):
                     self.stats.incr("emails_prefiltered")
 
                 # Alert if needed

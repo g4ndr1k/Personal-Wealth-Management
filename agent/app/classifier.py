@@ -48,6 +48,19 @@ class Classifier:
         self.circuit_breaker = CircuitBreaker(max_failures=3, cooldown_seconds=300)
         self.cloud_fallback_enabled = settings["classifier"].get("cloud_fallback_enabled", True)
 
+        # Domain allowlist — empty list means no restriction (all senders pass)
+        raw_domains = settings["classifier"].get("allowed_sender_domains", [])
+        self.allowed_sender_domains: list[str] = [
+            d.lower().lstrip("@") for d in raw_domains
+        ]
+        if self.allowed_sender_domains:
+            logger.info(
+                "Domain allowlist active: %s",
+                ", ".join(self.allowed_sender_domains),
+            )
+        else:
+            logger.info("Domain allowlist: disabled (all senders allowed)")
+
         self.providers = []
         for name in settings["classifier"]["provider_order"]:
             if name == "ollama":
@@ -59,6 +72,21 @@ class Classifier:
                     logger.info("Anthropic skipped: cloud_fallback_enabled=false")
 
     def classify(self, message: dict) -> Classification:
+        # Domain allowlist pre-filter: skip senders not on the allowed list
+        if self._domain_not_allowed(message):
+            sender_email = message.get("sender_email", "")
+            logger.debug(
+                "Domain filter: skipping %s (%s)",
+                message.get("bridge_id"), sender_email,
+            )
+            return Classification(
+                category="not_financial",
+                urgency="low",
+                summary=f"Skipped: sender domain not in allowlist ({sender_email})",
+                requires_action=False,
+                provider="domain_prefilter",
+            )
+
         # Use Apple ML category as pre-filter: skip promotions (category 3)
         if self._apple_says_skip(message):
             return Classification(
@@ -112,6 +140,23 @@ class Classifier:
             requires_action=False,
             provider=f"fallback_error:{last_error}",
         )
+
+    def _domain_not_allowed(self, message: dict) -> bool:
+        """Return True if the sender's domain is NOT in the allowlist.
+
+        If allowed_sender_domains is empty, every sender is allowed (returns False).
+        The check is case-insensitive and tolerates missing/malformed sender_email.
+        """
+        if not self.allowed_sender_domains:
+            return False  # allowlist disabled — let everything through
+
+        sender_email = (message.get("sender_email") or "").lower().strip()
+        if not sender_email or "@" not in sender_email:
+            # No parseable email address — block by default when allowlist is active
+            return True
+
+        domain = sender_email.rsplit("@", 1)[1]
+        return domain not in self.allowed_sender_domains
 
     def _apple_says_skip(self, message: dict) -> bool:
         apple_cat = message.get("apple_category")
