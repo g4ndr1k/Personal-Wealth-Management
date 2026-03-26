@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bank Statement Processor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f5f5f0;
+    --surface: #ffffff;
+    --border: #e0ddd5;
+    --text: #1a1a18;
+    --muted: #6b6b65;
+    --accent: #2563eb;
+    --accent-light: #eff6ff;
+    --success: #16a34a;
+    --success-light: #f0fdf4;
+    --error: #dc2626;
+    --error-light: #fef2f2;
+    --warning: #d97706;
+    --warning-light: #fffbeb;
+    --radius: 8px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+         font-size: 14px; background: var(--bg); color: var(--text);
+         line-height: 1.5; min-height: 100vh; }
+  .page { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 16px; }
+  .card-header { padding: 14px 16px; border-bottom: 1px solid var(--border);
+                 font-weight: 600; font-size: 13px; display: flex;
+                 align-items: center; gap: 8px; }
+  .card-body { padding: 16px; }
+
+  /* Upload zone */
+  .drop-zone { border: 2px dashed var(--border); border-radius: var(--radius);
+               padding: 32px; text-align: center; cursor: pointer;
+               transition: border-color 0.15s, background 0.15s; }
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--accent); background: var(--accent-light); }
+  .drop-zone .icon { font-size: 32px; margin-bottom: 8px; }
+  .drop-zone p { color: var(--muted); font-size: 13px; }
+  .drop-zone strong { color: var(--accent); }
+  #file-input { display: none; }
+
+  /* File list */
+  .file-item { display: flex; align-items: center; gap: 10px;
+               padding: 10px 12px; border: 1px solid var(--border);
+               border-radius: 6px; margin-bottom: 8px; background: var(--surface); }
+  .file-item .file-icon { font-size: 20px; flex-shrink: 0; }
+  .file-item .file-info { flex: 1; min-width: 0; }
+  .file-item .file-name { font-weight: 500; white-space: nowrap;
+                          overflow: hidden; text-overflow: ellipsis; }
+  .file-item .file-meta { font-size: 12px; color: var(--muted); }
+  .file-item .file-pw { width: 160px; padding: 4px 8px; border: 1px solid var(--border);
+                        border-radius: 4px; font-size: 13px; }
+  .file-item .remove-btn { background: none; border: none; cursor: pointer;
+                           color: var(--muted); font-size: 16px; padding: 4px; }
+  .file-item .remove-btn:hover { color: var(--error); }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px;
+         border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;
+         border: none; transition: opacity 0.15s; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-primary:not(:disabled):hover { opacity: 0.88; }
+  .btn-secondary { background: var(--surface); color: var(--text);
+                   border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--bg); }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+  /* Status badge */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px;
+           font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-pending  { background: #f3f4f6; color: #374151; }
+  .badge-running  { background: #fef3c7; color: #92400e; }
+  .badge-done     { background: #dcfce7; color: #166534; }
+  .badge-error    { background: #fee2e2; color: #991b1b; }
+
+  /* Jobs table */
+  .jobs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .jobs-table th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border);
+                   color: var(--muted); font-weight: 600; font-size: 12px; }
+  .jobs-table td { padding: 8px 10px; border-bottom: 1px solid var(--border);
+                   vertical-align: middle; }
+  .jobs-table tr:last-child td { border-bottom: none; }
+  .jobs-table tr:hover td { background: var(--bg); }
+
+  /* Attachments */
+  .attach-item { display: flex; align-items: center; gap: 10px; padding: 8px 0;
+                 border-bottom: 1px solid var(--border); }
+  .attach-item:last-child { border-bottom: none; }
+
+  /* Alerts */
+  .alert { padding: 10px 14px; border-radius: 6px; font-size: 13px;
+           margin-bottom: 12px; display: flex; align-items: flex-start; gap: 8px; }
+  .alert-success { background: var(--success-light); color: #166534;
+                   border: 1px solid #bbf7d0; }
+  .alert-error   { background: var(--error-light);   color: #991b1b;
+                   border: 1px solid #fecaca; }
+  .alert-info    { background: var(--accent-light);  color: #1e40af;
+                   border: 1px solid #bfdbfe; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 2px; border-bottom: 2px solid var(--border);
+          margin-bottom: 16px; }
+  .tab { padding: 8px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
+         color: var(--muted); border-bottom: 2px solid transparent;
+         margin-bottom: -2px; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Progress */
+  .progress-bar { height: 4px; background: var(--border); border-radius: 2px;
+                  overflow: hidden; margin-top: 6px; }
+  .progress-fill { height: 100%; background: var(--accent);
+                   transition: width 0.3s; border-radius: 2px; }
+
+  .empty-state { text-align: center; padding: 32px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>📄 Bank Statement Processor</h1>
+  <p class="subtitle">Upload encrypted bank PDFs → parse transactions → export to XLS</p>
+
+  <div id="flash"></div>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('upload')">Upload</div>
+    <div class="tab" onclick="switchTab('jobs')">Jobs</div>
+    <div class="tab" onclick="switchTab('attachments')">Mail Attachments</div>
+  </div>
+
+  <!-- ── UPLOAD TAB ──────────────────────────────────────────────────────── -->
+  <div id="tab-upload" class="tab-panel active">
+    <div class="card">
+      <div class="card-header">📁 Select PDF Files</div>
+      <div class="card-body">
+        <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+          <div class="icon">🏦</div>
+          <p><strong>Click to select</strong> or drag &amp; drop bank statement PDFs</p>
+          <p style="margin-top:4px">Supports Maybank CC &amp; Consolidated statements</p>
+        </div>
+        <input type="file" id="file-input" accept=".pdf" multiple>
+        <div id="file-list" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <div id="upload-actions" style="display:none; margin-bottom:16px">
+      <button class="btn btn-primary" id="process-btn" onclick="processAll()">
+        ⚡ Process All
+      </button>
+      <button class="btn btn-secondary" style="margin-left:8px" onclick="clearFiles()">
+        Clear
+      </button>
+      <span id="process-status" style="margin-left:12px; font-size:13px; color:var(--muted)"></span>
+    </div>
+  </div>
+
+  <!-- ── JOBS TAB ────────────────────────────────────────────────────────── -->
+  <div id="tab-jobs" class="tab-panel">
+    <div class="card">
+      <div class="card-header" style="justify-content:space-between">
+        <span>📋 Processing Jobs</span>
+        <button class="btn btn-secondary btn-sm" onclick="loadJobs()">↻ Refresh</button>
+      </div>
+      <div class="card-body" id="jobs-container">
+        <div class="empty-state">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ATTACHMENTS TAB ─────────────────────────────────────────────────── -->
+  <div id="tab-attachments" class="tab-panel">
+    <div class="card">
+      <div class="card-header" style="justify-content:space-between">
+        <span>📬 Auto-Detected Bank PDFs in Mail</span>
+        <button class="btn btn-secondary btn-sm" onclick="loadAttachments()">↻ Scan</button>
+      </div>
+      <div class="card-body" id="attachments-container">
+        <div class="empty-state">Click Scan to search Mail.app attachments</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = "";  // same origin — bridge serves this page
+
+// ── Auth token ───────────────────────────────────────────────────────────────
+// Token is read from a meta tag injected by the bridge, or from localStorage
+let TOKEN = document.querySelector('meta[name="bridge-token"]')?.content || localStorage.getItem("bridge_token") || "";
+if (!TOKEN) {
+  TOKEN = prompt("Enter bridge token:") || "";
+  if (TOKEN) localStorage.setItem("bridge_token", TOKEN);
+}
+
+async function api(method, path, body, isFile) {
+  const headers = { "Authorization": `Bearer ${TOKEN}` };
+  if (!isFile && body) headers["Content-Type"] = "application/json";
+  const opts = { method, headers };
+  if (body) opts.body = isFile ? body : JSON.stringify(body);
+  try {
+    const r = await fetch(API + path, opts);
+    if (path.includes("/download/")) return r;  // raw response for file download
+    return await r.json();
+  } catch(e) {
+    return { error: e.message };
+  }
+}
+
+// ── Flash messages ────────────────────────────────────────────────────────────
+function flash(msg, type="info") {
+  const div = document.getElementById("flash");
+  div.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+  setTimeout(() => div.innerHTML = "", 5000);
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach((t,i) => {
+    const names = ["upload","jobs","attachments"];
+    t.classList.toggle("active", names[i] === name);
+  });
+  document.querySelectorAll(".tab-panel").forEach(p => {
+    p.classList.toggle("active", p.id === `tab-${name}`);
+  });
+  if (name === "jobs") loadJobs();
+  if (name === "attachments") loadAttachments();
+}
+
+// ── Upload / drag-drop ────────────────────────────────────────────────────────
+const pendingFiles = [];  // { file, password }
+
+document.getElementById("file-input").addEventListener("change", e => {
+  [...e.target.files].forEach(addFile);
+  e.target.value = "";
+});
+
+const dz = document.getElementById("drop-zone");
+dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag-over"); });
+dz.addEventListener("dragleave", () => dz.classList.remove("drag-over"));
+dz.addEventListener("drop", e => {
+  e.preventDefault(); dz.classList.remove("drag-over");
+  [...e.dataTransfer.files].filter(f => f.name.endsWith(".pdf")).forEach(addFile);
+});
+
+function addFile(file) {
+  pendingFiles.push({ file, password: "" });
+  renderFileList();
+}
+
+function renderFileList() {
+  const el = document.getElementById("file-list");
+  const actions = document.getElementById("upload-actions");
+  if (pendingFiles.length === 0) { el.innerHTML = ""; actions.style.display = "none"; return; }
+  actions.style.display = "block";
+  el.innerHTML = pendingFiles.map((pf, i) => `
+    <div class="file-item">
+      <span class="file-icon">📄</span>
+      <div class="file-info">
+        <div class="file-name">${pf.file.name}</div>
+        <div class="file-meta">${(pf.file.size/1024).toFixed(1)} KB</div>
+      </div>
+      <input type="password" class="file-pw" placeholder="PDF password (if needed)"
+             value="${pf.password}"
+             oninput="pendingFiles[${i}].password = this.value"
+             onkeydown="if(event.key==='Enter') document.getElementById('process-btn').click()">
+      <button class="remove-btn" onclick="pendingFiles.splice(${i},1); renderFileList()">✕</button>
+    </div>
+  `).join("");
+}
+
+function clearFiles() {
+  pendingFiles.length = 0;
+  renderFileList();
+  document.getElementById("process-status").textContent = "";
+}
+
+// ── Process ───────────────────────────────────────────────────────────────────
+async function processAll() {
+  if (pendingFiles.length === 0) return;
+  const btn = document.getElementById("process-btn");
+  const status = document.getElementById("process-status");
+  btn.disabled = true;
+  let done = 0;
+  const results = [];
+
+  for (const pf of pendingFiles) {
+    status.textContent = `Processing ${pf.file.name}…`;
+    const fd = new FormData();
+    fd.append("file", pf.file, pf.file.name);
+    if (pf.password) fd.append("password", pf.password);
+
+    const res = await api("POST", "/pdf/upload", fd, true);
+    if (res.error) { results.push({ name: pf.file.name, ok: false, msg: res.error }); continue; }
+
+    const jobId = res.job_id;
+    // If already done (password was provided → processed immediately)
+    if (res.status === "done") {
+      results.push({ name: pf.file.name, ok: true, jobId });
+    } else if (res.status !== "error") {
+      // Poll until done (max 30s)
+      const jobResult = await pollJob(jobId, s => status.textContent = `${pf.file.name}: ${s}`);
+      results.push({ name: pf.file.name, ok: jobResult.status === "done",
+                     msg: jobResult.error, jobId });
+    } else {
+      results.push({ name: pf.file.name, ok: false, msg: res.status });
+    }
+    done++;
+  }
+
+  btn.disabled = false;
+  status.textContent = `${done} file(s) processed`;
+  const succeeded = results.filter(r => r.ok);
+  const failed = results.filter(r => !r.ok);
+  if (succeeded.length) {
+    flash(`✅ ${succeeded.length} statement(s) processed successfully. <a href="#" onclick="switchTab('jobs');return false">View Jobs →</a>`, "success");
+  }
+  if (failed.length) {
+    flash(`❌ ${failed.length} failed: ${failed.map(f=>`${f.name}: ${f.msg}`).join("; ")}`, "error");
+  }
+  clearFiles();
+}
+
+async function pollJob(jobId, onStatus) {
+  for (let i = 0; i < 60; i++) {
+    await sleep(500);
+    const res = await api("GET", `/pdf/status/${jobId}`);
+    if (res.error) return res;
+    onStatus(res.status);
+    if (res.status === "done" || res.status === "error") return res;
+  }
+  return { status: "timeout", error: "Processing timed out" };
+}
+
+// ── Jobs list ─────────────────────────────────────────────────────────────────
+async function loadJobs() {
+  document.getElementById("jobs-container").innerHTML = '<div class="empty-state">Loading…</div>';
+  const res = await api("GET", "/pdf/jobs");
+  const el = document.getElementById("jobs-container");
+  if (res.error || !res.jobs) { el.innerHTML = `<div class="alert alert-error">${res.error||"Failed"}</div>`; return; }
+  if (res.jobs.length === 0) { el.innerHTML = '<div class="empty-state">No jobs yet. Upload a PDF to get started.</div>'; return; }
+
+  el.innerHTML = `
+    <table class="jobs-table">
+      <thead><tr>
+        <th>File</th><th>Bank</th><th>Type</th><th>Period</th>
+        <th>Status</th><th>Created</th><th></th>
+      </tr></thead>
+      <tbody>${res.jobs.map(j => `
+        <tr>
+          <td title="${j.filename}">${truncate(j.filename, 28)}</td>
+          <td>${j.bank}</td>
+          <td>${j.stmt_type}</td>
+          <td>${j.period || "—"}</td>
+          <td><span class="badge badge-${j.status}">${j.status}</span>
+              ${j.error ? `<br><small style="color:var(--error)">${truncate(j.error,40)}</small>` : ""}
+          </td>
+          <td style="white-space:nowrap;color:var(--muted);font-size:12px">${j.created_at.slice(0,16).replace("T"," ")}</td>
+          <td>
+            ${j.status === "done" ? `<button class="btn btn-secondary btn-sm" onclick="downloadJob('${j.job_id}','${j.filename}')">⬇ XLS</button>` : ""}
+          </td>
+        </tr>
+      `).join("")}</tbody>
+    </table>`;
+}
+
+async function downloadJob(jobId, origName) {
+  const r = await api("GET", `/pdf/download/${jobId}`);
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const xlsName = origName.replace(/\.pdf$/i, ".xlsx").replace(/_unlocked/, "");
+  a.href = url; a.download = xlsName; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+async function loadAttachments() {
+  document.getElementById("attachments-container").innerHTML = '<div class="empty-state">Scanning…</div>';
+  const res = await api("GET", "/pdf/attachments");
+  const el = document.getElementById("attachments-container");
+  if (res.error) { el.innerHTML = `<div class="alert alert-error">${res.error}</div>`; return; }
+  if (!res.attachments || res.attachments.length === 0) {
+    el.innerHTML = '<div class="empty-state">No new bank PDFs found in Mail.app attachments.</div>'; return;
+  }
+  el.innerHTML = res.attachments.map(a => `
+    <div class="attach-item">
+      <span style="font-size:20px">📎</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${a.filename}</div>
+        <div style="font-size:12px;color:var(--muted)">${a.bank} · ${a.received || "unknown date"} · ${a.size_kb} KB</div>
+      </div>
+      <input type="password" id="pw-${btoa(a.file_path).slice(0,10)}"
+             placeholder="Password" style="width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      <button class="btn btn-secondary btn-sm"
+              onclick="queueAttachment('${escHtml(a.file_path)}', '${btoa(a.file_path).slice(0,10)}')">
+        Queue
+      </button>
+    </div>
+  `).join("");
+}
+
+async function queueAttachment(filePath, pwId) {
+  const password = document.getElementById(`pw-${pwId}`)?.value || "";
+  const fd = new FormData();
+  // Read file from disk path via the bridge
+  const res = await api("POST", "/pdf/process", { source_path: filePath, password });
+  if (res.error) { flash(`Error: ${res.error}`, "error"); return; }
+  flash(`Queued: ${res.job_id}. <a href="#" onclick="switchTab('jobs');return false">View Jobs →</a>`, "success");
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const truncate = (s, n) => s && s.length > n ? s.slice(0, n) + "…" : (s || "");
+const escHtml = s => s.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+// Load jobs on first visit to jobs tab
+window.addEventListener("load", () => {
+  // Pre-warm: check if token works
+  api("GET", "/healthz").then(r => {
+    if (r && r.status !== "ok" && !r.error) return;
+  });
+});
+</script>
+</body>
+</html>

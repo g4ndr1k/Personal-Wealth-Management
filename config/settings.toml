@@ -10,7 +10,7 @@ token_file = "/Users/g4ndr1k/agentic-ai/secrets/bridge.token"
 source = "mailapp"
 max_batch = 25
 max_body_text_bytes = 200000
-initial_lookback_days = 7
+initial_lookback_days = 15
 
 [imessage]
 primary_recipient = "emanuel.adrianto@icloud.com"
@@ -70,4 +70,38 @@ alert_on_categories = [
 #[future]
 #secondary_recipients_enabled = false
 #pdf_processing_enabled = false
-#web_ui_enabled = false
+#web_ui_enabled = false# ─────────────────────────────────────────────────────────────────────────────
+# ADD THIS SECTION to your existing config/settings.toml
+# ─────────────────────────────────────────────────────────────────────────────
+
+[pdf]
+# Directory where uploaded PDFs are stored before processing
+inbox_dir = "/Users/g4ndr1k/agentic-ai/data/pdf_inbox"
+
+# Directory where unlocked (password-removed) copies are saved
+unlocked_dir = "/Users/g4ndr1k/agentic-ai/data/pdf_unlocked"
+
+# Directory where output XLS files are saved — one file per bank, accumulates over time
+xls_output_dir = "/Users/g4ndr1k/agentic-ai/output/xls"
+
+# Path to bank PDF passwords file (gitignored)
+bank_passwords_file = "/Users/g4ndr1k/agentic-ai/secrets/banks.toml"
+
+# SQLite DB for PDF processing jobs
+jobs_db = "/Users/g4ndr1k/agentic-ai/data/pdf_jobs.db"
+
+# SQLite DB for tracking already-scanned Mail.app attachments
+attachment_seen_db = "/Users/g4ndr1k/agentic-ai/data/seen_attachments.db"
+
+# How many days back to scan for attachments in Mail.app
+attachment_lookback_days = 60
+
+# Ollama model for Layer 3 LLM fallback parsing (same as mail agent)
+parser_llm_model = "llama3.2:3b"
+
+# Owner name mapping — substring match, case-insensitive, first match wins
+# Maps customer names found in PDFs to canonical owner labels
+# Used for output file naming (e.g. Maybank_Gandrik.xlsx) and ALL_TRANSACTIONS Owner column
+[owners]
+"Emanuel" = "Gandrik"
+"Dian Pratiwi" = "Helen"

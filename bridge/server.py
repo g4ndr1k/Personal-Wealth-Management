@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, timezone
@@ -18,6 +19,11 @@ from bridge.state import BridgeState
 from bridge.rate_limit import RateLimiter
 from bridge.mail_source import MailSource
 from bridge.messages_source import MessagesSource
+from bridge.pdf_handler import (
+    init_pdf_handler,
+    handle_upload, handle_process, handle_status,
+    handle_download, handle_jobs, handle_attachments,
+)
 
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.toml"
 DATA_DB = PROJECT_ROOT / "data" / "bridge.db"
@@ -60,6 +66,18 @@ class AppContext:
                 "This may indicate an unsupported macOS version.")
 
         logger.info("Mail database accessible, schema valid")
+
+        cfg = self.settings
+        pdf_config = {
+            "pdf_inbox_dir":            cfg["pdf"]["inbox_dir"],
+            "pdf_unlocked_dir":         cfg["pdf"]["unlocked_dir"],
+            "xls_output_dir":           cfg["pdf"]["xls_output_dir"],
+            "bank_passwords_file":      cfg["pdf"]["bank_passwords_file"],
+            "attachment_seen_db":       cfg["pdf"]["attachment_seen_db"],
+            "attachment_lookback_days": cfg["pdf"]["attachment_lookback_days"],
+            "owner_mappings":           dict(cfg["owners"]) if "owners" in cfg else {},
+        }
+        init_pdf_handler(pdf_config, cfg["pdf"]["jobs_db"])
 
         if not self.messages.can_access():
             logger.warning(
@@ -121,6 +139,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok"})
             return
 
+        # PDF UI served unauthenticated (API calls within the page carry the token)
+        if path == "/pdf/ui":
+            ui_path = os.path.join(os.path.dirname(__file__), "static", "pdf_ui.html")
+            with open(ui_path, "rb") as f:
+                html = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+            return
+
         if not self._auth():
             return
 
@@ -179,6 +209,48 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return
 
+            if path.startswith("/pdf/status/"):
+                job_id = path.split("/pdf/status/")[1]
+                status, body = handle_status(job_id)
+                self._json(status, json.loads(body))
+                return
+
+            if path.startswith("/pdf/download/"):
+                job_id = path.split("/pdf/download/")[1]
+                status, data, filename = handle_download(job_id)
+                if status == 200:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                self._json(status, json.loads(data))
+                return
+
+            if path == "/pdf/jobs":
+                limit = int(params.get("limit", ["50"])[0])
+                status, body = handle_jobs(limit)
+                self._json(status, json.loads(body))
+                return
+
+            if path == "/pdf/attachments":
+                status, body = handle_attachments()
+                self._json(status, json.loads(body))
+                return
+
+            if path == "/pdf/ui":
+                ui_path = os.path.join(os.path.dirname(__file__), "static", "pdf_ui.html")
+                with open(ui_path, "rb") as f:
+                    html = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html)))
+                self.end_headers()
+                self.wfile.write(html)
+                return
+
             self._json(404, {"error": "Not found"})
 
         except Exception as e:
@@ -192,8 +264,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         try:
+            if path == "/pdf/upload":
+                length = int(self.headers.get("Content-Length", "0"))
+                request_body = self.rfile.read(length) if length > 0 else b""
+                content_type = self.headers.get("Content-Type", "")
+                status, body = handle_upload(request_body, content_type)
+                self._json(status, json.loads(body))
+                return
+
             data = self._read_json()
             if data is None:
+                return
+
+            if path == "/pdf/process":
+                status, body = handle_process(data)
+                self._json(status, json.loads(body))
                 return
 
             if path == "/mail/ack":

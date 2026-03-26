@@ -1,6 +1,6 @@
 # Agentic Mail Alert System — Build & Operations Guide
 
-**Version:** 1.2.0
+**Version:** 1.4.0
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase post-repair
 
@@ -26,16 +26,17 @@
 16. [Testing & Validation](#16-testing--validation)
 17. [Day-to-Day Operations](#17-day-to-day-operations)
 18. [Bridge API Reference](#18-bridge-api-reference)
-19. [Security Notes](#19-security-notes)
-20. [Known Limitations](#20-known-limitations)
-21. [Troubleshooting](#21-troubleshooting)
-22. [Version History](#22-version-history)
+19. [PDF Statement Processor](#19-pdf-statement-processor)
+20. [Security Notes](#20-security-notes)
+21. [Known Limitations](#21-known-limitations)
+22. [Troubleshooting](#22-troubleshooting)
+23. [Version History](#23-version-history)
 
 ---
 
 ## 1. What This System Does
 
-A **personal email monitoring and iMessage alert system** for macOS that:
+A **personal email monitoring, iMessage alert, and bank statement processing system** for macOS that:
 
 - Reads Apple Mail's local SQLite database
 - Classifies messages with a local Ollama model (primary) or Anthropic Claude (fallback)
@@ -43,6 +44,7 @@ A **personal email monitoring and iMessage alert system** for macOS that:
 - Sends iMessage alerts to your iPhone via Messages.app + AppleScript
 - Polls iMessage conversations for `agent:` commands from your device
 - Runs the host-sensitive bridge on macOS bare metal and the agent logic in Docker
+- Parses password-protected bank statement PDFs into structured Excel workbooks
 
 ### Alert categories
 
@@ -61,7 +63,6 @@ The system alerts on:
 
 - Reply to email
 - Modify mailboxes or move messages
-- Process attachments or PDFs
 - Browse websites
 - Use OpenAI or Gemini in the current production flow (those provider files are stubs)
 
@@ -92,6 +93,8 @@ The system alerts on:
 │  │ · Reads Messages.app SQLite DB            │  │
 │  │ · Sends iMessage via AppleScript          │  │
 │  │ · HTTP API with bearer auth               │  │
+│  │ · PDF processor endpoints (/pdf/*)        │  │
+│  │ · Web UI served at /pdf/ui                │  │
 │  └───────────────────────────────────────────┘  │
 │                                                 │
 │  ┌───────────────────────────────────────────┐  │
@@ -104,6 +107,8 @@ The system alerts on:
 │                                                 │
 │  Mail.app syncs → ~/Library/Mail/V*/…/          │
 │  Messages.app  → ~/Library/Messages/chat.db     │
+│  Bank PDFs     → data/pdf_inbox/                │
+│  XLS output    → output/xls/                    │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -115,6 +120,7 @@ The system alerts on:
 | Agent container | Restricted — communicates with bridge over HTTP with bearer auth |
 | Ollama | Host-local — not exposed beyond `0.0.0.0:11434` on the Mac |
 | iPhone | User-facing — commands must originate from `authorized_senders` |
+| PDF processor | Host-local — runs inside the bridge process, localhost only |
 
 ---
 
@@ -138,6 +144,18 @@ The system alerts on:
 - Bearer token auth on all bridge endpoints except `/healthz`
 - ACK-token checkpoint system (mail + commands)
 - LaunchAgent plists for Ollama, bridge, Mail.app, Docker agent
+- PDF statement processor (see §19)
+  - Password-protected PDF unlock (pikepdf + AppleScript fallback)
+  - Maybank Credit Card statement parser
+  - Maybank Consolidated Statement parser
+  - BCA Credit Card statement parser (year boundary fix for Dec/Jan crossover)
+  - BCA Savings (Tabungan) statement parser
+  - Owner detection module (`parsers/owner.py`) — maps customer name substrings to canonical owner labels (Gandrik / Helen)
+  - Auto-detection of bank/statement type from PDF content
+  - 3-layer parsing: pdfplumber tables → Python regex → Ollama LLM fallback
+  - Multi-owner XLS export: `{Bank}_{Owner}.xlsx` per bank/owner pair + flat `ALL_TRANSACTIONS.xlsx` with Owner column
+  - Mail.app attachment auto-scanner for bank PDFs
+  - Web UI at `http://127.0.0.1:9100/pdf/ui`
 
 ### Present but NOT integrated
 
@@ -146,9 +164,10 @@ The system alerts on:
 | `agent/app/providers/openai_provider.py` | Stub — raises `NotImplementedError` |
 | `agent/app/providers/gemini_provider.py` | Stub — raises `NotImplementedError` |
 
-### Known gap vs. config
+### Known gaps vs. config
 
-`max_commands_per_hour` exists in `settings.toml` but the current orchestrator code does not enforce a rolling-hour command limit.
+- `max_commands_per_hour` exists in `settings.toml` but the orchestrator does not enforce a rolling-hour command limit.
+- PDF processor parsing for CIMB Niaga and Permata Bank is not yet implemented (parsers/router.py returns `Unknown` for those banks).
 
 ---
 
@@ -157,7 +176,7 @@ The system alerts on:
 ### Hardware
 
 - Apple Silicon Mac (recommended), 16 GB RAM or more
-- Enough storage for: Mail cache, Ollama model, Docker image, logs
+- Enough storage for: Mail cache, Ollama model, Docker image, logs, PDF inbox, XLS output
 
 ### Software
 
@@ -190,6 +209,20 @@ Verify:
 ```
 
 > **Do not install Miniconda or the python.org PKG installer alongside Homebrew Python.** Both inject themselves ahead of Homebrew in `PATH` and break the bridge. Homebrew is the only Python manager needed here.
+
+### PDF processor dependencies
+
+Install using Homebrew's pip — **do not use `--break-system-packages`**, that flag is for Debian/Ubuntu and is not needed on Homebrew Python:
+
+```bash
+/opt/homebrew/bin/pip3 install pikepdf pdfplumber openpyxl
+```
+
+Verify:
+
+```bash
+/opt/homebrew/bin/python3 -c "import pikepdf, pdfplumber, openpyxl; print('OK')"
+```
 
 ### Ollama model
 
@@ -268,20 +301,47 @@ agentic-ai/
 │   ├── state.py                  # SQLite state DB (bridge.db)
 │   ├── rate_limit.py             # Sliding-window rate limiter
 │   ├── mail_source.py            # Mail.app SQLite adapter
-│   └── messages_source.py        # Messages.app SQLite adapter + AppleScript sender
+│   ├── messages_source.py        # Messages.app SQLite adapter + AppleScript sender
+│   ├── pdf_handler.py            # PDF processor endpoints (/pdf/*)
+│   ├── pdf_unlock.py             # pikepdf unlock + AppleScript fallback
+│   ├── attachment_scanner.py     # Mail.app attachment watcher
+│   └── static/
+│       └── pdf_ui.html           # Web UI for PDF upload/processing/download
+├── parsers/                      # Bank statement parsers (host Python)
+│   ├── __init__.py
+│   ├── base.py                   # Transaction, AccountSummary, StatementResult dataclasses
+│   ├── router.py                 # Auto-detect bank + statement type
+│   ├── owner.py                  # Customer name → owner label mapping (Gandrik / Helen)
+│   ├── maybank_cc.py             # Maybank credit card statement parser
+│   ├── maybank_consol.py         # Maybank consolidated statement parser
+│   ├── bca_cc.py                 # BCA credit card statement parser
+│   └── bca_savings.py            # BCA savings (Tabungan) statement parser
+├── exporters/                    # XLS export
+│   ├── __init__.py
+│   └── xls_writer.py             # openpyxl writer — {Bank}_{Owner}.xlsx + ALL_TRANSACTIONS.xlsx
 ├── config/
 │   └── settings.toml             # All runtime configuration
 ├── data/                         # Runtime SQLite DBs (gitignored)
 │   ├── agent.db
-│   └── bridge.db
+│   ├── bridge.db
+│   ├── pdf_jobs.db               # PDF processing job queue
+│   ├── pdf_inbox/                # Uploaded PDFs awaiting processing
+│   ├── pdf_unlocked/             # Password-removed PDF copies
+│   └── seen_attachments.db       # Tracks already-scanned Mail.app attachments
 ├── logs/                         # Log files (gitignored)
+├── output/
+│   └── xls/                      # Exported XLS files (gitignored)
+│       ├── Maybank_Gandrik.xlsx  # One file per bank per owner, accumulates over time
+│       ├── BCA_Gandrik.xlsx
+│       └── ALL_TRANSACTIONS.xlsx # Flat table — all banks, all owners, Owner column
 ├── scripts/
 │   ├── post_reboot_check.sh      # Post-boot health check
 │   ├── tahoe_validate.sh         # Mail schema validator
 │   ├── run_bridge.sh             # Bridge startup wrapper
 │   └── start_agent.sh            # Docker agent startup wrapper (waits for Docker Desktop)
-├── secrets/                      # Auth token (gitignored)
-│   └── bridge.token
+├── secrets/                      # Auth tokens (gitignored)
+│   ├── bridge.token
+│   └── banks.toml                # Bank PDF passwords (gitignored)
 ├── .env                          # API keys (gitignored)
 └── docker-compose.yml
 ```
@@ -402,6 +462,25 @@ The agent will:
 3. Send a startup iMessage: `🤖 Agent started`
 4. Enter its main loop (mail scan every 30 min, command scan every 30 s)
 
+### Step 11 — Set up the PDF processor
+
+```bash
+# Install Python dependencies
+/opt/homebrew/bin/pip3 install pikepdf pdfplumber openpyxl
+
+# Create required directories
+mkdir -p ~/agentic-ai/data/pdf_inbox
+mkdir -p ~/agentic-ai/data/pdf_unlocked
+mkdir -p ~/agentic-ai/output/xls
+
+# Create bank passwords file from template
+cp secrets/banks.toml.template secrets/banks.toml
+chmod 600 secrets/banks.toml
+nano secrets/banks.toml   # fill in your bank PDF passwords
+```
+
+Then open the PDF UI at: **http://127.0.0.1:9100/pdf/ui**
+
 ---
 
 ## 7. Configuration Reference
@@ -489,6 +568,31 @@ alert_on_categories = [
 ]
 ```
 
+### `[pdf]`
+
+| Key | Default | Description |
+|---|---|---|
+| `inbox_dir` | `"data/pdf_inbox"` | Uploaded PDFs awaiting processing |
+| `unlocked_dir` | `"data/pdf_unlocked"` | Password-removed PDF copies |
+| `xls_output_dir` | `"output/xls"` | Exported XLS files |
+| `bank_passwords_file` | `"secrets/banks.toml"` | Bank PDF passwords (gitignored) |
+| `jobs_db` | `"data/pdf_jobs.db"` | Processing job queue |
+| `attachment_seen_db` | `"data/seen_attachments.db"` | Tracks scanned Mail attachments |
+| `attachment_lookback_days` | `60` | How far back to scan Mail attachments |
+| `parser_llm_model` | `"llama3.2:3b"` | Ollama model for Layer 3 parsing fallback |
+
+### `[owners]`
+
+Maps customer name substrings found in PDFs to canonical owner labels used for XLS file naming and the `Owner` column in `ALL_TRANSACTIONS.xlsx`. Matching is case-insensitive, first match wins.
+
+```toml
+[owners]
+"Emanuel"    = "Gandrik"
+"Dian Pratiwi" = "Helen"
+```
+
+Add new entries here when new account holders are added. The fallback label when no match is found is `"Unknown"`.
+
 ---
 
 ## 8. Bridge Service
@@ -501,15 +605,17 @@ alert_on_categories = [
 - Serve HTTP API endpoints to the Docker agent
 - Send iMessage alerts via AppleScript
 - Persist ACK checkpoints and request logs in `data/bridge.db`
+- Serve PDF processor endpoints and web UI (see §19)
 
 ### Startup sequence
 
 1. Load settings, validate required sections
 2. Load auth token from file
 3. Initialize `bridge.db` (checkpoints + request log tables)
-4. Initialize `MailSource` — discover Mail DB, verify schema
-5. Initialize `MessagesSource` — open `chat.db`
-6. Start HTTP server on configured host:port
+4. Initialize `pdf_jobs.db` (PDF processing job queue)
+5. Initialize `MailSource` — discover Mail DB, verify schema
+6. Initialize `MessagesSource` — open `chat.db`
+7. Start HTTP server on configured host:port
 
 **If Mail DB is inaccessible or schema validation fails, the bridge exits immediately.** Check `logs/bridge-launchd-err.log` for the error.
 
@@ -526,6 +632,22 @@ alert_on_categories = [
 ```bash
 cd ~/agentic-ai
 PYTHONPATH=$(pwd) python3 -m bridge.server
+```
+
+### ⚠️ Reset procedure — always stop bridge before deleting DBs
+
+Deleting `bridge.db` while the bridge is running causes it to crash on the next request. Always follow this order:
+
+```bash
+cd ~/agentic-ai
+docker compose down               # stop agent first
+# (bridge stays running — that's fine, just don't delete DBs yet)
+# To also restart bridge cleanly:
+launchctl unload ~/Library/LaunchAgents/com.agentic.bridge.plist
+rm -f data/agent.db data/bridge.db
+launchctl load ~/Library/LaunchAgents/com.agentic.bridge.plist
+sleep 3
+docker compose up -d
 ```
 
 ---
@@ -1034,8 +1156,6 @@ Create `~/Library/LaunchAgents/com.agentic.agent.plist`:
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- One-shot: docker compose up -d exits after starting the container. -->
-    <!-- KeepAlive is false — the container manages its own restarts.       -->
     <key>KeepAlive</key>
     <false/>
 
@@ -1048,14 +1168,11 @@ Create `~/Library/LaunchAgents/com.agentic.agent.plist`:
 </plist>
 ```
 
-> `scripts/start_agent.sh` polls `docker info` every 5 seconds until Docker Desktop is ready (max 120 s), then runs `docker compose up -d`. This avoids a race condition where Docker Desktop hasn't fully started at login time.
-
 ---
 
 ### Load the LaunchAgents
 
 ```bash
-# Ensure log directory exists
 mkdir -p ~/agentic-ai/logs
 
 launchctl load ~/Library/LaunchAgents/com.agentic.ollama.plist
@@ -1063,7 +1180,6 @@ launchctl load ~/Library/LaunchAgents/com.agentic.bridge.plist
 launchctl load ~/Library/LaunchAgents/com.agentic.mailapp.plist
 launchctl load ~/Library/LaunchAgents/com.agentic.agent.plist
 
-# Verify all are registered (bridge and ollama should show a PID)
 launchctl list | grep agentic
 ```
 
@@ -1112,6 +1228,23 @@ python3 --version
 python3 -c "import tomllib, sqlite3, http.server, signal, re; print('OK')"
 ```
 
+### Validate PDF processor dependencies
+
+```bash
+/opt/homebrew/bin/python3 -c "import pikepdf, pdfplumber, openpyxl; print('OK')"
+```
+
+### Test the parser directly
+
+```bash
+cd ~/agentic-ai
+/opt/homebrew/bin/python3 -c "
+from parsers.router import detect_bank_and_type
+bank, stype = detect_bank_and_type('path/to/statement.pdf')
+print(f'Detected: {bank} / {stype}')
+"
+```
+
 ### Check Mail DB availability
 
 ```bash
@@ -1140,9 +1273,6 @@ curl -s http://127.0.0.1:9100/healthz | python3 -m json.tool
 # Authenticated health
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/health | python3 -m json.tool
 
-# Schema debug
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/mail/schema | python3 -m json.tool
-
 # Fetch pending mail
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9100/mail/pending?limit=2" | python3 -m json.tool
 
@@ -1152,6 +1282,9 @@ curl -s -X POST \
   -H "Content-Type: application/json" \
   -d '{"text":"Bridge test alert from curl"}' \
   http://127.0.0.1:9100/alerts/send | python3 -m json.tool
+
+# Open the PDF UI
+open http://127.0.0.1:9100/pdf/ui
 ```
 
 ### Test Ollama
@@ -1173,14 +1306,6 @@ docker compose ps
 docker compose logs --tail 50 mail-agent
 ```
 
-### Verify Docker → host Ollama
-
-```bash
-docker run --rm --add-host=host.docker.internal:host-gateway \
-  curlimages/curl:latest \
-  curl -s http://host.docker.internal:11434/api/tags
-```
-
 ---
 
 ## 17. Day-to-Day Operations
@@ -1190,13 +1315,13 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
 ```bash
 TOKEN=$(cat ~/agentic-ai/secrets/bridge.token)
 
-# Bridge liveness (no auth)
+# Bridge liveness
 curl -s http://127.0.0.1:9100/healthz
 
 # Bridge health (with auth)
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/health | python3 -m json.tool
 
-# Agent health stats from inside the container
+# Agent health stats
 docker exec mail-agent python3 -c \
   "import urllib.request,json; print(json.dumps(json.loads(urllib.request.urlopen('http://127.0.0.1:8080').read()),indent=2))"
 ```
@@ -1207,13 +1332,13 @@ docker exec mail-agent python3 -c \
 # Bridge application log
 tail -50 ~/agentic-ai/logs/bridge.log
 
-# Bridge launchd startup errors (most useful after reboot failures)
+# Bridge launchd startup errors
 cat ~/agentic-ai/logs/bridge-launchd-err.log
 
 # Agent Docker logs
 cd ~/agentic-ai
 docker compose logs --tail 50 mail-agent
-docker compose logs -f mail-agent      # follow in real time
+docker compose logs -f mail-agent
 ```
 
 ### Restart services
@@ -1227,44 +1352,39 @@ docker compose restart mail-agent
 launchctl unload ~/Library/LaunchAgents/com.agentic.bridge.plist
 launchctl load   ~/Library/LaunchAgents/com.agentic.bridge.plist
 
-# Re-run the agent startup script (if container stopped and Docker is running)
-launchctl unload ~/Library/LaunchAgents/com.agentic.agent.plist
-launchctl load   ~/Library/LaunchAgents/com.agentic.agent.plist
-
 # Check all LaunchAgent statuses
 launchctl list | grep agentic
 ```
 
-### Check Mail.app is running
-
-```bash
-pgrep -l Mail
-```
-
-If Mail is not running:
-
-```bash
-open -a Mail
-```
-
-### Rebuild agent after code changes
-
-```bash
-cd ~/agentic-ai
-docker compose build --no-cache
-docker compose up -d
-```
-
 ### Reset all runtime state
 
-> ⚠️ This clears all mail and command history. The agent will re-process mail from the `initial_lookback_days` window.
+> ⚠️ **Always stop the agent and bridge before deleting DBs.** Deleting `bridge.db` while the bridge is running causes it to drop connections and crash. See also §8 reset procedure.
 
 ```bash
 cd ~/agentic-ai
 docker compose down
+launchctl unload ~/Library/LaunchAgents/com.agentic.bridge.plist
 rm -f data/agent.db data/bridge.db
+launchctl load ~/Library/LaunchAgents/com.agentic.bridge.plist
+sleep 3
 docker compose up -d
 ```
+
+To change the lookback window before resetting:
+
+```bash
+# Edit config/settings.toml first:
+# initial_lookback_days = 15   ← set to desired days
+```
+
+### Check PDF processing jobs
+
+```bash
+TOKEN=$(cat ~/agentic-ai/secrets/bridge.token)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/pdf/jobs | python3 -m json.tool
+```
+
+Or open the web UI: **http://127.0.0.1:9100/pdf/ui**
 
 ---
 
@@ -1280,7 +1400,7 @@ Authorization: Bearer <token>
 
 The token is the contents of `secrets/bridge.token`.
 
-### Endpoints
+### Mail agent endpoints
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -1293,13 +1413,23 @@ The token is the contents of `secrets/bridge.token`.
 | POST | `/commands/ack` | ✓ | Advance commands ACK checkpoint |
 | POST | `/alerts/send` | ✓ | Send iMessage alert (rate limited) |
 
+### PDF processor endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/pdf/upload` | ✓ | Upload PDF file (multipart/form-data, fields: `file`, `password`) |
+| POST | `/pdf/process` | ✓ | Process a queued job: `{"job_id": "...", "password": "..."}` |
+| GET | `/pdf/status/<job_id>` | ✓ | Job progress and result |
+| GET | `/pdf/download/<job_id>` | ✓ | Download produced XLS file |
+| GET | `/pdf/jobs?limit=N` | ✓ | List recent jobs |
+| GET | `/pdf/attachments` | ✓ | List auto-detected bank PDFs from Mail.app |
+| GET | `/pdf/ui` | None | Web UI (HTML) |
+
 ### ACK payload
 
 ```json
 { "ack_token": "12345" }
 ```
-
-The `ack_token` is the string returned in the `next_ack_token` field of the previous `/mail/pending` or `/commands/pending` response.
 
 ### Alert send payload
 
@@ -1313,7 +1443,141 @@ The `ack_token` is the string returned in the `next_ack_token` field of the prev
 
 ---
 
-## 19. Security Notes
+## 19. PDF Statement Processor
+
+### Overview
+
+The PDF processor is built into the bridge (runs on the Mac host, not in Docker). It converts password-protected bank statement PDFs into structured Excel workbooks using a 3-layer parsing pipeline.
+
+### Supported banks and statement types
+
+| Bank | Statement type | Parser file | Source | Owner detection |
+|---|---|---|---|---|
+| Maybank | Credit card (Tagihan Kartu Kredit) | `parsers/maybank_cc.py` | Email `@maybank.co.id` | Via customer name |
+| Maybank | Consolidated (Laporan Konsolidasi) | `parsers/maybank_consol.py` | Email `@maybank.co.id` | Via customer name |
+| BCA | Credit card (Rekening Kartu Kredit) | `parsers/bca_cc.py` | Email `@klikbca.com` (password-protected) | Via customer name |
+| BCA | Savings (Rekening Tahapan) | `parsers/bca_savings.py` | Manual upload / watched folder | Via customer name |
+| Permata Bank | — | Not yet implemented | — | — |
+| CIMB Niaga | — | Not yet implemented | — | — |
+
+Detection is automatic — the router (`parsers/router.py`) reads the first page of any PDF and identifies bank and statement type from text signatures. No manual selection required.
+
+#### BCA parser notes
+
+**BCA Credit Card** (`bca_cc.py`):
+- Date format: `DD-MON` (e.g. `15-MAR`); year derived from `TANGGAL REKENING` header
+- Year boundary fix: if transaction month > report month, year = report year − 1 (handles Dec/Jan crossover)
+- Number format: dot thousands, no decimal (e.g. `1.791.583` = IDR 1,791,583)
+- Detection signatures: `REKENING KARTU KREDIT` + `TAGIHAN BARU` + `KUALITAS KREDIT`
+
+**BCA Savings** (`bca_savings.py`):
+- Date format: `DD/MM` + year from `PERIODE` header
+- Number format: Western (e.g. `30,000,000.00`)
+- Debit rows identified by `DB` suffix
+- Multi-line transactions: continuation lines collected and merged into description
+- Totals verified against statement summary
+
+### 3-layer parsing pipeline
+
+Each bank parser applies three layers in order:
+
+1. **pdfplumber tables** — extracts structured table data directly from PDF geometry. Handles all header blocks, asset summaries, and properly-formatted transaction tables.
+2. **Python regex** — applied to raw text for rows where pdfplumber merges cells (common in CC statement transaction lists). Handles multi-currency rows, merged currency codes (e.g. `COUSD`, `KOTID`), and credit indicators (`CR` suffix).
+3. **Ollama LLM fallback** (`llama3.2:3b`) — invoked only for individual rows that both Layer 1 and Layer 2 fail to parse. Returns structured JSON with injection defense in the prompt.
+
+### PDF unlocking
+
+The `bridge/pdf_unlock.py` module tries two strategies in order:
+
+1. **pikepdf** — pure Python, handles AES-128/AES-256/RC4 encryption. Fast, no UI required.
+2. **AppleScript via Quartz** — fallback for edge cases pikepdf cannot handle. Uses the Quartz PDFDocument API to unlock and re-save. Password is passed via a temp file, never interpolated into script strings.
+
+### Bank passwords
+
+Passwords are stored in `secrets/banks.toml` (gitignored, `chmod 600`):
+
+```toml
+[passwords]
+maybank     = "your_maybank_pdf_password"
+cimb_niaga  = ""
+permata_bank = ""
+bca         = ""
+```
+
+Keys are lowercase bank names matching what the parser router returns. The password can also be supplied per-upload via the web UI or the `/pdf/upload` API — this takes precedence over `banks.toml`.
+
+### Owner detection
+
+`parsers/owner.py` maps the customer name found in a PDF to a canonical owner label. Matching is case-insensitive substring, first match wins. The mapping is configured in `[owners]` in `settings.toml` and passed into `export()` via `pdf_config["owner_mappings"]`.
+
+| Customer name (from PDF) | Owner label |
+|---|---|
+| Contains "Emanuel" | Gandrik |
+| Contains "Dian Pratiwi" | Helen |
+| No match | Unknown |
+
+### XLS output format
+
+Output files are in `output/xls/`. The naming scheme is `{Bank}_{Owner}.xlsx` (e.g. `Maybank_Gandrik.xlsx`, `BCA_Helen.xlsx`). Each file accumulates over time — never replaced, only extended. A separate `ALL_TRANSACTIONS.xlsx` collects every transaction across all banks and owners into a single flat table.
+
+**Sheet naming inside per-person-per-bank files:** The sheet name is derived from the statement's **print date** (`Tgl. Cetak`), not the transaction date range. This ensures the CC statement for the March billing cycle is always filed under `Mar 2026` regardless of when the oldest transaction occurred.
+
+| Sheet suffix | Statement type |
+|---|---|
+| `{Mon YYYY} CC` | Credit card statement |
+| `{Mon YYYY} Savings` | Savings / tabungan statement |
+| `{Mon YYYY} Consol` | Consolidated statement |
+
+Each sheet contains the transaction table + account summary for that period.
+
+**ALL_TRANSACTIONS.xlsx columns:**
+
+```
+Owner | Month | Bank | Statement Type | Tgl. Transaksi | Tgl. Tercatat | Keterangan
+Currency | Jumlah Valuta Asing | Kurs (RP) | Jumlah (IDR) | Tipe | Saldo (IDR)
+Nomor Rekening/Kartu
+```
+
+The `Owner` column is first, making it easy to filter by account holder. Multi-currency design: every foreign-currency transaction preserves the original amount (`Jumlah Valuta Asing`) and the exchange rate from the statement (`Kurs (RP)`), alongside the IDR equivalent (`Jumlah (IDR)`). The base currency is always IDR. Exchange rates come from the statement itself — no live rate lookup.
+
+`export()` returns a `(per_person_path, all_tx_path)` tuple.
+
+### Web UI
+
+Access at **http://127.0.0.1:9100/pdf/ui** (localhost only; SSH tunnel for remote access).
+
+Three tabs:
+- **Upload** — drag-and-drop or file picker, optional per-file password field, processes all files in one click
+- **Jobs** — lists all processing jobs with status badges, download button for completed XLS
+- **Mail Attachments** — scans Mail.app attachments folder for new bank PDFs, lets you queue them for processing with one click
+
+The UI uses the same bearer token as the rest of the bridge API. On first load it prompts for the token and stores it in `localStorage`.
+
+### Attachment scanner
+
+`bridge/attachment_scanner.py` walks `~/Library/Mail/V*/` looking for PDF attachments from known bank domains:
+
+| Domain | Bank |
+|---|---|
+| `maybank.co.id` | Maybank |
+| `cimbniaga.co.id` | CIMB Niaga |
+| `permatabank.co.id` | Permata Bank |
+| `bca.co.id` / `klikbca.com` | BCA |
+
+Already-scanned attachments are recorded in `data/seen_attachments.db` so repeated scans don't re-queue the same file. Lookback window is configurable via `attachment_lookback_days` in `settings.toml`.
+
+### Adding a new bank parser
+
+1. Create `parsers/<bank_slug>.py` implementing `can_parse(text_page1: str) -> bool` and `parse(pdf_path: str, ollama_client=None) -> StatementResult`
+2. Import and register it in `parsers/router.py`
+3. Add the bank password key to `secrets/banks.toml`
+4. Add the bank domain to `BANK_DOMAINS` in `bridge/attachment_scanner.py`
+
+Use `parsers/base.py` dataclasses (`Transaction`, `AccountSummary`, `StatementResult`) and helpers (`parse_idr_amount`, `parse_date_ddmmyyyy`) — do not reimplement them.
+
+---
+
+## 20. Security Notes
 
 1. **Bridge binds to `127.0.0.1` only** — not reachable from the network
 2. **All API endpoints** except `/healthz` require bearer auth checked with `hmac.compare_digest` (timing-safe)
@@ -1324,16 +1588,19 @@ The `ack_token` is the string returned in the `next_ack_token` field of the prev
 7. **Agent container**: non-root user (`agentuser`), `no-new-privileges`, 2 GB memory cap
 8. **Ollama exposed on `0.0.0.0:11434`** for Docker reachability — consider firewall rules if on a shared network
 9. **Full Disk Access** granted to the Python binary allows all scripts run by that binary to access protected directories. For tighter security, wrap the bridge in a dedicated `.app` bundle and grant FDA to only that bundle
-10. **Keep secrets restricted:**
+10. **Bank passwords** stored in `secrets/banks.toml` (gitignored, `chmod 600`). Never stored in `settings.toml` or `.env`.
+11. **PDF unlock** passes passwords via temp file to AppleScript — never interpolated into script strings
+12. **Keep secrets restricted:**
 
 ```bash
 chmod 600 ~/agentic-ai/.env
 chmod 600 ~/agentic-ai/secrets/bridge.token
+chmod 600 ~/agentic-ai/secrets/banks.toml
 ```
 
 ---
 
-## 20. Known Limitations
+## 21. Known Limitations
 
 | Limitation | Detail |
 |---|---|
@@ -1344,12 +1611,14 @@ chmod 600 ~/agentic-ai/secrets/bridge.token
 | Command rate limit | `max_commands_per_hour` in config is not enforced by current orchestrator code |
 | TCC / launch context | Bridge must run under launchd with FDA; does not inherit Terminal TCC grants |
 | System Python | macOS system Python 3.9 lacks `tomllib` and cannot run the bridge; use Homebrew `python@3.13` only |
-| Attachments | `attachments` field always returns an empty array — not implemented |
+| Attachments (mail) | `attachments` field in mail items always returns an empty array — not implemented in mail agent |
 | Single instance | No coordination for running multiple bridge or agent instances |
+| PDF parsers | Maybank CC, Maybank Consolidated, BCA CC, BCA Savings implemented; CIMB Niaga and Permata Bank parsers return `Unknown` |
+| PDF processor threading | PDF jobs run synchronously in the bridge's request thread — large PDFs may delay other bridge responses briefly |
 
 ---
 
-## 21. Troubleshooting
+## 22. Troubleshooting
 
 ### Bridge won't start after reboot
 
@@ -1389,6 +1658,26 @@ Common causes:
 - Bridge is down — fix the bridge first
 - `data/agent.db` is corrupted — `rm -f data/agent.db`, restart container
 - `ANTHROPIC_API_KEY` env var malformed — check `.env` file format
+
+### `httpx.RemoteProtocolError: Server disconnected without sending a response`
+
+The bridge crashed mid-request. Most common cause: `bridge.db` was deleted while the bridge was still running.
+
+```bash
+# Check if bridge is alive
+curl -s http://127.0.0.1:9100/healthz
+
+# If not responding, restart it
+launchctl unload ~/Library/LaunchAgents/com.agentic.bridge.plist
+launchctl load   ~/Library/LaunchAgents/com.agentic.bridge.plist
+sleep 3
+
+# Then restart the agent
+cd ~/agentic-ai
+docker compose restart mail-agent
+```
+
+> ⚠️ **Prevention:** always follow the reset procedure in §8 — stop agent and bridge *before* deleting any DB files.
 
 ### `sqlite3.OperationalError: no such table`
 
@@ -1431,9 +1720,66 @@ docker compose up -d
 3. Confirm `allow_same_account_commands = true` if sending from yourself
 4. Check agent logs for command processing output
 
+### PDF processing fails
+
+1. Check job status: `curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/pdf/jobs | python3 -m json.tool`
+2. If status is `error`, the `error` field contains the failure reason
+3. Common causes:
+   - Wrong password → `UnlockError: Both unlock strategies failed`
+   - pikepdf not installed → `ModuleNotFoundError: No module named 'pikepdf'` — run `/opt/homebrew/bin/pip3 install pikepdf pdfplumber openpyxl`
+   - Unknown bank → `UnknownStatementError` — parser not yet implemented for that bank
+4. Unlocked PDF copies are saved to `data/pdf_unlocked/` and can be inspected manually
+
 ---
 
-## 22. Version History
+## 23. Version History
+
+### v1.4.0
+
+- Added: `parsers/bca_cc.py` — BCA Credit Card (Rekening Kartu Kredit) parser
+  - Date format: `DD-MON`, year from `TANGGAL REKENING` header
+  - Year boundary fix for Dec/Jan crossover (`tx_month > report_month → year - 1`)
+  - Number format: dot thousands, no decimal (`1.791.583` = IDR 1,791,583)
+  - Detection: `REKENING KARTU KREDIT` + `TAGIHAN BARU` + `KUALITAS KREDIT`
+  - Source: email from `@klikbca.com`, password-protected
+- Added: `parsers/bca_savings.py` — BCA Savings (Rekening Tahapan) parser
+  - Date format: `DD/MM` + year from `PERIODE` header
+  - Number format: Western (`30,000,000.00`); debit rows end with `DB` suffix
+  - Multi-line transaction support: continuation lines merged into description
+  - Totals verified against statement summary
+- Added: `parsers/owner.py` — owner detection module (substring match, case-insensitive, first match wins; default: `Emanuel` → Gandrik, `Dian Pratiwi` → Helen)
+- Changed: `parsers/router.py` — BCA detection added before Maybank in router chain
+- Changed: `exporters/xls_writer.py` — redesigned for multi-owner output
+  - Output files renamed: `{Bank}_{Owner}.xlsx` (e.g. `Maybank_Gandrik.xlsx`, `BCA_Helen.xlsx`)
+  - `ALL_TRANSACTIONS.xlsx` — Owner column added as first column
+  - Sheet naming: `{Mon YYYY} CC` / `{Mon YYYY} Savings` / `{Mon YYYY} Consol`
+  - `export()` now returns `(per_person_path, all_tx_path)` tuple instead of a single path
+- Changed: `bridge/pdf_handler.py` — `_run_job()` passes `owner_mappings` from `_config` into `export()`
+- Changed: `bridge/server.py` — `pdf_config` dict includes `owner_mappings` loaded from `cfg["owners"]`
+- Added: `[owners]` section to `config/settings.toml`
+- Fixed: `/pdf/ui` now served without authentication so a browser can load the page directly; API calls within the UI still carry the bearer token
+
+### v1.3.0
+
+- Added: PDF statement processor integrated into bridge (§19)
+  - `bridge/pdf_handler.py` — `/pdf/*` endpoints
+  - `bridge/pdf_unlock.py` — pikepdf + AppleScript fallback unlock
+  - `bridge/attachment_scanner.py` — Mail.app attachment watcher
+  - `bridge/static/pdf_ui.html` — web UI at `/pdf/ui`
+  - `parsers/` — bank statement parser framework
+  - `parsers/maybank_cc.py` — Maybank credit card statement (3-layer: pdfplumber + regex + Ollama)
+  - `parsers/maybank_consol.py` — Maybank consolidated statement (3-layer)
+  - `parsers/router.py` — auto-detection of bank and statement type
+  - `parsers/base.py` — `Transaction`, `AccountSummary`, `StatementResult` dataclasses
+  - `exporters/xls_writer.py` — openpyxl export, one file per bank, one sheet per month
+- Added: `secrets/banks.toml` for bank PDF passwords (separate from bridge token, gitignored)
+- Added: `[pdf]` section to `config/settings.toml`
+- Added: `output/xls/` output directory (gitignored)
+- Added: Sheet naming uses print date (`Tgl. Cetak`) not transaction date range — CC statement for March billing cycle is always filed under `Mar 2026`
+- Added: `ALL_TRANSACTIONS` sheet in XLS — flat multi-currency table suitable as source for future PWA wealth management app
+- Added: PDF processor dependencies: `pikepdf`, `pdfplumber`, `openpyxl` (install via Homebrew pip, no `--break-system-packages` needed)
+- Fixed: Reset procedure documented — bridge.db must not be deleted while bridge is running; always stop services in order (agent → bridge → delete → start bridge → start agent)
+- Fixed: §1 updated — PDF attachment processing is now implemented (removed from "What it does NOT do")
 
 ### v1.2.0
 
@@ -1475,4 +1821,4 @@ docker compose up -d
 
 ---
 
-*Guide last updated 2026-03-24 · validated against checked-in codebase*
+*Guide last updated 2026-03-26 · v1.4.0 · validated against checked-in codebase*

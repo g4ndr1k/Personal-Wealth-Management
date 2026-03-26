@@ -33,3 +33,11 @@ docker-compose.override.yml
 # Editor dirs
 .idea/
 .vscode/
+
+# PDF processor
+secrets/banks.toml
+data/pdf_inbox/
+data/pdf_unlocked/
+data/pdf_jobs.db
+data/seen_attachments.db
+output/xls/
