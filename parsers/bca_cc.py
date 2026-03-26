@@ -105,9 +105,9 @@ def parse(pdf_path: str, ollama_client=None) -> StatementResult:
         product_name="BCA Kartu Kredit",
         account_number=card_number,
         currency="IDR",
-        balance=total_bill,
+        closing_balance=total_bill,
+        credit_limit=credit_limit,
         extra={
-            "credit_limit": credit_limit,
             "min_payment": min_payment,
             "due_date": due_date,
         }
@@ -119,7 +119,7 @@ def parse(pdf_path: str, ollama_client=None) -> StatementResult:
         customer_name=customer_name,
         period_start=period_start,
         period_end=period_end,
-        report_date=report_date,
+        print_date=report_date,
         accounts=accounts,
         transactions=transactions,
         exchange_rates={},
@@ -259,10 +259,11 @@ def _parse_transactions(text: str, card_number: str, report_year: int, report_mo
                     txns.append(Transaction(
                         date_transaction="", date_posted=None,
                         description="Saldo Sebelumnya",
-                        debit_original=amt, credit_original=None,
-                        amount_idr=amt, currency="IDR",
+                        currency="IDR",
                         foreign_amount=None, exchange_rate=None,
-                        balance_idr=None, is_credit=False,
+                        amount_idr=amt,
+                        tx_type="Debit",
+                        balance=None,
                         account_number=card_number,
                     ))
             continue
@@ -284,14 +285,12 @@ def _parse_transactions(text: str, card_number: str, report_year: int, report_mo
             date_transaction=date_tx,
             date_posted=date_post,
             description=desc.strip(),
-            debit_original=None if is_credit else amount,
-            credit_original=amount if is_credit else None,
-            amount_idr=amount,
             currency="IDR",
             foreign_amount=None,
             exchange_rate=None,
-            balance_idr=None,
-            is_credit=is_credit,
+            amount_idr=amount,
+            tx_type="Credit" if is_credit else "Debit",
+            balance=None,
             account_number=card_number,
         ))
 

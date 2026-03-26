@@ -26,7 +26,9 @@ log = logging.getLogger(__name__)
 BANK_DOMAINS = {
     "maybank.co.id": "Maybank",
     "cimbniaga.co.id": "CIMB Niaga",
-    "permatabank.co.id": "Permata Bank",
+    "permatabank.co.id": "Permata",
+    "permatabank.com": "Permata",
+    "permata.co.id": "Permata",
     "bca.co.id": "BCA",
     "klikbca.com": "BCA",
 }
@@ -161,7 +163,7 @@ class AttachmentScanner:
         if "cimb" in filename:
             return "CIMB Niaga"
         if "permata" in filename:
-            return "Permata Bank"
+            return "Permata"
         if "bca" in filename or "klikbca" in filename:
             return "BCA"
 

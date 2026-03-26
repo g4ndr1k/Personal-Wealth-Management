@@ -1,5 +1,5 @@
-"""Abstract base class for all bank statement parsers."""
-from abc import ABC, abstractmethod
+"""Base dataclasses shared by all bank statement parsers."""
+from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 import re
@@ -7,59 +7,77 @@ import re
 
 @dataclass
 class Transaction:
-    """A single transaction row — works for both savings and CC."""
-    date_transaction: str          # DD/MM/YYYY or DD-MM-YY
-    date_posted: Optional[str]     # DD-MM-YY (CC only), None for savings
+    """A single transaction row — works for CC, savings, and consolidated."""
+    date_transaction: str               # DD/MM/YYYY, or "" for synthetic rows
+    date_posted: Optional[str]          # DD/MM/YYYY (CC only), None for savings
     description: str
-    debit_original: Optional[float]   # In original currency (None if credit)
-    credit_original: Optional[float]  # In original currency (None if debit)
-    amount_idr: float              # Always in IDR (converted if foreign)
-    currency: str                  # IDR, USD, SGD, TWD, etc.
-    foreign_amount: Optional[float]  # Amount in original currency if foreign
-    exchange_rate: Optional[float]   # Rate used for conversion
-    balance_idr: Optional[float]   # Running balance (savings only)
-    is_credit: bool                # True = money in, False = money out
-    account_number: Optional[str]  # Source account/card number
-    notes: str = ""
+    currency: str                       # ISO code: IDR, USD, SGD, …
+    foreign_amount: Optional[float]     # Amount in original currency (None if IDR only)
+    exchange_rate: Optional[float]      # IDR rate used for conversion
+    amount_idr: float                   # Always in IDR (converted if foreign)
+    tx_type: str                        # "Credit" or "Debit"
+    balance: Optional[float]            # Running balance (savings/koran only)
+    account_number: str                 # Card or account number ("" if unknown)
+    owner: str = ""                     # Derived owner label (Gandrik, Helen, …)
 
 
 @dataclass
 class AccountSummary:
-    """Summary block for one account (savings/investment/CC)."""
+    """Summary block for one account (savings / CC / investment)."""
     product_name: str
     account_number: Optional[str]
     currency: str
-    balance: Optional[float]
-    extra: dict = field(default_factory=dict)  # Extra fields (units, market value, etc.)
+    closing_balance: float
+    opening_balance: float = 0.0
+    total_debit: float = 0.0
+    total_credit: float = 0.0
+    print_date: Optional[str] = None    # DD/MM/YYYY
+    period_start: Optional[str] = None  # DD/MM/YYYY
+    period_end: Optional[str] = None    # DD/MM/YYYY
+    credit_limit: Optional[float] = None
+    extra: dict = field(default_factory=dict)  # Flexible bag for consolidated statements
 
 
 @dataclass
 class StatementResult:
     """Full parsed result from one PDF."""
     bank: str
-    statement_type: str            # "cc" | "consolidated"
-    customer_name: str
-    period_start: str              # DD/MM/YYYY
-    period_end: str                # DD/MM/YYYY
-    report_date: str               # Date of printing/generation
-    accounts: list[AccountSummary]
-    transactions: list[Transaction]
-    exchange_rates: dict           # {"USD": 16898.00, "SGD": 13351.14, ...}
-    raw_errors: list[str]          # Parser warnings/fallbacks used
+    statement_type: str                 # "cc", "savings", "consolidated", "CC", "Savings"
+    owner: str = ""                     # Derived owner label; set by parser or exporter
+    sheet_name: str = ""                # Precomputed by parser; exporter computes if empty
+    print_date: Optional[str] = None    # DD/MM/YYYY — statement print / generation date
+    transactions: list[Transaction] = field(default_factory=list)
+    summary: Optional[AccountSummary] = None   # Primary account summary (new parsers)
+    accounts: list[AccountSummary] = field(default_factory=list)
+    customer_name: str = ""             # Raw customer name for owner detection fallback
+    period_start: str = ""              # DD/MM/YYYY
+    period_end: str = ""                # DD/MM/YYYY
+    exchange_rates: dict = field(default_factory=dict)
+    raw_errors: list[str] = field(default_factory=list)
 
+
+# ── Number helpers ────────────────────────────────────────────────────────────
 
 def parse_idr_amount(s: str) -> Optional[float]:
-    """Parse Indonesian number format: 1.234.567,89 → 1234567.89"""
+    """
+    Parse Indonesian number format: 1.234.567,89 → 1234567.89
+    Also handles Western format (comma-thousands): 1,234,567.89 → 1234567.89
+    """
     if not s:
         return None
-    s = s.strip().replace(" ", "")
-    # Handle CR suffix (credit indicator on CC)
+    s = str(s).strip().replace(" ", "")
     s = s.replace(" CR", "").replace("CR", "")
-    # Remove negative sign for now, caller decides debit/credit
     negative = s.startswith("-")
     s = s.lstrip("-")
-    # Indonesian format: dots as thousands sep, comma as decimal
-    s = s.replace(".", "").replace(",", ".")
+    # Determine format by position of last comma vs last dot
+    last_dot = s.rfind(".")
+    last_comma = s.rfind(",")
+    if last_comma > last_dot:
+        # Indonesian: dot=thousands, comma=decimal  e.g. 1.234.567,89
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        # Western or dot-only: comma=thousands, dot=decimal  e.g. 1,234,567.89 or 1.234.567
+        s = s.replace(",", "")
     try:
         val = float(s)
         return -val if negative else val
@@ -68,11 +86,10 @@ def parse_idr_amount(s: str) -> Optional[float]:
 
 
 def parse_date_ddmmyyyy(s: str) -> Optional[str]:
-    """Normalise date to DD/MM/YYYY. Accepts DD/MM/YYYY or DD-MM-YY or DD-MM-YYYY."""
+    """Normalise date to DD/MM/YYYY. Accepts DD/MM/YYYY, DD-MM-YY, or DD-MM-YYYY."""
     if not s:
         return None
     s = s.strip()
-    # Already DD/MM/YYYY
     m = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", s)
     if m:
         return s
@@ -80,8 +97,7 @@ def parse_date_ddmmyyyy(s: str) -> Optional[str]:
     m = re.match(r"^(\d{2})-(\d{2})-(\d{2})$", s)
     if m:
         d, mo, y = m.groups()
-        year = f"20{y}"
-        return f"{d}/{mo}/{year}"
+        return f"{d}/{mo}/20{y}"
     # DD-MM-YYYY
     m = re.match(r"^(\d{2})-(\d{2})-(\d{4})$", s)
     if m:

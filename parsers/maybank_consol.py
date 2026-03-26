@@ -82,7 +82,7 @@ def parse(pdf_path: str, ollama_client=None) -> StatementResult:
         customer_name=customer_name,
         period_start=period_start,
         period_end=period_end,
-        report_date=report_date,
+        print_date=report_date,
         accounts=accounts,
         transactions=transactions,
         exchange_rates=exchange_rates,
@@ -140,7 +140,7 @@ def _parse_summary_table(table: list, errors: list) -> list[AccountSummary]:
                 product_name=name,
                 account_number=None,
                 currency=currency,
-                balance=balance,
+                closing_balance=balance or 0.0,
             ))
 
     elif "nama produk" in header_joined and "jumlah rekening" in header_joined:
@@ -154,7 +154,7 @@ def _parse_summary_table(table: list, errors: list) -> list[AccountSummary]:
             balance = parse_idr_amount(balance_str)
             accounts.append(AccountSummary(
                 product_name=name, account_number=None,
-                currency=currency, balance=balance,
+                currency=currency, closing_balance=balance or 0.0,
             ))
 
     elif "nama produk" in header_joined and "nilai nominal" in header_joined:
@@ -172,7 +172,7 @@ def _parse_summary_table(table: list, errors: list) -> list[AccountSummary]:
                 currency = m.group(1)
             accounts.append(AccountSummary(
                 product_name=name, account_number=None,
-                currency=currency, balance=market_val,
+                currency=currency, closing_balance=market_val or 0.0,
                 extra={"nominal": nominal, "coupon_rate": currency_info}
             ))
 
@@ -192,7 +192,7 @@ def _parse_summary_table(table: list, errors: list) -> list[AccountSummary]:
             market_val = parse_idr_amount(str(row[-1] or ""))
             accounts.append(AccountSummary(
                 product_name=name, account_number=None,
-                currency=currency, balance=market_val,
+                currency=currency, closing_balance=market_val or 0.0,
                 extra={
                     "type": reksadana_type,
                     "units": units,
@@ -214,7 +214,7 @@ def _parse_summary_table(table: list, errors: list) -> list[AccountSummary]:
                 product_name=f"Kartu Kredit {card_type}",
                 account_number=card_no,
                 currency="IDR",
-                balance=outstanding,
+                closing_balance=outstanding or 0.0,
                 extra={"limit": limit}
             ))
 
@@ -256,11 +256,12 @@ def _parse_transaction_table(table: list, errors: list, ollama_client=None) -> l
                         date_transaction=parse_date_ddmmyyyy(date_str) or "",
                         date_posted=None,
                         description="Saldo Awal",
-                        debit_original=None, credit_original=bal,
-                        amount_idr=bal, currency=currency,
+                        currency=currency,
                         foreign_amount=None, exchange_rate=None,
-                        balance_idr=bal, is_credit=True,
-                        account_number=None,
+                        amount_idr=bal,
+                        tx_type="Credit",
+                        balance=bal,
+                        account_number="",
                     ))
             continue
         if re.match(r"^(tanggal|total)", date_str.lower()):
@@ -287,15 +288,13 @@ def _parse_transaction_table(table: list, errors: list, ollama_client=None) -> l
             date_transaction=date_norm or date_str,
             date_posted=None,
             description=desc,
-            debit_original=abs(debit) if debit else None,
-            credit_original=abs(credit) if credit else None,
-            amount_idr=amount_idr,
             currency=currency,
             foreign_amount=None,   # Savings transactions are in native currency
             exchange_rate=None,
-            balance_idr=balance,
-            is_credit=is_credit,
-            account_number=None,
+            amount_idr=amount_idr,
+            tx_type="Credit" if is_credit else "Debit",
+            balance=balance,
+            account_number="",
         ))
 
     return txns

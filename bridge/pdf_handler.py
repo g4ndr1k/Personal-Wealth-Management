@@ -283,7 +283,8 @@ def _run_job(job_id: str, password: str):
         import sys
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from parsers.router import detect_and_parse
-        result = detect_and_parse(unlocked_path)
+        owner_mappings = _config.get("owner_mappings", {})
+        result = detect_and_parse(unlocked_path, owner_mappings=owner_mappings)
         logs.append(f"Parsed: {result.bank} {result.statement_type} "
                     f"{result.period_start}–{result.period_end} "
                     f"({len(result.transactions)} transactions)")
@@ -293,7 +294,6 @@ def _run_job(job_id: str, password: str):
         # ── Step 3: export XLS ────────────────────────────────────────────
         from exporters.xls_writer import export
         output_dir = _config.get("xls_output_dir", "output/xls")
-        owner_mappings = _config.get("owner_mappings", {})
         output_path, _ = export(result, output_dir, owner_mappings)
         logs.append(f"Exported: {Path(output_path).name}")
 

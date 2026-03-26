@@ -118,13 +118,11 @@ def parse(pdf_path: str, ollama_client=None) -> StatementResult:
         product_name="BCA Rekening Tahapan",
         account_number=account_number,
         currency=currency,
-        balance=closing_balance,
-        extra={
-            "opening_balance": opening_balance,
-            "total_credit": total_cr,
-            "total_debit": total_db,
-            "period": f"{period_month} {period_year}",
-        }
+        closing_balance=closing_balance or 0.0,
+        opening_balance=opening_balance or 0.0,
+        total_debit=total_db or 0.0,
+        total_credit=total_cr or 0.0,
+        extra={"period": f"{period_month} {period_year}"},
     )]
 
     return StatementResult(
@@ -133,7 +131,7 @@ def parse(pdf_path: str, ollama_client=None) -> StatementResult:
         customer_name=customer_name,
         period_start=period_start,
         period_end=period_end,
-        report_date=report_date,
+        print_date=report_date,
         accounts=accounts,
         transactions=transactions,
         exchange_rates={},
@@ -286,14 +284,12 @@ def _parse_transactions(all_texts: list, account_number: str, year: str, month: 
                 date_transaction=date_iso,
                 date_posted=None,
                 description=full_desc,
-                debit_original=amount if is_debit else None,
-                credit_original=amount if not is_debit else None,
-                amount_idr=amount,
                 currency="IDR",
                 foreign_amount=None,
                 exchange_rate=None,
-                balance_idr=balance,
-                is_credit=not is_debit,
+                amount_idr=amount,
+                tx_type="Debit" if is_debit else "Credit",
+                balance=balance,
                 account_number=account_number,
             ))
 

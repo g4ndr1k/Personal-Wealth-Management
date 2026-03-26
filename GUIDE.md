@@ -1,6 +1,6 @@
 # Agentic Mail Alert System — Build & Operations Guide
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase post-repair
 
@@ -167,7 +167,7 @@ The system alerts on:
 ### Known gaps vs. config
 
 - `max_commands_per_hour` exists in `settings.toml` but the orchestrator does not enforce a rolling-hour command limit.
-- PDF processor parsing for CIMB Niaga and Permata Bank is not yet implemented (parsers/router.py returns `Unknown` for those banks).
+- PDF processor parsing for CIMB Niaga is not yet implemented (parsers/router.py returns `Unknown` for that bank).
 
 ---
 
@@ -1457,7 +1457,8 @@ The PDF processor is built into the bridge (runs on the Mac host, not in Docker)
 | Maybank | Consolidated (Laporan Konsolidasi) | `parsers/maybank_consol.py` | Email `@maybank.co.id` | Via customer name |
 | BCA | Credit card (Rekening Kartu Kredit) | `parsers/bca_cc.py` | Email `@klikbca.com` (password-protected) | Via customer name |
 | BCA | Savings (Rekening Tahapan) | `parsers/bca_savings.py` | Manual upload / watched folder | Via customer name |
-| Permata Bank | — | Not yet implemented | — | — |
+| Permata | Credit card (Rekening Tagihan) | `parsers/permata_cc.py` | Email `@permatabank.co.id` / `@permatabank.com` | Via cardholder name; multi-card owner split |
+| Permata | Savings (Rekening Koran) | `parsers/permata_savings.py` | Email `@permatabank.co.id` / manual upload | Via customer name in header |
 | CIMB Niaga | — | Not yet implemented | — | — |
 
 Detection is automatic — the router (`parsers/router.py`) reads the first page of any PDF and identifies bank and statement type from text signatures. No manual selection required.
@@ -1561,7 +1562,9 @@ The UI uses the same bearer token as the rest of the bridge API. On first load i
 |---|---|
 | `maybank.co.id` | Maybank |
 | `cimbniaga.co.id` | CIMB Niaga |
-| `permatabank.co.id` | Permata Bank |
+| `permatabank.co.id` | Permata |
+| `permatabank.com` | Permata |
+| `permata.co.id` | Permata |
 | `bca.co.id` / `klikbca.com` | BCA |
 
 Already-scanned attachments are recorded in `data/seen_attachments.db` so repeated scans don't re-queue the same file. Lookback window is configurable via `attachment_lookback_days` in `settings.toml`.
@@ -1613,7 +1616,7 @@ chmod 600 ~/agentic-ai/secrets/banks.toml
 | System Python | macOS system Python 3.9 lacks `tomllib` and cannot run the bridge; use Homebrew `python@3.13` only |
 | Attachments (mail) | `attachments` field in mail items always returns an empty array — not implemented in mail agent |
 | Single instance | No coordination for running multiple bridge or agent instances |
-| PDF parsers | Maybank CC, Maybank Consolidated, BCA CC, BCA Savings implemented; CIMB Niaga and Permata Bank parsers return `Unknown` |
+| PDF parsers | Maybank CC, Maybank Consolidated, BCA CC, BCA Savings, Permata CC, Permata Savings implemented; CIMB Niaga parser not yet implemented |
 | PDF processor threading | PDF jobs run synchronously in the bridge's request thread — large PDFs may delay other bridge responses briefly |
 
 ---
@@ -1734,6 +1737,29 @@ docker compose up -d
 
 ## 23. Version History
 
+### v1.5.0
+
+- Added: `parsers/permata_cc.py` — Permata Credit Card (Rekening Tagihan) parser
+  - Date format: `DDMM` (4-digit, no separator); year from `Tanggal Cetak DD/MM/YY`
+  - Multi-owner: card separator line `NNNN-NNXX-XXXX-NNNN NAME 0` switches owner mid-statement
+  - Foreign currency: inline FX annotation line attached to preceding transaction
+  - Detection: `Rekening Tagihan` + `Credit Card Billing` + `DETIL TRANSAKSI` + `Permata`
+- Added: `parsers/permata_savings.py` — Permata Savings (Rekening Koran) parser
+  - Multi-account: parses multiple account sections per PDF, one `AccountSummary` per account
+  - Supports IDR and USD accounts (separate number format regex per currency)
+  - Debit/credit determined by direction of running balance change
+  - Detection: `Rekening Koran` + `Account Statement` + `Periode Laporan` + `Permata`
+- Changed: `parsers/base.py` — **full schema migration to English field names**
+  - `Transaction`: removed `is_credit`, `debit_original`, `credit_original`, `balance_idr`, `notes`; added `tx_type` ("Credit"/"Debit"), `balance`, `owner`
+  - `AccountSummary`: renamed `balance` → `closing_balance`; added `opening_balance`, `total_debit`, `total_credit`, `credit_limit` as first-class fields (removed from `extra`)
+  - `StatementResult`: renamed `report_date` → `print_date`; added `owner`, `sheet_name`, `summary` fields
+  - `parse_idr_amount`: updated to detect format by last-dot vs last-comma position (handles both Indonesian dot-thousands and Western comma-thousands)
+- Changed: `parsers/bca_cc.py`, `parsers/bca_savings.py`, `parsers/maybank_cc.py`, `parsers/maybank_consol.py` — updated to new schema
+- Changed: `exporters/xls_writer.py` — updated to new schema; uses `result.owner` and `result.sheet_name` when set by parser
+- Changed: `parsers/router.py` — Permata detection added before BCA; `detect_and_parse()` accepts `owner_mappings` and passes it to Permata parsers
+- Changed: `bridge/pdf_handler.py` — passes `owner_mappings` into `detect_and_parse()`
+- Changed: `bridge/attachment_scanner.py` — added `permatabank.com` and `permata.co.id` to `BANK_DOMAINS`; filename heuristic updated to return `"Permata"` (consistent with router)
+
 ### v1.4.0
 
 - Added: `parsers/bca_cc.py` — BCA Credit Card (Rekening Kartu Kredit) parser
@@ -1821,4 +1847,4 @@ docker compose up -d
 
 ---
 
-*Guide last updated 2026-03-26 · v1.4.0 · validated against checked-in codebase*
+*Guide last updated 2026-03-27 · v1.5.0 · validated against checked-in codebase*

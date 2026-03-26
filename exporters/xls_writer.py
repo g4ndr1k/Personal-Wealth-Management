@@ -91,7 +91,7 @@ def export(result: StatementResult, output_dir: str,
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    owner = detect_owner(result.customer_name, owner_mappings)
+    owner = result.owner if result.owner else detect_owner(result.customer_name, owner_mappings)
     result.owner = owner  # attach for use in writers
 
     # ── Per-person-per-bank file ──────────────────────────────────────────
@@ -105,7 +105,7 @@ def export(result: StatementResult, output_dir: str,
         if "Sheet" in wb.sheetnames:
             del wb["Sheet"]
 
-    sheet_name = _sheet_name(result)
+    sheet_name = result.sheet_name if result.sheet_name else _sheet_name(result)
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -131,7 +131,7 @@ def export(result: StatementResult, output_dir: str,
 # ── Sheet name helpers ─────────────────────────────────────────────────────────
 def _sheet_name(result: StatementResult) -> str:
     """e.g. 'Mar 2026 CC', 'Feb 2026 Savings', 'Feb 2026 Consol'"""
-    date_str = result.report_date or result.period_end
+    date_str = result.print_date or result.period_end
     month_label = _month_label(date_str)
     suffix = _TYPE_SUFFIX.get(result.statement_type, result.statement_type.title())
     return f"{month_label} {suffix}"
@@ -168,9 +168,9 @@ def _write_cc_sheet(ws, result: StatementResult):
         row = _table_header(ws, row, ["Field", "Value"], [32, 22])
         for label, val in [
             ("Nomor Kartu",           acc.account_number or ""),
-            ("Total Tagihan (IDR)",   _fmt(acc.balance)),
+            ("Total Tagihan (IDR)",   _fmt(acc.closing_balance)),
             ("Pembayaran Minimum (IDR)", _fmt(acc.extra.get("min_payment"))),
-            ("Limit Gabungan (IDR)",  _fmt(acc.extra.get("credit_limit"))),
+            ("Limit Gabungan (IDR)",  _fmt(acc.credit_limit)),
             ("Tanggal Jatuh Tempo",   acc.extra.get("due_date", "")),
             ("Tagihan Sebelumnya (IDR)", _fmt(acc.extra.get("prev_balance"))),
             ("Total Pembelanjaan (IDR)", _fmt(acc.extra.get("purchases"))),
@@ -190,12 +190,12 @@ def _write_cc_sheet(ws, result: StatementResult):
     row = _table_header(ws, row, hdrs, [14,14,42,10,18,14,18,10])
 
     for tx in result.transactions:
-        fill = FILL_CREDIT if tx.is_credit else FILL_DEBIT
+        fill = FILL_CREDIT if tx.tx_type == "Credit" else FILL_DEBIT
         for col, val in enumerate([
             tx.date_transaction, tx.date_posted or "",
             tx.description, tx.currency,
             tx.foreign_amount or "", tx.exchange_rate or "",
-            tx.amount_idr, "Kredit" if tx.is_credit else "Debit",
+            tx.amount_idr, tx.tx_type,
         ], 1):
             c = ws.cell(row, col, val)
             c.font = BLUE; c.fill = fill
@@ -205,8 +205,8 @@ def _write_cc_sheet(ws, result: StatementResult):
                 c.number_format = IDR_FMT
         row += 1
 
-    total_debit  = sum(t.amount_idr for t in result.transactions if not t.is_credit)
-    total_credit = sum(t.amount_idr for t in result.transactions if t.is_credit)
+    total_debit  = sum(t.amount_idr for t in result.transactions if t.tx_type == "Debit")
+    total_credit = sum(t.amount_idr for t in result.transactions if t.tx_type == "Credit")
     for label, val in [("TOTAL DEBIT", total_debit), ("TOTAL KREDIT", total_credit)]:
         ws.cell(row, 6, label).font = HEADER_FONT
         c = ws.cell(row, 7, val)
@@ -225,10 +225,10 @@ def _write_savings_sheet(ws, result: StatementResult):
         for label, val in [
             ("Nomor Rekening",    acc.account_number or ""),
             ("Mata Uang",         acc.currency),
-            ("Saldo Awal (IDR)",  _fmt(acc.extra.get("opening_balance"))),
-            ("Saldo Akhir (IDR)", _fmt(acc.balance)),
-            ("Total Kredit (IDR)",_fmt(acc.extra.get("total_credit"))),
-            ("Total Debit (IDR)", _fmt(acc.extra.get("total_debit"))),
+            ("Saldo Awal (IDR)",  _fmt(acc.opening_balance)),
+            ("Saldo Akhir (IDR)", _fmt(acc.closing_balance)),
+            ("Total Kredit (IDR)",_fmt(acc.total_credit)),
+            ("Total Debit (IDR)", _fmt(acc.total_debit)),
             ("Periode",           acc.extra.get("period", "")),
         ]:
             ws.cell(row, 1, label).font = BLACK; ws.cell(row, 1).alignment = LEFT
@@ -241,14 +241,14 @@ def _write_savings_sheet(ws, result: StatementResult):
     row = _table_header(ws, row, hdrs, [14,42,18,18,18,10])
 
     for tx in result.transactions:
-        fill = FILL_CREDIT if tx.is_credit else FILL_DEBIT
-        debit_val  = tx.debit_original  if not tx.is_credit else ""
-        credit_val = tx.credit_original if tx.is_credit     else ""
+        fill = FILL_CREDIT if tx.tx_type == "Credit" else FILL_DEBIT
+        debit_val  = tx.amount_idr if tx.tx_type == "Debit"   else ""
+        credit_val = tx.amount_idr if tx.tx_type == "Credit"  else ""
         for col, val in enumerate([
             tx.date_transaction, tx.description,
             debit_val, credit_val,
-            tx.balance_idr if tx.balance_idr is not None else "",
-            "Kredit" if tx.is_credit else "Debit",
+            tx.balance if tx.balance is not None else "",
+            tx.tx_type,
         ], 1):
             c = ws.cell(row, col, val)
             c.font = BLUE; c.fill = fill
@@ -270,7 +270,7 @@ def _write_consol_sheet(ws, result: StatementResult):
         ws.cell(row,1).alignment = LEFT
         ws.cell(row,2,acc.currency).font = BLUE
         ws.cell(row,2).alignment = CENTER
-        c = ws.cell(row,3,acc.balance or 0)
+        c = ws.cell(row,3,acc.closing_balance or 0)
         c.font = BLUE; c.alignment = RIGHT; c.number_format = IDR_FMT
         notes = "; ".join(f"{k}={v}" for k,v in acc.extra.items() if v is not None)
         ws.cell(row,4,notes).font = BLACK
@@ -282,14 +282,14 @@ def _write_consol_sheet(ws, result: StatementResult):
         hdrs = ["Tgl. Transaksi","Keterangan","Mutasi Debet","Mutasi Kredit","Saldo","Mata Uang","Tipe"]
         row = _table_header(ws, row, hdrs, [14,42,18,18,18,12,10])
         for tx in result.transactions:
-            fill = FILL_CREDIT if tx.is_credit else FILL_DEBIT
+            fill = FILL_CREDIT if tx.tx_type == "Credit" else FILL_DEBIT
             for col, val in enumerate([
                 tx.date_transaction, tx.description,
-                tx.debit_original if not tx.is_credit else "",
-                tx.credit_original if tx.is_credit else "",
-                tx.balance_idr if tx.balance_idr is not None else "",
+                tx.amount_idr if tx.tx_type == "Debit"  else "",
+                tx.amount_idr if tx.tx_type == "Credit" else "",
+                tx.balance if tx.balance is not None else "",
                 tx.currency,
-                "Kredit" if tx.is_credit else "Debit",
+                tx.tx_type,
             ], 1):
                 c = ws.cell(row, col, val)
                 c.font = BLUE; c.fill = fill
@@ -354,9 +354,9 @@ def _update_all_transactions(output_dir: str, result: StatementResult,
             tx.foreign_amount or "",
             tx.exchange_rate or "",
             tx.amount_idr,
-            "Kredit" if tx.is_credit else "Debit",
-            tx.balance_idr or "",
-            tx.account_number or "",
+            tx.tx_type,
+            tx.balance if tx.balance is not None else "",
+            tx.account_number,
         ]
         for col, val in enumerate(row_data, 1):
             c = ws.cell(start_row, col, val)
@@ -382,7 +382,7 @@ def _write_meta_block(ws, row: int, result: StatementResult) -> int:
         ("Tipe Laporan",  stmt_label),
         ("Nama Nasabah",  result.customer_name),
         ("Periode",       f"{result.period_start} – {result.period_end}"),
-        ("Tanggal Cetak", result.report_date),
+        ("Tanggal Cetak", result.print_date or ""),
     ]:
         ws.cell(row, 1, label).font = HEADER_FONT
         ws.cell(row, 1).alignment = LEFT
