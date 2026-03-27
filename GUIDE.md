@@ -1,6 +1,6 @@
 # Agentic Mail Alert System — Build & Operations Guide
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase post-repair
 
@@ -150,8 +150,12 @@ The system alerts on:
   - Maybank Consolidated Statement parser
   - BCA Credit Card statement parser (year boundary fix for Dec/Jan crossover)
   - BCA Savings (Tabungan) statement parser
+  - Permata Credit Card statement parser (multi-owner card split)
+  - Permata Savings (Rekening Koran) statement parser
+  - CIMB Niaga Credit Card statement parser (inline foreign currency, multi-owner)
+  - CIMB Niaga Consolidated Portfolio statement parser (savings transactions via table extraction)
   - Owner detection module (`parsers/owner.py`) — maps customer name substrings to canonical owner labels (Gandrik / Helen)
-  - Auto-detection of bank/statement type from PDF content
+  - Auto-detection of bank/statement type from PDF content (bank-name-first detection strategy)
   - 3-layer parsing: pdfplumber tables → Python regex → Ollama LLM fallback
   - Multi-owner XLS export: `{Bank}_{Owner}.xlsx` per bank/owner pair + flat `ALL_TRANSACTIONS.xlsx` with Owner column
   - Mail.app attachment auto-scanner for bank PDFs
@@ -167,7 +171,6 @@ The system alerts on:
 ### Known gaps vs. config
 
 - `max_commands_per_hour` exists in `settings.toml` but the orchestrator does not enforce a rolling-hour command limit.
-- PDF processor parsing for CIMB Niaga is not yet implemented (parsers/router.py returns `Unknown` for that bank).
 
 ---
 
@@ -310,12 +313,16 @@ agentic-ai/
 ├── parsers/                      # Bank statement parsers (host Python)
 │   ├── __init__.py
 │   ├── base.py                   # Transaction, AccountSummary, StatementResult dataclasses
-│   ├── router.py                 # Auto-detect bank + statement type
+│   ├── router.py                 # Auto-detect bank + statement type (bank-name-first)
 │   ├── owner.py                  # Customer name → owner label mapping (Gandrik / Helen)
 │   ├── maybank_cc.py             # Maybank credit card statement parser
 │   ├── maybank_consol.py         # Maybank consolidated statement parser
 │   ├── bca_cc.py                 # BCA credit card statement parser
-│   └── bca_savings.py            # BCA savings (Tabungan) statement parser
+│   ├── bca_savings.py            # BCA savings (Tahapan) statement parser
+│   ├── permata_cc.py             # Permata credit card statement parser (multi-owner)
+│   ├── permata_savings.py        # Permata savings (Rekening Koran) statement parser
+│   ├── cimb_niaga_cc.py          # CIMB Niaga credit card statement parser
+│   └── cimb_niaga_consol.py      # CIMB Niaga consolidated portfolio statement parser
 ├── exporters/                    # XLS export
 │   ├── __init__.py
 │   └── xls_writer.py             # openpyxl writer — {Bank}_{Owner}.xlsx + ALL_TRANSACTIONS.xlsx
@@ -1459,17 +1466,18 @@ The PDF processor is built into the bridge (runs on the Mac host, not in Docker)
 | BCA | Savings (Rekening Tahapan) | `parsers/bca_savings.py` | Manual upload / watched folder | Via customer name |
 | Permata | Credit card (Rekening Tagihan) | `parsers/permata_cc.py` | Email `@permatabank.co.id` / `@permatabank.com` | Via cardholder name; multi-card owner split |
 | Permata | Savings (Rekening Koran) | `parsers/permata_savings.py` | Email `@permatabank.co.id` / manual upload | Via customer name in header |
-| CIMB Niaga | — | Not yet implemented | — | — |
+| CIMB Niaga | Credit card (Lembar Tagihan) | `parsers/cimb_niaga_cc.py` | Email `@cimbniaga.co.id` | Via card separator line; multi-owner (primary + supplementary) |
+| CIMB Niaga | Consolidated Portfolio | `parsers/cimb_niaga_consol.py` | Email `@cimbniaga.co.id` | Via customer name in header |
 
-Detection is automatic — the router (`parsers/router.py`) reads the first page of any PDF and identifies bank and statement type from text signatures. No manual selection required.
+Detection is automatic — the router (`parsers/router.py`) reads the first page of any PDF and identifies bank and statement type. No manual selection required.
 
-#### BCA parser notes
+#### Parser notes by bank
 
 **BCA Credit Card** (`bca_cc.py`):
 - Date format: `DD-MON` (e.g. `15-MAR`); year derived from `TANGGAL REKENING` header
 - Year boundary fix: if transaction month > report month, year = report year − 1 (handles Dec/Jan crossover)
 - Number format: dot thousands, no decimal (e.g. `1.791.583` = IDR 1,791,583)
-- Detection signatures: `REKENING KARTU KREDIT` + `TAGIHAN BARU` + `KUALITAS KREDIT`
+- Detection: bank name `BCA` + product term `KARTU KREDIT`
 
 **BCA Savings** (`bca_savings.py`):
 - Date format: `DD/MM` + year from `PERIODE` header
@@ -1477,6 +1485,23 @@ Detection is automatic — the router (`parsers/router.py`) reads the first page
 - Debit rows identified by `DB` suffix
 - Multi-line transactions: continuation lines collected and merged into description
 - Totals verified against statement summary
+- Detection: bank name `BCA` + product name `TAHAPAN` (BCA's registered savings product)
+
+**CIMB Niaga Credit Card** (`cimb_niaga_cc.py`):
+- Date format: `DD/MM`; year derived from `Tgl. Statement DD/MM/YY` header
+- Year boundary fix: if transaction month > statement month, year = statement year − 1
+- Number format: Western comma-thousands, 2 decimals (e.g. `1,791,583.25`)
+- Credit rows end with ` CR`; payments are negative, charges are positive
+- Foreign currency: inline in description — `BILLED AS USD 2.99(1 USD = 17016.66 IDR)`
+- Multi-owner: card separator line `5289 NNXX XXXX NNNN OWNER NAME` switches the active owner; `DR ` prefix on supplementary cardholder names is stripped
+- Detection: bank name `CIMB Niaga` + `Tgl. Statement` (CC-specific date label; consol uses `Tanggal Laporan`)
+
+**CIMB Niaga Consolidated** (`cimb_niaga_consol.py`):
+- Statement date: `Tanggal Laporan : DD Month YYYY` (bilingual header)
+- Savings transactions extracted via `pdfplumber.extract_tables()` — 7-column format (Transaction Date, Value Date, Description, Check No, Debit, Credit, Balance)
+- Multiple savings accounts supported; accounts without transactions in the period show only a balance summary
+- Running balance computed from `SALDO AWAL` + debit/credit deltas
+- Detection: bank name `CIMB Niaga` + `COMBINE STATEMENT` (consol-specific English title)
 
 ### 3-layer parsing pipeline
 
@@ -1569,12 +1594,34 @@ The UI uses the same bearer token as the rest of the bridge API. On first load i
 
 Already-scanned attachments are recorded in `data/seen_attachments.db` so repeated scans don't re-queue the same file. Lookback window is configurable via `attachment_lookback_days` in `settings.toml`.
 
+### Detection strategy
+
+All `can_parse()` functions follow a **bank-name-first** approach. Layout labels (section headings, table titles) change between PDF versions; the bank name does not.
+
+The pattern for each parser is:
+1. **Bank name** (primary, always stable) — e.g. `"CIMB Niaga"`, `"Maybank"`, `"BCA"`, `"Permata"`
+2. **Statement type** (secondary, structurally stable) — a regulatory term or product name that distinguishes statement types within the same bank
+
+| Parser | Primary | Secondary | Why secondary is stable |
+|---|---|---|---|
+| `permata_cc` | `Permata` | `Kartu Kredit` | Regulatory product term |
+| `permata_savings` | `Permata` | `Rekening Koran` | Standard Indonesian banking term |
+| `bca_cc` | `BCA` / `Bank Central Asia` | `KARTU KREDIT` | Regulatory product term |
+| `bca_savings` | `BCA` / `Bank Central Asia` | `TAHAPAN` | BCA's registered savings product name |
+| `maybank_cc` | `Maybank` | `Kartu Kredit` | Regulatory product term |
+| `maybank_consol` | `Maybank` | `PORTFOLIO` | Always in consolidated statement heading |
+| `cimb_niaga_cc` | `CIMB Niaga` | `Tgl. Statement` | CC-specific date field (consol uses `Tanggal Laporan`) |
+| `cimb_niaga_consol` | `CIMB Niaga` | `COMBINE STATEMENT` | English title unique to consolidated PDF |
+
+**Router ordering matters.** CIMB Niaga parsers are checked before Maybank consolidated because CIMB's page 2 contains `ALOKASI ASET`, which is also a Maybank consol keyword. If two banks share a secondary keyword, place the more specific parser earlier in the router chain.
+
 ### Adding a new bank parser
 
 1. Create `parsers/<bank_slug>.py` implementing `can_parse(text_page1: str) -> bool` and `parse(pdf_path: str, ollama_client=None) -> StatementResult`
-2. Import and register it in `parsers/router.py`
-3. Add the bank password key to `secrets/banks.toml`
-4. Add the bank domain to `BANK_DOMAINS` in `bridge/attachment_scanner.py`
+   - Follow the bank-name-first detection strategy above
+2. Import and register it in `parsers/router.py` — place it before any existing parser whose secondary keywords might overlap
+3. Add the bank password key to `secrets/banks.toml` (key = `bank_name.lower().replace(" ", "_")`)
+4. Add the bank email domain to `BANK_DOMAINS` in `bridge/attachment_scanner.py`
 
 Use `parsers/base.py` dataclasses (`Transaction`, `AccountSummary`, `StatementResult`) and helpers (`parse_idr_amount`, `parse_date_ddmmyyyy`) — do not reimplement them.
 
@@ -1616,7 +1663,7 @@ chmod 600 ~/agentic-ai/secrets/banks.toml
 | System Python | macOS system Python 3.9 lacks `tomllib` and cannot run the bridge; use Homebrew `python@3.13` only |
 | Attachments (mail) | `attachments` field in mail items always returns an empty array — not implemented in mail agent |
 | Single instance | No coordination for running multiple bridge or agent instances |
-| PDF parsers | Maybank CC, Maybank Consolidated, BCA CC, BCA Savings, Permata CC, Permata Savings implemented; CIMB Niaga parser not yet implemented |
+| PDF parsers | Maybank CC, Maybank Consolidated, BCA CC, BCA Savings, Permata CC, Permata Savings, CIMB Niaga CC, CIMB Niaga Consolidated all implemented |
 | PDF processor threading | PDF jobs run synchronously in the bridge's request thread — large PDFs may delay other bridge responses briefly |
 
 ---
@@ -1736,6 +1783,32 @@ docker compose up -d
 ---
 
 ## 23. Version History
+
+### v1.6.0
+
+- Added: `parsers/cimb_niaga_cc.py` — CIMB Niaga Credit Card (Billing Statement) parser
+  - Detection: `"CIMB Niaga"` + `"Tgl. Statement"` (CC-specific abbreviated form)
+  - Statement date from `Tgl. Statement DD/MM/YY`
+  - Multi-owner: card separator line switches active owner mid-statement; strips `DR ` prefix from supplementary cardholder name
+  - Foreign currency: inline FX annotation `BILLED AS USD X.XX(1 USD = XXXXX IDR)` extracted via regex
+  - Parses `LAST BALANCE` (opening) and `ENDING BALANCE` (closing) for `AccountSummary`
+- Added: `parsers/cimb_niaga_consol.py` — CIMB Niaga Consolidated (Combine Statement) parser
+  - Detection: `"CIMB Niaga"` + `"COMBINE STATEMENT"`
+  - Statement date from `Tanggal Laporan : DD Month YYYY`
+  - Uses `pdfplumber.extract_tables()` — column indices: 4=date, 7=description, 9=debit, 10=credit
+  - Account sections detected via `Nomor Rekening - Mata Uang` header line
+  - Running balance computed from `SALDO AWAL` + debit/credit deltas (balance column is `None` in extracted tables)
+  - Account summary parsed from asset summary table via regex (account number, name, currency, balances)
+- Changed: all `can_parse()` functions refactored to **bank-name-first detection strategy**
+  - Each function now anchors on the bank name (always stable) + one secondary regulatory/product term
+  - Replaced layout-label keywords (`REKENING KORAN`, `ALOKASI ASET`, etc.) that may change between PDF versions
+  - `bca_cc.py`: `"BCA"` or `"Bank Central Asia"` + `"KARTU KREDIT"`
+  - `bca_savings.py`: `"BCA"` or `"Bank Central Asia"` + `"TAHAPAN"`
+  - `maybank_cc.py`: `"Maybank"` + `"Kartu Kredit"`
+  - `maybank_consol.py`: `"Maybank"` + `"PORTFOLIO"`
+  - `permata_cc.py`: `"Permata"` + `"Kartu Kredit"`
+  - `permata_savings.py`: `"Permata"` + `"Rekening Koran"`
+- Changed: `parsers/router.py` — CIMB Niaga parsers registered; CIMB checks placed **before** Maybank consol to prevent false-positive (CIMB consol page 2 contains `ALOKASI ASET`, a former Maybank consol keyword)
 
 ### v1.5.0
 
