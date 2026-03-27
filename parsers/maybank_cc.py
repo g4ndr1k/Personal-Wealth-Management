@@ -38,7 +38,7 @@ DETECTION_KEYWORDS = [
     "BALANCE OF LAST MONTH",
     "END OF STATEMENT",
     "Kualitas Kredit",
-]
+]  # kept for reference; can_parse uses bank-name-first approach
 
 # Row pattern: DD-MM-YY  DD-MM-YY  <description>  [CCY  <foreign_amt>]  <idr_amt> [CR]
 _TX_ROW = re.compile(
@@ -57,7 +57,8 @@ _BALANCE_FWD = re.compile(r"BALANCE OF LAST MONTH\s+([\d.,]+)")
 
 
 def can_parse(text_page1: str) -> bool:
-    return sum(1 for kw in DETECTION_KEYWORDS if kw in text_page1) >= 2
+    # Bank name first; "Kartu Kredit" distinguishes CC from Maybank consolidated
+    return "Maybank" in text_page1 and "Kartu Kredit" in text_page1
 
 
 def parse(pdf_path: str, ollama_client=None) -> StatementResult:

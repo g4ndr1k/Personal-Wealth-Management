@@ -27,11 +27,12 @@ DETECTION_KEYWORDS = [
     "DETAIL & MUTASI TRANSAKSI",
     "Consolidated Statement",
     "ALOKASI ASET",
-]
+]  # kept for reference; can_parse uses bank-name-first approach
 
 
 def can_parse(text_page1: str) -> bool:
-    return any(kw in text_page1 for kw in DETECTION_KEYWORDS)
+    # Bank name first; "PORTFOLIO" distinguishes consolidated from Maybank CC
+    return "Maybank" in text_page1 and "PORTFOLIO" in text_page1
 
 
 # ── Main parser ──────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ CIMB Niaga Consolidated Portfolio Statement Parser
 Handles: Laporan Konsolidasi Portfolio / Combine Statement Portfolio
 
 Key format characteristics:
-- Detection: "LAPORAN KONSOLIDASI PORTFOLIO" + "COMBINE STATEMENT PORTFOLIO"
+- Detection: "CIMB Niaga" (bank name) + "COMBINE STATEMENT" (consol-specific term)
 - Statement date: "Tanggal Laporan : DD Month YYYY" (bilingual)
 - Contains savings account transaction tables (7-column format)
 - Table columns: Transaction Date | Value Date | Description | Check No | Debit | Credit | Balance
@@ -27,10 +27,8 @@ from parsers.base import Transaction, AccountSummary, StatementResult
 # ── Detection ──────────────────────────────────────────────────────────────
 
 def can_parse(text: str) -> bool:
-    return (
-        "LAPORAN KONSOLIDASI PORTFOLIO" in text
-        and "COMBINE STATEMENT PORTFOLIO" in text
-    )
+    # Bank name first; "COMBINE STATEMENT" is unique to the consolidated statement
+    return "CIMB Niaga" in text and "COMBINE STATEMENT" in text
 
 
 # ── Date helpers ───────────────────────────────────────────────────────────

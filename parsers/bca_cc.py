@@ -41,7 +41,7 @@ DETECTION_KEYWORDS = [
     "TAGIHAN BARU",
     "KUALITAS KREDIT",
     "SALDO SEBELUMNYA",
-]
+]  # kept for reference; can_parse uses bank-name-first approach
 
 # Indonesian month abbreviations → zero-padded month number
 _MONTHS = {
@@ -68,7 +68,8 @@ _SKIP_PATTERNS = re.compile(
 
 
 def can_parse(text_page1: str) -> bool:
-    return sum(1 for kw in DETECTION_KEYWORDS if kw in text_page1) >= 3
+    # Bank name first; "KARTU KREDIT" distinguishes CC from BCA savings (Tahapan)
+    return ("BCA" in text_page1 or "Bank Central Asia" in text_page1) and "KARTU KREDIT" in text_page1
 
 
 def parse(pdf_path: str, ollama_client=None) -> StatementResult:

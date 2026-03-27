@@ -76,9 +76,8 @@ _AMOUNT_TAIL = re.compile(
 
 
 def can_parse(text_page1: str) -> bool:
-    return "REKENING TAHAPAN" in text_page1 and (
-        "MUTASI" in text_page1 or "SALDO AWAL" in text_page1 or "PERIODE" in text_page1
-    )
+    # Bank name first; "TAHAPAN" is BCA's savings product name — stable, BCA-exclusive
+    return ("BCA" in text_page1 or "Bank Central Asia" in text_page1) and "TAHAPAN" in text_page1
 
 
 def parse(pdf_path: str, ollama_client=None) -> StatementResult:

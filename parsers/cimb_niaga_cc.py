@@ -4,7 +4,7 @@ CIMB Niaga Credit Card Billing Statement Parser
 Handles: Credit Card Billing Statement (Lembar Tagihan Kartu Kredit)
 
 Key format characteristics:
-- Detection: "PERINCIAN TAGIHAN" + "Tgl. Statement" + "CIMB"
+- Detection: "CIMB Niaga" (bank name) + "Tgl. Statement" (CC-specific date label)
 - Statement date: "Tgl. Statement DD/MM/YY" → year = 20YY
 - Transaction date format: DD/MM (no year on each row)
 - Year boundary: if tx month > statement month → previous year
@@ -27,11 +27,9 @@ from parsers.base import Transaction, AccountSummary, StatementResult
 # ── Detection ──────────────────────────────────────────────────────────────
 
 def can_parse(text: str) -> bool:
-    return (
-        "PERINCIAN TAGIHAN" in text
-        and "Tgl. Statement" in text
-        and "CIMB" in text
-    )
+    # Bank name first; "Tgl. Statement" (abbreviated) is CC-specific —
+    # the consol uses "Tanggal Laporan" (full form), not "Tgl. Statement"
+    return "CIMB Niaga" in text and "Tgl. Statement" in text
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

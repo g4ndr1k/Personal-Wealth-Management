@@ -31,12 +31,8 @@ from parsers.base import (
 # ── Detection ──────────────────────────────────────────────────────────────
 
 def can_parse(text_page1: str) -> bool:
-    return (
-        "Rekening Tagihan" in text_page1
-        and "Credit Card Billing" in text_page1
-        and "DETIL TRANSAKSI" in text_page1
-        and "Permata" in text_page1
-    )
+    # Bank name first (stable), then product type to distinguish from Permata savings
+    return "Permata" in text_page1 and "Kartu Kredit" in text_page1
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

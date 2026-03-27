@@ -26,12 +26,9 @@ from parsers.base import Transaction, AccountSummary, StatementResult
 # ── Detection ──────────────────────────────────────────────────────────────
 
 def can_parse(text_page1: str) -> bool:
-    return (
-        "Rekening Koran" in text_page1
-        and "Account Statement" in text_page1
-        and "Periode Laporan" in text_page1
-        and "Permata" in text_page1
-    )
+    # Bank name first (stable); "Rekening Koran" is the standard Indonesian regulatory
+    # term for a savings account statement — stable across all Permata PDF versions
+    return "Permata" in text_page1 and "Rekening Koran" in text_page1
 
 
 # ── Number parsing ─────────────────────────────────────────────────────────
