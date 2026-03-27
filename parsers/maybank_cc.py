@@ -57,8 +57,13 @@ _BALANCE_FWD = re.compile(r"BALANCE OF LAST MONTH\s+([\d.,]+)")
 
 
 def can_parse(text_page1: str) -> bool:
-    # Bank name first; "Kartu Kredit" distinguishes CC from Maybank consolidated
-    return "Maybank" in text_page1 and "Kartu Kredit" in text_page1
+    # Bank name first; secondary anchor distinguishes CC from Maybank consolidated.
+    # Case-insensitive: bank name appears in ALL-CAPS in some layouts.
+    # "kartu kredit" may be abbreviated "KK" in some months' promotional text,
+    # so we also accept "balance of last month" — Maybank's structural label for
+    # the opening balance row, which appears on every CC statement page 1.
+    t = text_page1.lower()
+    return "maybank" in t and ("kartu kredit" in t or "balance of last month" in t)
 
 
 def parse(pdf_path: str, ollama_client=None) -> StatementResult:

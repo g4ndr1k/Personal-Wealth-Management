@@ -31,8 +31,13 @@ from parsers.base import (
 # ── Detection ──────────────────────────────────────────────────────────────
 
 def can_parse(text_page1: str) -> bool:
-    # Bank name first (stable), then product type to distinguish from Permata savings
-    return "Permata" in text_page1 and "Kartu Kredit" in text_page1
+    # Use the bilingual document title as primary anchor — it appears on page 1
+    # of every Permata CC PDF regardless of card product name or layout version.
+    # "Rekening Tagihan" / "Credit Card Billing" is unique to Permata CC;
+    # Permata Savings uses "Rekening Koran" / "Account Statement" instead.
+    # Avoids case-sensitivity issues: card names appear as "PERMATA BLACK" /
+    # "PERMATAVISA INFINITE CREDIT CARD" (all-caps) — not "Permata".
+    return "Rekening Tagihan" in text_page1 and "Credit Card Billing" in text_page1
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
