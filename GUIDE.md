@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 2.3.0 · Stage 1 complete · Stage 2 fully built (sync engine + FastAPI + Vue 3 PWA)
+**Version:** 2.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-03-28
+**Last validated against:** checked-in codebase 2026-03-29
 
 ---
 
@@ -45,6 +45,16 @@
 30. [Stage 2 Monthly Workflow](#30-stage-2-monthly-workflow)
 31. [Stage 2 Setup Checklist](#31-stage-2-setup-checklist)
 32. [Stage 2 Operations Reference](#32-stage-2-operations-reference)
+
+### Stage 3 — Wealth Management (planned 🗓️)
+
+33. [Stage 3 Overview & Goals](#33-stage-3-overview--goals)
+34. [Stage 3 Architecture](#34-stage-3-architecture)
+35. [Stage 3 Data Schemas](#35-stage-3-data-schemas)
+36. [Stage 3 API Endpoints](#36-stage-3-api-endpoints)
+37. [Stage 3 PWA Views](#37-stage-3-pwa-views)
+38. [Stage 3 Monthly Workflow](#38-stage-3-monthly-workflow)
+39. [Stage 3 Setup Checklist](#39-stage-3-setup-checklist)
 
 ---
 
@@ -1983,6 +1993,42 @@ docker compose up -d
 
 ## 23. Version History
 
+### v2.4.0 (2026-03-29)
+
+#### Features
+
+- **Added: Manual Category Overrides** — new Google Sheets tab (`Category Overrides`) with columns `hash`, `category`, `notes`, `updated_at`. Overrides survive re-imports and re-syncs; the sync engine applies them after deduplication, and `--overwrite` never touches the overrides tab. New `PATCH /api/transaction/{hash}/category` endpoint writes to both Sheets and SQLite atomically. The PWA Transactions view now includes an inline category editor (tap a transaction → select new category → Save).
+- **Added: Alias auto-update on category change** — the `PATCH /api/transaction/{hash}/category` endpoint now also creates or updates the Merchant Aliases tab, so future imports auto-categorise the same `raw_description` correctly. If an alias already exists with a different category, it is updated in place. All other transactions with the same `raw_description` are bulk-updated in SQLite immediately. The PWA shows feedback: "✓ Category & alias updated (+N similar)".
+- **Added: Stage 3 Wealth Management design** — comprehensive plan for net worth tracking across all asset classes (savings, bonds, stocks, properties). Includes 3 new Sheets tabs, 3 new SQLite tables, ~8 API endpoints, 2 PWA views, and a Permata portfolio PDF parser.
+- **Added: Opening Balance category** — new `🏦 Opening Balance` category (sort 19) for SALDO AWAL transactions. Excluded from income/expense calculations alongside Internal Transfer to prevent inflated income figures.
+- **Added: `contains` match type in categorizer** — `finance/categorizer.py` now supports a third match type (`contains`) between exact (Layer 1) and regex (Layer 2). Substring match: `alias.upper() in description.upper()`. This enables concise rules like `CHATIME → Dining Out` that catch any transaction mentioning the merchant, regardless of prefix (QR PAYMENT, KARTU DEBIT, etc.) or suffix (location, timestamp).
+- **Added: Merchant Aliases cleanup** — consolidated the Merchant Aliases tab from 212 → 189 rules. Removed 26 redundant exact matches already covered by regex; converted 79 exact matches to `contains` (merchant names like restaurants, shops, subscriptions); added 14 new regex patterns for date/month-specific strings (admin fees, home loan installments, bond coupons, Erha Clinic salary). Result: **100% auto-categorisation** (0 review queue items, up from 46).
+
+#### Bug fixes
+
+- **Fixed: SPA routes returning `{"detail":"Not Found"}`** — navigating directly to `/transactions` or `/settings` returned the FastAPI 404 JSON response instead of the Vue app. Root cause: `StaticFiles(html=True)` only serves `index.html` for directory-like paths, not Vue Router HTML5 history mode paths. Replaced with explicit static file mounts (`/assets`, `/icons`, service worker files) plus a catch-all `@app.get("/{full_path:path}")` that serves `index.html`.
+- **Fixed: OAuth token refresh failing in Docker** — `OSError: [Errno 30] Read-only file system` when the Google OAuth token expired inside the container. The `./secrets` volume was mounted `:ro`. Removed the read-only flag so the token file can be refreshed in place.
+- **Fixed: Credit card payments double-counting expenses** — 17 CC payment transactions (`PEMBAYARAN VIA AUTODEBET`, `BILLPAYMENT TO CCARD`, `PAYMENT-THANK YOU`, `PEMBAYARAN - MBCA`, `PAY KARTU KREDIT`, `PEMBAYARAN AD 596`, `PEMBAYARAN - DEBET OTOMATIS`) were categorised as "Fees & Interest", causing their amounts to appear as income/expense even though the individual CC charges were already recorded separately. Updated all 8 alias rules to map to "Internal Transfer" instead; re-imported with `--overwrite` to re-categorise existing rows.
+- **Fixed: Multi-account XLS dedup overwriting transactions** — `_update_all_transactions()` in `exporters/xls_writer.py` used `(owner, month_label, bank, stmt_type)` as the dedup key, which did not include account number. When multiple savings accounts for the same owner/bank/month were processed from separate PDFs (e.g. Helen's two Permata savings accounts from E-Statement and E-Statement-2), the second PDF's export deleted the first's rows. Fixed by scoping dedup to also match column 14 (account number). 71 previously lost transactions recovered across Jan/Feb/Mar 2026.
+- **Fixed: Review Queue showing "All caught up" with pending transactions** — `ReviewQueue.vue` set `items.value = data` but the `/api/review-queue` endpoint returns `{ total, limit, pending: [...] }`, not a plain array. Since the wrapper object has no `.length`, the empty-state check always triggered. Fixed to read `data.pending`. Also fixed a template typo (`v-else"` → `v-else`).
+
+#### Changed
+
+- **`finance/config.py`** — added `overrides_tab: str` to `SheetsConfig` dataclass.
+- **`config/settings.toml`** — added `overrides_tab = "Category Overrides"` under `[google_sheets]`.
+- **`finance/sheets.py`** — added `read_overrides()`, `write_override()`, `ensure_overrides_tab()`, `update_alias_category()` methods; added `OVERRIDES_HEADERS`.
+- **`finance/sync.py`** — reads overrides tab after currency codes; applies overrides after deduplication and before SQLite write.
+- **`finance/api.py`** — added `CategoryOverrideRequest` model (with `update_alias` flag) and `PATCH /api/transaction/{hash}/category` endpoint that writes override + creates/updates alias + bulk-updates similar transactions; replaced `StaticFiles` mount with explicit static routes + SPA catch-all; all 6 income/expense SQL aggregations now exclude both `Internal Transfer` and `Opening Balance` categories; `TRANSFER_CATS` set updated for expense-percentage calculation.
+- **`exporters/xls_writer.py`** — `_update_all_transactions()` dedup key now includes account numbers from the current result, preventing cross-account data loss.
+- **`pwa/src/api/client.js`** — added `patch()` helper and `patchCategory()` API method.
+- **`pwa/src/views/Transactions.vue`** — added inline category editor with dropdown, save button, success/error feedback; client-side income/expense totals now skip `Internal Transfer` and `Opening Balance` categories (matching API logic); category save passes `update_alias: true` and bulk-updates visible similar transactions.
+- **`pwa/src/views/ReviewQueue.vue`** — fixed `items.value = data` → `data.pending ?? data`; fixed `v-else"` template typo.
+- **`finance/categorizer.py`** — added `_contains` list and Layer 1b contains matching between exact and regex; `_load_aliases()` routes `match_type=contains` to `_contains` list; `reload_aliases()` clears `_contains`.
+- **`docker-compose.yml`** — removed `:ro` from secrets volume mount.
+- **`scripts/cleanup_aliases.py`** — one-time cleanup script that rebuilt the Merchant Aliases tab: 36 regex + 82 contains + 71 exact = 189 rules (was 22 regex + 0 contains + 190 exact = 212).
+
+---
+
 ### v2.3.0 (2026-03-28)
 
 #### Bug fixes
@@ -3092,4 +3138,291 @@ curl -s http://localhost:8090/api/health
 | `UNIQUE constraint failed: transactions.hash` during sync | Duplicate hashes in Sheets; sync deduplicates automatically (first occurrence wins); to clean Sheets run importer with `--overwrite` |
 
 
-*Guide last updated 2026-03-28 · v2.3.0 · Stage 1 complete · Stage 2 fully built (sync + FastAPI + Vue 3 PWA)*
+---
+
+## 33. Stage 3 Overview & Goals
+
+Stage 3 extends the PWA into a **Wealth Management dashboard** showing total net worth across all asset classes: savings accounts, bonds/obligations, stocks, mutual funds, and properties.
+
+**Goals:**
+
+- Track holdings across multiple asset classes and institutions
+- Show total net worth and its composition over time
+- Parse bond/investment holdings from Permata Bank consolidated statements (the same PDFs that Stage 2's `permata_savings.py` already processes — line 376 deliberately skips investment data)
+- Support manual entry for assets that lack machine-readable statements (properties, overseas accounts)
+- Generate monthly net worth snapshots for trend tracking
+
+**Non-goals (for now):**
+
+- Real-time stock/fund price feeds (prices are entered manually or at import time)
+- Tax reporting or capital gains calculations
+- Multi-currency net worth (all values normalised to IDR at import time)
+
+---
+
+## 34. Stage 3 Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Google Sheets   │     │  PDF Parsers     │     │  Manual Entry   │
+│  (3 new tabs)    │     │  (portfolio)     │     │  (PWA forms)    │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     finance/sync.py (extended)                    │
+│  Reads Holdings, Account Balances, Net Worth Snapshots tabs      │
+│  Writes to 3 new SQLite tables                                   │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     SQLite (finance.db)                           │
+│  + holdings · account_balances · net_worth_snapshots              │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     FastAPI (finance/api.py)                      │
+│  + GET/POST holdings · account-balances · net-worth               │
+│  + POST import-portfolio                                          │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     Vue 3 PWA                                     │
+│  + Wealth.vue (net worth dashboard + charts)                      │
+│  + Holdings.vue (holdings list + manual entry forms)              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Data flow:** Sheets → sync → SQLite → API → PWA (same pattern as Stage 2).
+
+---
+
+## 35. Stage 3 Data Schemas
+
+### Google Sheets — 3 new tabs
+
+#### Holdings tab (18 columns)
+
+| Column | Type | Description |
+|---|---|---|
+| snapshot_date | date | When this holding was recorded (YYYY-MM-DD) |
+| asset_class | text | `bond`, `stock`, `mutual_fund`, `deposit`, `property`, `other` |
+| asset_name | text | e.g. "ORI029T6", "BBCA", "Rumah Menteng" |
+| isin_or_code | text | ISIN for bonds, ticker for stocks, empty for property |
+| institution | text | e.g. "Permata", "BCA Sekuritas" |
+| account | text | Account number or name |
+| owner | text | "Gandrik" or "Helen" |
+| currency | text | Original currency code (IDR, USD, etc.) |
+| quantity | number | Units/lots held (1 for property) |
+| unit_price | number | Price per unit in original currency |
+| market_value | number | quantity × unit_price in original currency |
+| market_value_idr | number | Market value converted to IDR |
+| cost_basis | number | Total purchase cost in original currency |
+| cost_basis_idr | number | Cost basis in IDR |
+| unrealised_pnl_idr | number | market_value_idr − cost_basis_idr |
+| maturity_date | date | For bonds/deposits; empty for stocks/property |
+| coupon_rate | number | For bonds; empty for others |
+| import_date | date | When this row was imported |
+
+#### Account Balances tab (9 columns)
+
+| Column | Type | Description |
+|---|---|---|
+| snapshot_date | date | Balance date (YYYY-MM-DD) |
+| institution | text | Bank name |
+| account | text | Account number or name |
+| account_type | text | `savings`, `checking`, `deposit` |
+| owner | text | "Gandrik" or "Helen" |
+| currency | text | Currency code |
+| balance | number | Balance in original currency |
+| balance_idr | number | Balance converted to IDR |
+| import_date | date | When this row was imported |
+
+#### Net Worth Snapshots tab (13 columns)
+
+| Column | Type | Description |
+|---|---|---|
+| snapshot_date | date | Month-end date (YYYY-MM-DD) |
+| savings_idr | number | Total savings account balances |
+| deposits_idr | number | Total time/fixed deposits |
+| bonds_idr | number | Total bond market values |
+| stocks_idr | number | Total stock market values |
+| mutual_funds_idr | number | Total mutual fund values |
+| properties_idr | number | Total property values |
+| other_idr | number | Other assets |
+| total_assets_idr | number | Sum of all above |
+| total_liabilities_idr | number | Credit card balances, loans, etc. |
+| net_worth_idr | number | total_assets − total_liabilities |
+| mom_change_idr | number | Month-over-month net worth change |
+| notes | text | Optional notes |
+
+### SQLite — 3 new tables
+
+```sql
+CREATE TABLE IF NOT EXISTS holdings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date   TEXT    NOT NULL,
+    asset_class     TEXT    NOT NULL,
+    asset_name      TEXT    NOT NULL,
+    isin_or_code    TEXT    DEFAULT '',
+    institution     TEXT    DEFAULT '',
+    account         TEXT    DEFAULT '',
+    owner           TEXT    DEFAULT '',
+    currency        TEXT    DEFAULT 'IDR',
+    quantity        REAL    DEFAULT 0,
+    unit_price      REAL    DEFAULT 0,
+    market_value    REAL    DEFAULT 0,
+    market_value_idr REAL   DEFAULT 0,
+    cost_basis      REAL    DEFAULT 0,
+    cost_basis_idr  REAL    DEFAULT 0,
+    unrealised_pnl_idr REAL DEFAULT 0,
+    maturity_date   TEXT    DEFAULT '',
+    coupon_rate     REAL    DEFAULT 0,
+    import_date     TEXT    DEFAULT '',
+    UNIQUE(snapshot_date, asset_class, asset_name, owner)
+);
+CREATE INDEX IF NOT EXISTS idx_holdings_date ON holdings(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_holdings_class ON holdings(asset_class);
+
+CREATE TABLE IF NOT EXISTS account_balances (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date   TEXT    NOT NULL,
+    institution     TEXT    NOT NULL,
+    account         TEXT    NOT NULL,
+    account_type    TEXT    DEFAULT 'savings',
+    owner           TEXT    DEFAULT '',
+    currency        TEXT    DEFAULT 'IDR',
+    balance         REAL    DEFAULT 0,
+    balance_idr     REAL    DEFAULT 0,
+    import_date     TEXT    DEFAULT '',
+    UNIQUE(snapshot_date, institution, account, owner)
+);
+CREATE INDEX IF NOT EXISTS idx_balances_date ON account_balances(snapshot_date);
+
+CREATE TABLE IF NOT EXISTS net_worth_snapshots (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date        TEXT    NOT NULL UNIQUE,
+    savings_idr          REAL    DEFAULT 0,
+    deposits_idr         REAL    DEFAULT 0,
+    bonds_idr            REAL    DEFAULT 0,
+    stocks_idr           REAL    DEFAULT 0,
+    mutual_funds_idr     REAL    DEFAULT 0,
+    properties_idr       REAL    DEFAULT 0,
+    other_idr            REAL    DEFAULT 0,
+    total_assets_idr     REAL    DEFAULT 0,
+    total_liabilities_idr REAL   DEFAULT 0,
+    net_worth_idr        REAL    DEFAULT 0,
+    mom_change_idr       REAL    DEFAULT 0,
+    notes                TEXT    DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_nw_date ON net_worth_snapshots(snapshot_date);
+```
+
+---
+
+## 36. Stage 3 API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/holdings` | List holdings. Params: `snapshot_date`, `asset_class`, `owner`, `institution` |
+| `POST` | `/api/holdings` | Add/update a single holding (upserts by unique key) |
+| `GET` | `/api/holdings/summary` | Aggregated totals by asset class for a given snapshot date |
+| `GET` | `/api/account-balances` | List account balances. Params: `snapshot_date`, `owner` |
+| `POST` | `/api/account-balances` | Add/update a single account balance |
+| `GET` | `/api/net-worth` | Net worth snapshots over time. Params: `from_date`, `to_date` |
+| `POST` | `/api/net-worth/snapshot` | Generate a net worth snapshot for a given date (aggregates from holdings + balances) |
+| `POST` | `/api/import-portfolio` | Import holdings from a parsed Permata portfolio PDF |
+
+All endpoints follow the existing Stage 2 patterns: JSON request/response, standard error responses, SQLite-backed.
+
+---
+
+## 37. Stage 3 PWA Views
+
+### Wealth.vue — Net Worth Dashboard
+
+- **Top cards:** Total Net Worth (IDR), Month-over-Month change (absolute + percentage), Total Assets vs Total Liabilities
+- **Composition donut chart:** Breakdown by asset class (savings, bonds, stocks, properties, etc.) with percentages
+- **Trend line chart:** Net worth over the last 12 months
+- **Asset class breakdown table:** Each class with current value, percentage of total, and MoM change
+- **By-owner split:** Side-by-side net worth for each owner
+
+### Holdings.vue — Holdings List & Entry
+
+- **Filter bar:** Asset class, owner, institution, snapshot date
+- **Holdings table:** Sortable columns — asset name, class, institution, market value IDR, unrealised P&L, maturity date
+- **Expanded detail panel** (same pattern as Transactions.vue): Full holding details including cost basis, coupon rate, ISIN
+- **Manual entry form:** Add/edit holdings for assets without PDF import (properties, overseas accounts, manual stock positions)
+- **Import button:** Upload Permata consolidated PDF to auto-extract bond/investment holdings
+
+### Navigation update
+
+- Add "💰 Wealth" tab to the bottom navigation bar (between Dashboard and Transactions, or as a new 4th tab)
+
+---
+
+## 38. Stage 3 Monthly Workflow
+
+```
+Monthly wealth management cycle (1st–5th of each month):
+
+1. Download bank statements (PDFs) as usual for Stage 2
+   └── Permata consolidated statement includes both savings AND investment data
+
+2. Run Stage 2 import (transactions)
+   └── python3 -m finance.importer  →  python3 -m finance.sync
+
+3. Import portfolio holdings from Permata statement
+   └── POST /api/import-portfolio  (or CLI: python3 -m finance.portfolio)
+   └── Parser extracts bond holdings (name, face value, market value, coupon, maturity)
+   └── Writes to Holdings tab in Sheets + syncs to SQLite
+
+4. Update manual holdings (if needed)
+   └── PWA → Holdings → add/edit property values, overseas accounts, stock positions
+
+5. Update account balances
+   └── Auto-extracted from bank statement parsers (savings balances)
+   └── Manual entry for accounts without PDF statements
+
+6. Generate net worth snapshot
+   └── POST /api/net-worth/snapshot?date=2026-03-31
+   └── Aggregates all holdings + account balances by asset class
+   └── Writes one row to Net Worth Snapshots tab
+
+7. Review dashboard
+   └── PWA → Wealth → see total net worth, composition, trends
+```
+
+---
+
+## 39. Stage 3 Setup Checklist
+
+- [ ] Create 3 new Google Sheets tabs (Holdings, Account Balances, Net Worth Snapshots) with headers
+- [ ] Add tab names to `config/settings.toml` under `[google_sheets]`
+- [ ] Add tab fields to `SheetsConfig` dataclass in `finance/config.py`
+- [ ] Add Sheets read/write methods to `finance/sheets.py`
+- [ ] Create SQLite tables in `finance/sync.py` (or a migration script)
+- [ ] Build `finance/parsers/permata_portfolio.py` — extract bond holdings from Permata consolidated PDF
+- [ ] Extend `finance/sync.py` to sync holdings, account balances, and net worth snapshots
+- [ ] Add ~8 new API endpoints to `finance/api.py`
+- [ ] Build `Wealth.vue` — net worth dashboard with composition donut + trend line
+- [ ] Build `Holdings.vue` — holdings list with filters, detail panel, manual entry form
+- [ ] Add Wealth tab to PWA navigation
+- [ ] Test end-to-end: PDF → parser → Sheets → sync → API → PWA
+- [ ] Update GUIDE.md with implementation details and bump version
+
+### Implementation phases
+
+| Phase | Scope | Depends on |
+|---|---|---|
+| **Phase 1: Backend foundation** | SQLite tables, Sheets tabs, config, sync | — |
+| **Phase 2: Permata portfolio parser** | `parsers/permata_portfolio.py`, Sheets writer | Phase 1 |
+| **Phase 3: API endpoints** | ~8 new endpoints, upsert logic | Phase 1 |
+| **Phase 4: PWA views** | Wealth.vue, Holdings.vue, navigation | Phase 3 |
+| **Phase 5: Workflow & polish** | Monthly snapshot generation, import CLI, docs | Phase 2 + 4 |
+
+
+*Guide last updated 2026-03-29 · v2.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned*

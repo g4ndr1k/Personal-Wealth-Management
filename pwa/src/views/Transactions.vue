@@ -108,6 +108,36 @@
                 <div class="dv" style="font-family:monospace;font-size:10px">{{ tx.hash }}</div>
               </div>
             </div>
+
+            <!-- Category editor -->
+            <div class="cat-editor">
+              <div class="cat-editor-hd">Change category</div>
+              <div class="cat-editor-row">
+                <select
+                  v-model="editCategory"
+                  class="cat-select"
+                  @click.stop
+                >
+                  <option value="" disabled>Select category…</option>
+                  <option v-for="c in store.categoryNames" :key="c" :value="c">
+                    {{ catIcon(c) }} {{ c }}
+                  </option>
+                </select>
+                <button
+                  class="btn btn-primary btn-sm"
+                  :disabled="!editCategory || editCategory === tx.category || saving"
+                  @click.stop="saveCategory(tx)"
+                >
+                  {{ saving ? 'Saving…' : 'Save' }}
+                </button>
+              </div>
+              <div v-if="saveError" class="alert alert-error" style="margin-top:6px;padding:6px 8px;font-size:12px">
+                {{ saveError }}
+              </div>
+              <div v-if="saveSuccess" class="alert alert-success" style="margin-top:6px;padding:6px 8px;font-size:12px">
+                ✓ Category &amp; alias updated {{ typeof saveSuccess === 'string' ? `(${saveSuccess})` : '' }}
+              </div>
+            </div>
           </div>
         </template>
       </div>
@@ -147,6 +177,12 @@ const filters = ref({
   q:        '',
 })
 
+// Category editor state
+const editCategory = ref('')
+const saving       = ref(false)
+const saveError    = ref(null)
+const saveSuccess  = ref(false)
+
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
 
 const MONTHS_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December']
@@ -179,7 +215,46 @@ function goPage(p) {
 }
 
 function toggle(tx) {
-  expandedHash.value = expandedHash.value === tx.hash ? null : tx.hash
+  if (expandedHash.value === tx.hash) {
+    expandedHash.value = null
+  } else {
+    expandedHash.value = tx.hash
+    // Pre-fill the editor with the current category
+    editCategory.value = tx.category || ''
+    saveError.value    = null
+    saveSuccess.value  = false
+  }
+}
+
+async function saveCategory(tx) {
+  saving.value      = true
+  saveError.value   = null
+  saveSuccess.value = false
+  try {
+    const res = await api.patchCategory(tx.hash, { category: editCategory.value, update_alias: true })
+    // Update the local transaction object so the UI reflects the change
+    if (res.transaction) {
+      tx.category = res.transaction.category
+      tx.notes    = res.transaction.notes
+    }
+    // Also update any other visible transactions that were bulk-updated
+    if (res.also_updated > 0) {
+      const raw = tx.raw_description
+      for (const t of transactions.value) {
+        if (t.hash !== tx.hash && t.raw_description === raw) {
+          t.category = editCategory.value
+        }
+      }
+    }
+    saveSuccess.value = res.also_updated
+      ? `+ ${res.also_updated} similar`
+      : true
+    setTimeout(() => { saveSuccess.value = false }, 3000)
+  } catch (e) {
+    saveError.value = e.message
+  } finally {
+    saving.value = false
+  }
 }
 
 async function load() {
@@ -202,8 +277,11 @@ async function load() {
     totalCount.value   = res.total_count  || 0
 
     // Compute income/expense totals from this page's data
+    // Exclude non-cashflow categories (same as API summary endpoints)
+    const EXCLUDE_CATS = new Set(['Internal Transfer', 'Opening Balance'])
     let inc = 0, exp = 0
     for (const tx of transactions.value) {
+      if (EXCLUDE_CATS.has(tx.category)) continue
       if (tx.amount >= 0) inc += tx.amount
       else                exp += tx.amount
     }
@@ -217,3 +295,35 @@ async function load() {
 
 onMounted(load)
 </script>
+
+<style scoped>
+.cat-editor {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary, #f8f9fa);
+  border-radius: 0 0 8px 8px;
+}
+.cat-editor-hd {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.cat-editor-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.cat-select {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+}
+</style>

@@ -28,6 +28,19 @@ async function post(path, body = {}) {
   return res.json()
 }
 
+async function patch(path, body = {}) {
+  const res = await fetch(BASE + path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`${res.status}: ${text || res.statusText}`)
+  }
+  return res.json()
+}
+
 export const api = {
   health:              ()         => get('/health'),
   owners:              ()         => get('/owners'),
@@ -41,4 +54,5 @@ export const api = {
   saveAlias:           (body)     => post('/alias', body),
   sync:                ()         => post('/sync'),
   importData:          (body={})  => post('/import', body),
+  patchCategory:       (hash, body) => patch(`/transaction/${hash}/category`, body),
 }

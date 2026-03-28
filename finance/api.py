@@ -12,9 +12,10 @@ Endpoints
   GET  /api/summary/year/{year}
   GET  /api/summary/{year}/{month}
   GET  /api/review-queue           ?limit=
-  POST /api/alias                  {hash, alias, merchant, category, match_type, apply_to_similar}
-  POST /api/sync
-  POST /api/import                 {dry_run?, overwrite?}
+  POST  /api/alias                  {hash, alias, merchant, category, match_type, apply_to_similar}
+  PATCH /api/transaction/{hash}/category  {category, notes?}
+  POST  /api/sync
+  POST  /api/import                 {dry_run?, overwrite?}
 
 All read endpoints query SQLite only (data/finance.db).
 Write endpoints (alias, sync, import) also touch Google Sheets.
@@ -120,6 +121,12 @@ class AliasRequest(BaseModel):
 class ImportRequest(BaseModel):
     dry_run:   bool = False
     overwrite: bool = False
+
+
+class CategoryOverrideRequest(BaseModel):
+    category:     str
+    notes:        str  = ""
+    update_alias: bool = True   # also update Merchant Aliases tab so future imports auto-categorise
 
 
 # ── /api/health ───────────────────────────────────────────────────────────────
@@ -278,10 +285,10 @@ def get_annual_summary(year: int):
             SELECT
                 CAST(strftime('%m', date) AS INTEGER) AS month,
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END)      AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END)      AS expense,
                 COUNT(*)                               AS tx_count
             FROM transactions
@@ -296,10 +303,10 @@ def get_annual_summary(year: int):
             """
             SELECT
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -370,10 +377,10 @@ def get_monthly_summary(year: int, month: int):
             SELECT
                 owner,
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -384,15 +391,15 @@ def get_monthly_summary(year: int, month: int):
             (period,),
         ).fetchall()
 
-        # ── Grand totals (Internal Transfer excluded from income/expense) ─────
+        # ── Grand totals (Internal Transfer + Opening Balance excluded) ────
         totals = conn.execute(
             """
             SELECT
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category != 'Internal Transfer')
+                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -413,7 +420,7 @@ def get_monthly_summary(year: int, month: int):
     total_income  = totals["income"]  or 0.0
     total_expense = totals["expense"] or 0.0
 
-    TRANSFER_CATS = {"Internal Transfer"}   # excluded from expense % calculation
+    TRANSFER_CATS = {"Internal Transfer", "Opening Balance"}  # excluded from income/expense % calculation
     by_category = []
     for r in cat_rows:
         amt  = r["total_amount"] or 0.0
@@ -562,6 +569,113 @@ def post_alias(req: AliasRequest):
     }
 
 
+# ── /api/transaction/{hash}/category ──────────────────────────────────────────
+
+@app.patch("/api/transaction/{tx_hash}/category")
+def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
+    """
+    Manually override the category for a specific transaction.
+
+    1. Writes to the Category Overrides tab in Google Sheets (survives re-imports)
+    2. Updates the transaction in SQLite immediately (no sync needed)
+    3. Returns the updated transaction row
+    """
+    # Validate category exists
+    with _db() as conn:
+        cat_row = conn.execute(
+            "SELECT category FROM categories WHERE category = ?", (req.category,)
+        ).fetchone()
+        if not cat_row:
+            raise HTTPException(400, f"Unknown category: {req.category!r}")
+
+        # Verify transaction exists
+        tx = conn.execute(
+            "SELECT * FROM transactions WHERE hash = ?", (tx_hash,)
+        ).fetchone()
+        if not tx:
+            raise HTTPException(404, f"Transaction not found: {tx_hash}")
+
+    # Write override to Google Sheets (persistent, survives re-sync)
+    _sheets.write_override(tx_hash, req.category, req.notes)
+
+    # Update SQLite immediately so the dashboard reflects it now
+    also_updated = 0
+    with _db() as conn:
+        conn.execute(
+            "UPDATE transactions SET category = ? WHERE hash = ?",
+            (req.category, tx_hash),
+        )
+        if req.notes:
+            conn.execute(
+                "UPDATE transactions SET notes = ? WHERE hash = ?",
+                (req.notes, tx_hash),
+            )
+
+        raw_desc = tx["raw_description"]
+        merchant = tx["merchant"]
+
+        # Also update the Merchant Aliases tab so future imports auto-categorise
+        if req.update_alias and raw_desc:
+            # Check if an alias already exists for this raw_description
+            existing = conn.execute(
+                "SELECT category FROM merchant_aliases WHERE alias = ?",
+                (raw_desc,),
+            ).fetchone()
+            if existing and existing["category"] != req.category:
+                # Update the existing alias in Sheets
+                _sheets.update_alias_category(raw_desc, req.category)
+                conn.execute(
+                    "UPDATE merchant_aliases SET category = ? WHERE alias = ?",
+                    (req.category, raw_desc),
+                )
+                log.info("Updated alias: %s → %s", raw_desc[:40], req.category)
+            elif not existing:
+                # Create new alias
+                alias_merchant = merchant or raw_desc
+                _sheets.append_alias(
+                    merchant=alias_merchant,
+                    alias=raw_desc,
+                    category=req.category,
+                    match_type="exact",
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO merchant_aliases (merchant, alias, category, match_type) VALUES (?, ?, ?, ?)",
+                    (alias_merchant, raw_desc, req.category, "exact"),
+                )
+                log.info("New alias: %s → %s [%s]", raw_desc[:40], alias_merchant, req.category)
+
+            # Apply to all other transactions with the same raw_description
+            similar = conn.execute(
+                """
+                SELECT hash FROM transactions
+                WHERE raw_description = ?
+                  AND hash != ?
+                  AND (category IS NULL OR category = '' OR category != ?)
+                """,
+                (raw_desc, tx_hash, req.category),
+            ).fetchall()
+            if similar:
+                similar_hashes = [r["hash"] for r in similar]
+                conn.executemany(
+                    "UPDATE transactions SET category = ? WHERE hash = ?",
+                    [(req.category, h) for h in similar_hashes],
+                )
+                also_updated = len(similar_hashes)
+                log.info("Applied category to %d similar transactions.", also_updated)
+
+        updated = conn.execute(
+            "SELECT * FROM transactions WHERE hash = ?", (tx_hash,)
+        ).fetchone()
+
+    log.info("Category override: %s → %s", tx_hash[:16], req.category)
+
+    return {
+        "ok":            True,
+        "also_updated":  also_updated,
+        "transaction":   _row(updated) if updated else None,
+    }
+
+
 # ── /api/sync ─────────────────────────────────────────────────────────────────
 
 @app.post("/api/sync")
@@ -625,7 +739,47 @@ def post_import(req: ImportRequest = ImportRequest()):
 # Serves pwa/dist/ at "/" so the dashboard is accessible at the same origin.
 # In dev: run `npm run dev` in pwa/ instead (uses Vite proxy to :8090).
 import pathlib as _pathlib
+from starlette.responses import FileResponse as _FileResponse
+
 _pwa_dist = _pathlib.Path(__file__).parent.parent / "pwa" / "dist"
 if _pwa_dist.is_dir():
-    app.mount("/", StaticFiles(directory=str(_pwa_dist), html=True), name="pwa")
+    _index_html = str(_pwa_dist / "index.html")
+
+    # Mount static files first (JS, CSS, icons, manifest, service worker).
+    # html=True makes "/" serve index.html.
+    app.mount("/assets", StaticFiles(directory=str(_pwa_dist / "assets")), name="pwa-assets")
+    if (_pwa_dist / "icons").is_dir():
+        app.mount("/icons", StaticFiles(directory=str(_pwa_dist / "icons")), name="pwa-icons")
+
+    # Serve root-level PWA files (SW, manifest) that must live at "/"
+    app.mount("/pwa-root", StaticFiles(directory=str(_pwa_dist)), name="pwa-root")
+
+    @app.get("/manifest.webmanifest")
+    async def _pwa_manifest():
+        return _FileResponse(str(_pwa_dist / "manifest.webmanifest"))
+
+    @app.get("/registerSW.js")
+    async def _pwa_register_sw():
+        return _FileResponse(str(_pwa_dist / "registerSW.js"))
+
+    @app.get("/sw.js")
+    async def _pwa_sw():
+        return _FileResponse(str(_pwa_dist / "sw.js"), media_type="application/javascript")
+
+    # Workbox runtime (filename includes a build hash)
+    for _wb in _pwa_dist.glob("workbox-*.js"):
+        def _make_wb(fp=str(_wb), name=_wb.name):
+            async def handler():
+                return _FileResponse(fp, media_type="application/javascript")
+            handler.__name__ = f"_wb_{name.replace('.', '_').replace('-', '_')}"
+            return handler
+        app.get(f"/{_wb.name}")(_make_wb())
+
+    # SPA catch-all: Vue Router uses HTML5 history mode, so paths like
+    # /transactions, /dashboard, /settings must all return index.html.
+    # This MUST be the very last route — after all /api/* and static mounts.
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str):
+        return _FileResponse(_index_html, media_type="text/html")
+
     log.info("PWA static files served from %s", _pwa_dist)

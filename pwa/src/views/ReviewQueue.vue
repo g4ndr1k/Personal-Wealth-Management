@@ -118,7 +118,7 @@
       <div v-if="hasMore" class="load-more">
         <button class="btn btn-ghost" :disabled="loadingMore" @click="loadMore">
           <span v-if="loadingMore"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Loading…</span>
-          <span v-else">Load more</span>
+          <span v-else>Load more</span>
         </button>
       </div>
     </div>
@@ -237,8 +237,8 @@ async function load() {
   error.value   = null
   try {
     const data = await api.reviewQueue(LIMIT)
-    items.value = data
-    hasMore.value = data.length === LIMIT
+    items.value = data.pending ?? data
+    hasMore.value = items.value.length === LIMIT
   } catch (e) {
     error.value = e.message
   } finally {
@@ -250,7 +250,7 @@ async function loadMore() {
   loadingMore.value = true
   try {
     const data = await api.reviewQueue(LIMIT * 2)
-    items.value = data
+    items.value = data.pending ?? data
     hasMore.value = false
   } catch (e) {
     showToast(`❌ ${e.message}`)

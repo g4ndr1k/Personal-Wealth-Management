@@ -77,6 +77,10 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
     cur_rows   = _read_currencies(sheets_client)
     log.info("  %d currency rows", len(cur_rows))
 
+    log.info("Reading Category Overrides tab …")
+    overrides  = sheets_client.read_overrides()
+    log.info("  %d override rows", len(overrides))
+
     # ── Write to SQLite (single atomic transaction) ───────────────────────────
     # Deduplicate by hash — keep first occurrence (Sheets order = import order)
     seen_hashes: set[str] = set()
@@ -91,6 +95,19 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
             len(tx_rows), len(deduped_tx),
         )
     tx_rows = deduped_tx
+
+    # Apply category overrides — these take priority over auto-categorised values
+    if overrides:
+        applied = 0
+        for r in tx_rows:
+            ov = overrides.get(r["hash"])
+            if ov:
+                r["category"] = ov["category"]
+                if ov.get("notes"):
+                    r["notes"] = ov["notes"]
+                applied += 1
+        if applied:
+            log.info("Applied %d category override(s).", applied)
 
     log.info("Writing to SQLite …")
     with conn:

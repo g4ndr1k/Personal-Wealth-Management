@@ -43,6 +43,7 @@ IMPORT_LOG_HEADERS = [
     "import_date", "import_file", "rows_added",
     "rows_skipped", "rows_total", "duration_s", "notes",
 ]
+OVERRIDES_HEADERS = ["hash", "category", "notes", "updated_at"]
 
 
 class SheetsClient:
@@ -209,6 +210,80 @@ class SheetsClient:
                 log.error("Batch overwrite failed (chunk %d): %s", i // CHUNK, e)
                 raise
 
+    # ── Category Overrides ──────────────────────────────────────────────────
+
+    def read_overrides(self) -> dict[str, dict]:
+        """Return {hash: {"category": ..., "notes": ..., "updated_at": ...}}
+        from the Category Overrides tab."""
+        qtab = f"'{self.cfg.overrides_tab}'"
+        rows = self._get(f"{qtab}!A:D")
+        result: dict[str, dict] = {}
+        if len(rows) < 2:
+            return result
+        for row in rows[1:]:
+            r = list(row) + [""] * (4 - len(row))
+            h = (r[0] or "").strip()
+            cat = (r[1] or "").strip()
+            if h and cat:
+                result[h] = {
+                    "category":   cat,
+                    "notes":      (r[2] or "").strip(),
+                    "updated_at": (r[3] or "").strip(),
+                }
+        return result
+
+    def write_override(self, tx_hash: str, category: str, notes: str = ""):
+        """Append or update one row in the Category Overrides tab.
+
+        If the hash already exists, overwrites that row in-place.
+        Otherwise appends a new row.
+        """
+        qtab = f"'{self.cfg.overrides_tab}'"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_row = [tx_hash, category, notes, now]
+
+        # Check if hash already exists so we can overwrite instead of duplicating
+        rows = self._get(f"{qtab}!A:A")
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue  # skip header
+            if row and row[0].strip() == tx_hash:
+                # Overwrite existing row
+                self._update(
+                    f"{qtab}!A{i + 1}:D{i + 1}",
+                    [new_row],
+                )
+                log.info("Override updated: %s → %s", tx_hash[:16], category)
+                return
+
+        # Hash not found — append new row
+        self._append(f"{qtab}!A:D", [new_row])
+        log.info("Override added: %s → %s", tx_hash[:16], category)
+
+    def ensure_overrides_tab(self):
+        """Create the Category Overrides tab with headers if it doesn't exist."""
+        tab = self.cfg.overrides_tab
+        # Check if tab exists by listing all sheets in the spreadsheet
+        meta = self.service.spreadsheets().get(
+            spreadsheetId=self.cfg.spreadsheet_id,
+            fields="sheets.properties.title",
+        ).execute()
+        existing_tabs = {s["properties"]["title"] for s in meta.get("sheets", [])}
+
+        if tab not in existing_tabs:
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.cfg.spreadsheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": tab}}}]},
+            ).execute()
+            log.info("Created tab: %s", tab)
+
+        # Write headers if row 1 is empty
+        qtab = f"'{tab}'"
+        existing = self._get(f"{qtab}!A1:D1")
+        if not existing or not existing[0]:
+            self._update(f"{qtab}!A1:D1", [OVERRIDES_HEADERS])
+            log.info("Wrote headers to %s", tab)
+
     def append_alias(
         self,
         merchant: str,
@@ -225,6 +300,25 @@ class SheetsClient:
             )
         except HttpError as e:
             log.error("Failed to append alias (%s → %s): %s", alias, merchant, e)
+
+    def update_alias_category(self, alias: str, new_category: str):
+        """Update the category column for an existing alias row (matched by alias column B)."""
+        try:
+            rows = self._get(f"{self.cfg.aliases_tab}!A:E")
+            for i, row in enumerate(rows):
+                if i == 0:
+                    continue  # skip header
+                r = list(row) + [""] * (5 - len(row))
+                if r[1].strip() == alias:
+                    self._update(
+                        f"{self.cfg.aliases_tab}!C{i + 1}",
+                        [[new_category]],
+                    )
+                    log.info("Updated alias category row %d: %s → %s", i + 1, alias[:40], new_category)
+                    return
+            log.warning("Alias not found for update: %s", alias[:40])
+        except HttpError as e:
+            log.error("Failed to update alias category (%s): %s", alias[:40], e)
 
     def log_import(
         self,

@@ -18,7 +18,7 @@ services:
       - ./config/settings.toml:/app/config/settings.toml:ro
       - ./data:/app/data
       - ./output/xls:/app/output/xls:ro
-      - ./secrets:/app/secrets:ro
+      - ./secrets:/app/secrets
     ports:
       - "8090:8090"
     extra_hosts:

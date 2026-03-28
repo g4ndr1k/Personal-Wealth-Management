@@ -68,6 +68,8 @@ class Categorizer:
 
         # Layer 1: exact match  {UPPER_ALIAS: (merchant, category)}
         self._exact: dict[str, tuple[str, str]] = {}
+        # Layer 1b: contains match  [(upper_substring, merchant, category)]
+        self._contains: list[tuple[str, str, str]] = []
         # Layer 2: regex match  [(compiled_pattern, merchant, category)]
         self._regex: list[tuple[re.Pattern, str, str]] = []
         # Few-shot examples for Layer 3 (up to 10, FIFO)
@@ -92,12 +94,15 @@ class Categorizer:
                     )
                 except re.error as e:
                     log.warning("Invalid regex alias %r: %s", alias, e)
+            elif mtype == "contains":
+                self._contains.append((alias.upper(), merchant, category))
             else:
                 self._exact[alias.upper()] = (merchant, category)
 
     def reload_aliases(self, aliases: list[dict]):
         """Replace all alias rules (call after pulling fresh data from Sheets)."""
         self._exact.clear()
+        self._contains.clear()
         self._regex.clear()
         self._load_aliases(aliases)
         log.debug(
@@ -138,6 +143,12 @@ class Categorizer:
             merchant, category = self._exact[key]
             log.debug("L1 exact: %r → %s / %s", desc, merchant, category)
             return CategorizationResult(merchant, category, layer=1, confidence="auto")
+
+        # ── Layer 1b: contains match ─────────────────────────────────────────
+        for substring, merchant, category in self._contains:
+            if substring in key:
+                log.debug("L1b contains: %r → %s / %s", desc, merchant, category)
+                return CategorizationResult(merchant, category, layer=1, confidence="auto")
 
         # ── Layer 2: regex match ──────────────────────────────────────────────
         for pattern, merchant, category in self._regex:

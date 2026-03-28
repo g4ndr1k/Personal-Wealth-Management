@@ -314,22 +314,30 @@ def _update_all_transactions(output_dir: str, result: StatementResult,
                              month_label_with_type: str, owner: str) -> str:
     """
     Maintain a single ALL_TRANSACTIONS.xlsx in output_dir.
-    Removes existing rows matching (owner, month_label, bank, stmt_type),
-    then appends new rows.
+    Removes existing rows matching (owner, month_label, bank, stmt_type,
+    account_numbers), then appends new rows.
+
+    Account numbers are included in the dedup key so that multiple accounts
+    from the same bank/owner/month (e.g. two Permata savings accounts for
+    the same person) don't overwrite each other.
     """
     filepath = os.path.join(output_dir, "ALL_TRANSACTIONS.xlsx")
     month_label = " ".join(month_label_with_type.split()[:2])  # "Feb 2026" from "Feb 2026 CC"
 
+    # Collect all account numbers in this result for scoped dedup
+    result_accounts = {tx.account_number for tx in result.transactions if tx.account_number}
+
     if os.path.exists(filepath):
         wb = load_workbook(filepath)
         ws = wb.active
-        # Remove rows matching this exact owner/month/bank/type combo
+        # Remove rows matching this exact owner/month/bank/type/account combo
         rows_to_delete = [
             r for r in range(2, ws.max_row + 1)
             if (ws.cell(r, 1).value == owner and
                 ws.cell(r, 2).value == month_label and
                 ws.cell(r, 3).value == result.bank and
-                ws.cell(r, 4).value == result.statement_type)
+                ws.cell(r, 4).value == result.statement_type and
+                (not result_accounts or ws.cell(r, 14).value in result_accounts))
         ]
         for r in reversed(rows_to_delete):
             ws.delete_rows(r)
