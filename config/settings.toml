@@ -105,3 +105,40 @@ parser_llm_model = "llama3.2:3b"
 [owners]
 "Emanuel" = "Gandrik"
 "Dian Pratiwi" = "Helen"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — Personal Finance Dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+[finance]
+# Stage 1 output — immutable source for Stage 2 imports (never edit manually)
+xlsx_input = "/Users/g4ndr1k/agentic-ai/output/xls/ALL_TRANSACTIONS.xlsx"
+# Stage 2 SQLite read cache (throw away and rebuild anytime from Google Sheets)
+sqlite_db  = "/Users/g4ndr1k/agentic-ai/data/finance.db"
+
+[google_sheets]
+# Download from Google Cloud Console → APIs & Services → Credentials
+# → OAuth 2.0 Client ID → Desktop app → Download JSON
+credentials_file = "/Users/g4ndr1k/agentic-ai/secrets/google_credentials.json"
+# Saved automatically after first OAuth consent; refreshed on expiry
+token_file       = "/Users/g4ndr1k/agentic-ai/secrets/google_token.json"
+# Copy the ID from the Google Sheet URL:
+# https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit
+spreadsheet_id   = "1vTtSFrXK4IoAmK1sTZkqiBD6qGEzSjsNEPPFiHZd-28"    # ← fill this in after creating the sheet
+
+transactions_tab = "Transactions"
+aliases_tab      = "Merchant Aliases"
+categories_tab   = "Categories"
+currency_tab     = "Currency Codes"
+import_log_tab   = "Import Log"
+
+[fastapi]
+host         = "0.0.0.0"
+port         = 8090           # distinct from bridge :9100 and agent health :8080
+cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
+
+[ollama_finance]
+# Reuse the existing Ollama instance (same model as mail agent)
+host            = "http://host.docker.internal:11434"
+model           = "llama3.2:3b"
+timeout_seconds = 60

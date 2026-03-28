@@ -1,0 +1,22 @@
+# Stage 2 — Personal Finance Dashboard dependencies
+# Install with:
+#   /opt/homebrew/bin/pip3.13 install --break-system-packages -r finance/requirements.txt
+#
+# Note: --break-system-packages is required on macOS with Homebrew Python 3.12+.
+# The existing Stage 1 packages (openpyxl, pdfplumber, pikepdf) were installed
+# the same way, so this keeps everything consistent.
+
+# Google Sheets API
+google-auth>=2.28.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.124.0
+
+# Fuzzy matching (review queue suggestions)
+rapidfuzz>=3.6.0
+
+# Stage 2-B — FastAPI backend + uvicorn server
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# Already installed for Stage 1 — listed here for completeness
+# openpyxl>=3.1.0

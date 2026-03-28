@@ -1,12 +1,14 @@
-# Agentic Mail Alert System — Build & Operations Guide
+# Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 1.7.0
+**Version:** 2.2.0 · Stage 1 complete · Stage 2 fully built (sync engine + FastAPI + Vue 3 PWA)
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase post-repair
+**Last validated against:** checked-in codebase 2026-03-28
 
 ---
 
 ## Table of Contents
+
+### Stage 1 — Mail Alert & PDF Statement Processor (complete)
 
 1. [What This System Does](#1-what-this-system-does)
 2. [Architecture](#2-architecture)
@@ -31,6 +33,18 @@
 21. [Known Limitations](#21-known-limitations)
 22. [Troubleshooting](#22-troubleshooting)
 23. [Version History](#23-version-history)
+
+### Stage 2 — Personal Finance Dashboard (fully built ✅)
+
+24. [Stage 2 Overview & Scope](#24-stage-2-overview--scope)
+25. [Stage 2 Architecture](#25-stage-2-architecture)
+26. [Stage 2 Data Schemas](#26-stage-2-data-schemas)
+27. [Stage 2 Categorization Engine](#27-stage-2-categorization-engine)
+28. [Stage 2 Google Sheets Integration](#28-stage-2-google-sheets-integration)
+29. [Stage 2 FastAPI Backend & PWA](#29-stage-2-fastapi-backend--pwa)
+30. [Stage 2 Monthly Workflow](#30-stage-2-monthly-workflow)
+31. [Stage 2 Setup Checklist](#31-stage-2-setup-checklist)
+32. [Stage 2 Operations Reference](#32-stage-2-operations-reference)
 
 ---
 
@@ -160,6 +174,29 @@ The system alerts on:
   - Multi-owner XLS export: `{Bank}_{Owner}.xlsx` per bank/owner pair + flat `ALL_TRANSACTIONS.xlsx` with Owner column
   - Mail.app attachment auto-scanner for bank PDFs
   - Web UI at `http://127.0.0.1:9100/pdf/ui`
+- Stage 2 finance package (`finance/`) — see §24–32
+  - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
+  - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation, XLSX date parser
+  - `finance/sheets.py` — Google Sheets API v4 client: OAuth 2.0 token management (personal account), read/write transactions, aliases, categories, currency hints, import log
+  - `finance/categorizer.py` — 4-layer categorization engine: exact alias → regex → Ollama AI suggestion → review queue flag
+  - `finance/importer.py` — CLI entry point: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, batch-appends to Google Sheets; `--dry-run`, `--overwrite`, `--file`, `-v`
+  - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 16 default categories and 18 currency codes
+  - `finance/db.py` — SQLite schema (5 tables + 5 indexes), WAL mode, `open_db()` connection helper
+  - `finance/sync.py` — Sheets → SQLite sync engine: atomic DELETE + INSERT per table, hash deduplication, sync_log, `--status` CLI flag
+  - `finance/api.py` — FastAPI app: 12 REST endpoints, CORS, SQLite `_db()` context manager, monthly summary aggregation, alias write-back to Sheets, auto-sync after import; also mounts `pwa/dist/` at `/` when present
+  - `finance/server.py` — uvicorn entry point: `python3 -m finance.server`; `--host`, `--port`, `--reload` overrides
+  - `finance/Dockerfile` — `python:3.12-slim` image; installs google-auth, fastapi, uvicorn[standard], rapidfuzz, openpyxl; copies `pwa/dist/` for production static serving
+  - `finance/requirements.txt` — Python dependencies: `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `rapidfuzz`, `fastapi`, `uvicorn[standard]`
+- Stage 2 Vue 3 PWA (`pwa/`) — see §29
+  - `pwa/src/views/Dashboard.vue` — month/owner navigation, summary cards, category bars, Chart.js 12-month trend, owner split table
+  - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), expandable detail rows
+  - `pwa/src/views/ReviewQueue.vue` — inline alias form: merchant, category, match type, apply-to-similar, toast feedback
+  - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
+  - `pwa/src/views/Settings.vue` — Sync + Import buttons with live results, API health status card
+  - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month, reviewCount badge
+  - `pwa/src/api/client.js` — thin `fetch` wrapper for all 12 API endpoints
+  - `pwa/vite.config.js` — @vitejs/plugin-vue + vite-plugin-pwa (Workbox NetworkFirst cache) + `/api` proxy to `:8090`
+  - Build output: `pwa/dist/` — 346 KB JS (121 KB gzipped), service worker + workbox generated
 
 ### Present but NOT integrated
 
@@ -326,8 +363,40 @@ agentic-ai/
 ├── exporters/                    # XLS export
 │   ├── __init__.py
 │   └── xls_writer.py             # openpyxl writer — {Bank}_{Owner}.xlsx + ALL_TRANSACTIONS.xlsx
+├── finance/                      # Stage 2 — Personal Finance Dashboard
+│   ├── __init__.py
+│   ├── config.py                 # Loads Stage 2 settings sections from settings.toml
+│   ├── models.py                 # FinanceTransaction dataclass + hash + date helpers
+│   ├── sheets.py                 # Google Sheets API v4 client (OAuth, read, write)
+│   ├── categorizer.py            # 4-layer engine: exact → regex → Ollama → review queue
+│   ├── importer.py               # CLI: ALL_TRANSACTIONS.xlsx → Google Sheets
+│   ├── setup_sheets.py           # One-time: create tabs, headers, seed reference data
+│   ├── db.py                     # SQLite schema + open_db() + WAL mode (finance.db)
+│   ├── sync.py                   # Sheets → SQLite sync engine + CLI (--status)
+│   ├── api.py                    # FastAPI: 12 REST endpoints + PWA static file mount
+│   ├── server.py                 # uvicorn entry point (python3 -m finance.server)
+│   ├── Dockerfile                # python:3.12-slim; copies finance/ + pwa/dist/
+│   └── requirements.txt          # google-auth, google-auth-oauthlib, google-api-python-client, rapidfuzz, fastapi, uvicorn
+├── pwa/                          # Stage 2 — Vue 3 PWA (mobile-first finance dashboard)
+│   ├── package.json              # Vue 3, Chart.js, Pinia, vue-router, vite-plugin-pwa
+│   ├── vite.config.js            # Vite + PWA plugin + /api proxy to :8090
+│   ├── index.html
+│   ├── dist/                     # Production build output (gitignored) — served by FastAPI
+│   └── src/
+│       ├── main.js
+│       ├── App.vue               # Shell: top bar + bottom nav + review badge
+│       ├── style.css             # CSS variables, cards, buttons, forms, toast
+│       ├── router/index.js       # 5 routes: /, /transactions, /review, /foreign, /settings
+│       ├── api/client.js         # fetch wrapper for all 12 /api/* endpoints
+│       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month, reviewCount
+│       └── views/
+│           ├── Dashboard.vue     # Month nav, summary cards, category bars, Chart.js trend, owner table
+│           ├── Transactions.vue  # Filters + paginated list + expandable detail rows
+│           ├── ReviewQueue.vue   # Inline alias form + apply-to-similar + toast
+│           ├── ForeignSpend.vue  # Grouped by currency, per-currency subtotals
+│           └── Settings.vue      # Sync, Import, health status
 ├── config/
-│   └── settings.toml             # All runtime configuration
+│   └── settings.toml             # All runtime configuration (Stage 1 + Stage 2 sections)
 ├── data/                         # Runtime SQLite DBs (gitignored)
 │   ├── agent.db
 │   ├── bridge.db
@@ -336,7 +405,8 @@ agentic-ai/
 │   ├── pdf_inbox/                # Drop PDFs/ZIPs here for batch processing
 │   │   └── _extracted/           # Auto-created; holds PDFs extracted from ZIPs
 │   ├── pdf_unlocked/             # Password-removed PDF copies
-│   └── seen_attachments.db       # Tracks already-scanned Mail.app attachments
+│   ├── seen_attachments.db       # Tracks already-scanned Mail.app attachments
+│   └── finance.db                # Stage 2 SQLite read cache (throw away and rebuild anytime)
 ├── logs/                         # Log files (gitignored)
 │   └── batch_process.log         # Batch processor run log (appended, DEBUG level)
 ├── output/
@@ -352,7 +422,9 @@ agentic-ai/
 │   └── start_agent.sh            # Docker agent startup wrapper (waits for Docker Desktop)
 ├── secrets/                      # Auth tokens (gitignored)
 │   ├── bridge.token
-│   └── banks.toml                # Bank PDF passwords (gitignored)
+│   ├── banks.toml                # Bank PDF passwords
+│   ├── google_credentials.json   # Stage 2 — OAuth 2.0 Client ID (downloaded from Google Cloud Console)
+│   └── google_token.json         # Stage 2 — saved automatically after first OAuth consent
 ├── .env                          # API keys (gitignored)
 └── docker-compose.yml
 ```
@@ -1911,6 +1983,127 @@ docker compose up -d
 
 ## 23. Version History
 
+### v2.2.0 (2026-03-28)
+
+#### Bug fixes
+
+- **Fixed: Dashboard Income/Expense always showed Rp0** — `Dashboard.vue` was reading `summary.income` / `summary.expense` but the API returns `total_income` / `total_expense`. Corrected field names in the computed properties.
+- **Fixed: "No expense data this month" even with categorised transactions** — `topCats` filtered on `c.total` (always `undefined`); API returns `c.amount`. Corrected in filter and display.
+- **Fixed: Monthly trend chart empty** — `renderChart()` read `yearData.value.months`; API key is `by_month`. Corrected.
+- **Fixed: "By Owner" section never rendered / owner filter broken** — `GET /api/summary/{year}/{month}` returned `by_owner` as a plain dict (`{"Gandrik": {...}}`); frontend called `.find()` and checked `.length` — both undefined on a dict. Changed API to return `by_owner` as an array of objects each containing an `owner` field.
+- **Fixed: `--overwrite` failing silently on large imports** — `overwrite_transactions` made one `values().update()` API call per row (449 calls), hitting Google Sheets rate limits. Replaced with a single `values().batchUpdate()` call chunked at 500 rows.
+- **Fixed: duplicate rows in Sheets left with empty categories after `--overwrite`** — `read_existing_hashes_with_rows` returned `dict[str, int]` mapping each hash to its *last* occurrence; `sync.py` keeps the *first* occurrence, so overwrite and sync targeted different rows. Changed return type to `dict[str, list[int]]` so `overwrite_transactions` updates **all** rows sharing a hash (first and all duplicates).
+- **Fixed: rows not in XLSX (e.g. Permata transactions) never re-categorised by `--overwrite`** — added a direct-patch script that reads empty-category rows from Sheets and runs the categorizer in-place via `batchUpdate`, without requiring an XLSX round-trip.
+
+#### Features
+
+- **Added: Anthropic Claude fallback (Layer 3b)** — `finance/categorizer.py` now tries the Anthropic Messages API when Ollama is unreachable. Configured via `[anthropic]` block in `settings.toml`; enabled by setting `ANTHROPIC_API_KEY` in `.env`. Wired through `finance/config.py` (`AnthropicFinanceConfig`), `finance/importer.py`, and `finance/api.py`. `ANTHROPIC_API_KEY` added to `finance-api` Docker service environment.
+- **Added: Cash Withdrawal category** — new category `💵 Cash Withdrawal` (sort 15) for ATM transactions. Alias `^TARIKAN ATM` updated from `Other` to `Cash Withdrawal`; all 58 matching Sheets rows back-filled.
+- **Added: Internal Transfer / External Transfer categories** — `🔁 Internal Transfer` (sort 17) for transfers between Gandrik & Helen accounts; `↗️ External Transfer` (sort 18) for transfers to external people/accounts.
+- **Changed: Subscriptions icon** updated from 🔄 to 📱 (was too similar to 🔁 Internal Transfer).
+- **Populated: Merchant Aliases tab** — 207 alias rules (22 regex + 185 exact) covering all 273 unique transaction descriptions; 100% L1/L2 auto-categorisation with zero L4 fallbacks.
+
+#### Categories (current)
+
+| Sort | Category | Icon |
+|---|---|---|
+| 1 | Housing | 🏠 |
+| 2 | Utilities | ⚡ |
+| 3 | Groceries | 🛒 |
+| 4 | Dining Out | 🍽️ |
+| 5 | Transport | 🚗 |
+| 6 | Shopping | 🛍️ |
+| 7 | Healthcare | 🏥 |
+| 8 | Entertainment | 🎬 |
+| 9 | Subscriptions | 📱 |
+| 10 | Travel | ✈️ |
+| 11 | Education | 📚 |
+| 12 | Personal Care | 💇 |
+| 13 | Gifts & Donations | 🎁 |
+| 14 | Fees & Interest | 🏦 |
+| 15 | Cash Withdrawal | 💵 |
+| 16 | Income | 💰 |
+| 17 | Other | ❓ |
+| 18 | Internal Transfer | 🔁 |
+| 19 | External Transfer | ↗️ |
+
+---
+
+### v2.1.0 (2026-03-28)
+
+- Added: `finance/db.py` — SQLite schema (5 tables: `transactions`, `merchant_aliases`, `categories`, `currency_codes`, `sync_log`); 5 indexes on common filter columns; WAL mode + foreign keys; `open_db()` creates parent dirs and applies schema idempotently
+- Added: `finance/sync.py` — Sheets → SQLite sync engine
+  - `sync(db_path, sheets_client) → dict` — atomic DELETE + INSERT per table in a single SQLite transaction; DB never in partial state
+  - Hash deduplication: 34 duplicate rows in Sheets detected and skipped (first occurrence wins); `log.warning()` emitted when duplicates found
+  - Appends to `sync_log` on every successful run (row counts + duration)
+  - CLI: `python3 -m finance.sync` / `--status` / `-v`
+  - First sync result: 449 Sheets rows → 415 unique SQLite rows, 1.72 s
+- Added: `finance/api.py` — FastAPI backend (12 endpoints)
+  - Module-level singletons: config, DB path, SheetsClient (lazy OAuth)
+  - CORS middleware from `[fastapi].cors_origins`
+  - `_db()` context manager: commit on clean exit, rollback on error
+  - `_tx_where()` helper: parameterized WHERE clause builder
+  - `GET /api/summary/{year}/{month}` — SQL aggregation: income, expense, net, transaction_count, needs_review, by_category (with `pct_of_expense`), by_owner
+  - `POST /api/alias` — writes alias to Sheets first; updates target row in SQLite; applies to all uncategorised rows with same `raw_description` when `apply_to_similar=true`
+  - `POST /api/import` — runs `finance.importer.run()` then auto-calls `finance.sync.sync()` if rows were added
+  - Static file mount: `app.mount("/", StaticFiles(..., html=True))` from `pwa/dist/` when present (last route — after all `/api/*` routes)
+- Added: `finance/server.py` — uvicorn entry point; `--host`, `--port`, `--reload` overrides; logs Swagger UI URL on startup
+- Added: `finance/Dockerfile` — `python:3.12-slim`; build context = project root; copies `finance/` and `pwa/dist/`; `EXPOSE 8090`; `CMD ["python3", "-m", "finance.server"]`
+- Updated: `finance/requirements.txt` — added `fastapi>=0.110.0`, `uvicorn[standard]>=0.27.0`
+- Updated: `docker-compose.yml` — added `finance-api` service before `mail-agent`; `mem_limit: 512m`; healthcheck via Python urllib on `/api/health`
+- Added: `pwa/` — Vue 3 PWA (Stage 2.1-C)
+  - Stack: Vue 3 (Composition API + `<script setup>`), Pinia, vue-router, Chart.js, vite-plugin-pwa (Workbox)
+  - 5 views: Dashboard, Transactions, ReviewQueue, ForeignSpend, Settings (see §29 for details)
+  - Production build: 346 KB JS (121 KB gzip), 12 KB CSS (3 KB gzip), service worker + workbox generated
+  - PWA manifest: standalone display, navy theme colour, start_url `/`
+  - Workbox NetworkFirst cache for all GET `/api/*` routes except `/sync`, `/import`, `/alias`
+- Added: §32 Stage 2 Operations Reference
+- Changed: GUIDE.md §3, §5, §24, §25, §26.6, §29, §31 updated to reflect fully-built status
+- Fixed: Design doc `docker-compose.yml` snippet in §25 corrected to match actual configuration
+- Fixed: Design doc SQLite schema in §26.6 corrected to actual (no `sheet_row` column; sync_log columns match implementation)
+- Fixed: `finance/config.py` — `get_finance_config()` and `get_sheets_config()` now check env var overrides before `settings.toml` values (`FINANCE_SQLITE_DB`, `FINANCE_XLSX_INPUT`, `GOOGLE_CREDENTIALS_FILE`, `GOOGLE_TOKEN_FILE`); required because `settings.toml` stores host-absolute paths that are wrong inside Docker
+- Updated: `docker-compose.yml` `finance-api` environment block — four path-override env vars added; container now reads `finance.db` from `/app/data/finance.db` and OAuth secrets from `/app/secrets/`
+- Deployed: `finance-api` container running and healthy; `docker compose ps` shows both `finance-api` and `mail-agent` as `(healthy)`
+
+### v2.0.0-design (2026-03-27) — superseded by v2.0.0
+
+Stage 2 design finalized — Personal Finance Dashboard.
+
+- Added: §24 Stage 2 Overview & Scope
+  - Two-tier source of truth: XLSX (immutable) → Google Sheets (working copy) → SQLite (read cache)
+  - Currency design: IDR always authoritative; exchange rate always derived; missing forex data acceptable
+  - Multi-owner support: Gandrik + Helen throughout all summaries and schemas
+  - Budget targets (`monthly_budget` column): reserved for Stage 2.x, not surfaced in Stage 2 UI
+- Added: §25 Stage 2 Architecture
+  - New `finance-api` Docker service added to existing `docker-compose.yml` (mail-agent untouched)
+  - New `settings.toml` sections: `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]`
+  - Logical data flow diagram: XLSX → import → Sheets → sync → SQLite → FastAPI → Vue PWA
+- Added: §26 Stage 2 Data Schemas
+  - Full XLSX-to-Sheets column mapping table (including sign convention and null handling)
+  - Google Sheets: Transactions tab (15 columns incl. `owner`), Merchant Aliases, Categories, Currency Codes, Import Log
+  - SQLite schema (`data/finance.db`): transactions table + 3 views + sync_log
+- Added: §27 Stage 2 Categorization Engine (4 layers)
+  - Layer 1: Exact match alias table (Google Sheet, auto-assigns)
+  - Layer 2: Regex patterns (same tab, auto-assigns)
+  - Layer 3: Ollama `llama3.2:3b` suggestion (pre-fills review queue, user confirms)
+  - Layer 4: Blank review queue fallback (user types manually)
+  - Confirmed entries always written back to Merchant Aliases tab (future auto-match)
+  - RapidFuzz fuzzy hint shown in review queue — never auto-assigned
+- Added: §28 Stage 2 Google Sheets Integration
+  - OAuth 2.0, personal Google account; token saved to `secrets/google_token.json`
+  - Write-back rules: importer writes on import; PWA writes on review confirm; SQLite never writes to Sheets
+  - Dedup by SHA-256 hash; safe re-import from XLSX with `--overwrite` flag
+- Added: §29 Stage 2 FastAPI Backend & PWA
+  - 11 REST endpoints (transactions, summary, narrative, review queue, sync, import)
+  - Deterministic monthly summary: IDR totals, per-owner split, category breakdown, foreign currency breakdown
+  - Ollama narrative: supplemental conversational paragraph, streaming, generated on demand
+  - Vue 3 PWA views: Dashboard, Category breakdown, Month-over-month, Foreign spending, Transaction list, Review queue, Monthly summary
+  - Offline read via service worker + IndexedDB
+- Added: §30 Stage 2 Monthly Workflow (7-step process, ~5–10 min/month)
+- Added: §31 Stage 2 Setup Checklist (14 one-time steps)
+- Changed: Guide title updated to "Agentic Mail Alert & Personal Finance System"
+- Changed: Table of Contents split into Stage 1 (complete) and Stage 2 (design) sections
+
 ### v1.7.0
 
 - Added: `scripts/batch_process.py` — automatic, idempotent PDF→XLS batch processor (full rewrite)
@@ -2026,6 +2219,22 @@ docker compose up -d
 - Fixed: Reset procedure documented — bridge.db must not be deleted while bridge is running; always stop services in order (agent → bridge → delete → start bridge → start agent)
 - Fixed: §1 updated — PDF attachment processing is now implemented (removed from "What it does NOT do")
 
+### v2.0.0
+
+- Added: `finance/` package — Stage 2 import module + categorization engine
+  - `finance/config.py` — typed config loaders for four new `settings.toml` sections
+  - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 dedup hash, XLSX date parser
+  - `finance/sheets.py` — Google Sheets API v4 client; OAuth 2.0 personal account flow; read/write transactions, aliases, categories, currency hints, import log
+  - `finance/categorizer.py` — 4-layer pipeline: exact alias → regex → Ollama `llama3.2:3b` suggestion → review queue flag
+  - `finance/importer.py` — CLI entry point (`python3 -m finance.importer`); reads `ALL_TRANSACTIONS.xlsx`, maps all columns, generates hashes, deduplicates, batch-appends to Sheets; `--dry-run`, `--overwrite`, `--file`, `-v` flags
+  - `finance/setup_sheets.py` — one-time Sheet initializer; creates missing tabs, writes formatted headers (dark-blue, frozen row 1), seeds Categories (16) and Currency Codes (18)
+  - `finance/requirements.txt` — `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `rapidfuzz`
+- Added: `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections to `config/settings.toml`
+- Added: `data/finance.db` to project layout (Stage 2 SQLite read cache, pending)
+- Added: `secrets/google_credentials.json` and `secrets/google_token.json` to project layout
+- Changed: GUIDE.md §3, §5, §24, §31 updated to reflect built vs. pending status
+- Note: Google OAuth app stays in "Testing" mode permanently for personal use; add Gmail address as test user in Cloud Console → OAuth consent screen
+
 ### v1.2.0
 
 - Added: `com.agentic.agent` LaunchAgent — Docker agent container auto-starts on reboot via `scripts/start_agent.sh`
@@ -2066,4 +2275,803 @@ docker compose up -d
 
 ---
 
-*Guide last updated 2026-03-27 · v1.5.0 · validated against checked-in codebase*
+## 24. Stage 2 Overview & Scope
+
+> **Status:** Fully built and working. All Stage 2 components are running in production.
+
+Stage 2 adds a personal finance dashboard on top of the existing PDF parsing pipeline. It does **not** replace Stage 1 — the XLSX files produced by Stage 1 remain the immutable raw record and serve as the Stage 2 import source.
+
+### What Stage 2 adds
+
+| Capability | Status | Description |
+|---|---|---|
+| Import module | ✅ Built | Reads `ALL_TRANSACTIONS.xlsx` → maps columns → deduplicates → writes to Google Sheets |
+| Categorization engine | ✅ Built | 4-layer: alias exact match → regex → Ollama AI suggestion → user review queue |
+| Google Sheets source of truth | ✅ Live | All enriched transaction data; user edits freely on phone or desktop |
+| SQLite read cache | ✅ Built | `data/finance.db` — atomic sync via `finance.sync`; 415 unique transactions on first run |
+| FastAPI backend | ✅ Built | 12 REST endpoints, monthly summary, alias write-back; serves PWA at `/` |
+| Vue 3 PWA | ✅ Built | Mobile-first: Dashboard, Transactions, Review Queue, Foreign Spend, Settings |
+| Docker service | ✅ Built | `finance-api` service in `docker-compose.yml`; port 8090; healthcheck configured |
+
+### What Stage 2 does NOT do (deferred)
+
+- Exchange rate API calls (rate always derived from bank-applied IDR ÷ foreign)
+- Cloud hosting (all compute stays on Mac Mini + Synology NAS)
+- Budget vs. actual tracking (column reserved; UI deferred to Stage 2.x)
+- Per-statement `date_posted` field (transaction date only)
+
+### Currency design principles
+
+1. **IDR is always authoritative.** The bank-charged IDR amount is the primary figure for all summaries and totals.
+2. **Exchange rate is always derived, never looked up.** `exchange_rate = abs(amount_idr) / abs(original_amount)`. This captures the bank's markup.
+3. **Missing foreign data is acceptable.** If a parser could not extract the original currency/amount, the transaction imports with full IDR data; `original_currency` and `original_amount` are `null`.
+4. **Country/currency hinting.** For descriptions with only a country suffix (e.g., `LAWSON SHINJUKU JP`), the importer may tag `original_currency` from the Currency Codes reference table (JP → JPY). `original_amount` remains null.
+
+### Two-tier source of truth
+
+```
+Stage 1 XLSX  →  immutable parser output, never touched manually
+                 safe reimport baseline if Google Sheet is corrupted
+
+Google Sheets →  working copy: categorize, annotate, correct freely
+
+SQLite cache  →  throw away and rebuild anytime from Google Sheets
+```
+
+Re-importing from XLSX is safe and additive by default (deduplication by hash). Use `--overwrite` to force-replace matching rows.
+
+### Owners
+
+The system manages two account holders: **Gandrik** (Emanuel) and **Helen** (Dian Pratiwi), matching the `[owners]` mapping in `settings.toml`. All summaries can be viewed combined (default) or filtered by owner.
+
+---
+
+## 25. Stage 2 Architecture
+
+### Component map
+
+| Layer | Technology | Runs On |
+|---|---|---|
+| Stage 1 XLSX input | `output/xls/ALL_TRANSACTIONS.xlsx` | Mac Mini |
+| Import module | Python + openpyxl → Sheets API v4 | Mac Mini |
+| Categorization engine | Python — alias + regex + Ollama + review queue | Mac Mini |
+| AI categorization (Layer 3) | Ollama `llama3.2:3b` — existing instance | Mac Mini |
+| Source of truth | Google Sheets, personal account | Google Cloud (free) |
+| Read cache | SQLite `data/finance.db` | Mac Mini |
+| Sync engine | Python — hash-compare, upsert | Mac Mini |
+| Backend API | FastAPI — new `finance-api` Docker service | Mac Mini |
+| Frontend | TypeScript — Vue 3 + Vite PWA | Served by FastAPI |
+| AI narrative | Ollama `llama3.2:3b` — same instance | Mac Mini |
+| Reverse proxy + SSL | Synology built-in nginx + Let's Encrypt | Synology NAS |
+| Backups | `finance.db` rsync + Sheets export | Synology NAS (scheduled) |
+
+### Infrastructure diagram
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    HOME NETWORK                      │
+│                                                      │
+│  ┌──────────────┐         ┌───────────────────────┐  │
+│  │ Synology NAS │         │      Mac Mini          │  │
+│  │              │         │                        │  │
+│  │  • Reverse   │ ──────▶ │  Docker Compose:       │  │
+│  │    proxy     │         │  ┌────────────────┐    │  │
+│  │  • SSL certs │         │  │ mail-agent     │    │  │  ← Stage 1 (unchanged)
+│  │  • Backups   │         │  ├────────────────┤    │  │
+│  │    nightly   │         │  │ finance-api    │    │  │  ← Stage 2 (new)
+│  └──────────────┘         │  │ FastAPI + PWA  │    │  │
+│                           │  └────────────────┘    │  │
+│  iPhone (Safari)          │                        │  │
+│  Vue 3 PWA via HTTPS ◀─── │  Host:                 │  │
+│                           │  • bridge (unchanged)  │  │
+│                           │  • Ollama :11434        │  │
+│                           │  • Google Sheets API   │  │
+│                           │  • finance.db (SQLite) │  │
+│                           └───────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+Stage 2 adds a single new Docker service (`finance-api`) to the existing `docker-compose.yml`. The `mail-agent` service and bridge are untouched.
+
+### Logical data flow
+
+```
+[ Stage 1: ALL_TRANSACTIONS.xlsx ]
+   output/xls/ALL_TRANSACTIONS.xlsx
+        │
+        ▼  python3 -m finance.importer [--overwrite]
+[ Import Module ]
+   • Read XLSX with openpyxl
+   • Map columns (see §26.1)
+   • Convert date → ISO 8601 (YYYY-MM-DD)
+   • Apply sign: Debit → negative, Credit → positive
+   • Set original_currency = null when Currency = "IDR"
+   • Generate transaction hash: SHA-256(date+amount+raw_description+institution+owner)
+   • Skip rows with matching hash already in Sheets
+        │
+        ▼
+[ Categorization Engine ]
+   • Layer 1: Merchant alias exact match
+   • Layer 2: Regex patterns
+   • Layer 3: Ollama AI suggestion (pre-fills review queue)
+   • Layer 4: Flagged uncategorized (blank review queue entry)
+        │
+        ▼
+[ Google Sheets API — Write ]
+   • Append new transactions to Transactions tab
+   • Log import to Import Log tab
+        │
+        ▼
+┌─────────────────────────────┐
+│    Google Sheet              │
+│    (Source of Truth)         │
+│  • User reviews & edits     │
+│  • Recategorizes if needed  │
+│  • Corrects forex data      │
+│  • Adds notes               │
+│  • Edits merchant aliases   │
+└──────────────┬──────────────┘
+               │  (User taps "Refresh Data" in PWA)
+               ▼
+        [ Sheets API — Read ]
+               │
+               ▼
+        [ SQLite Sync (finance.db) ]
+   • Hash comparison → upsert changed rows
+   • Update sync_log
+               │
+               ▼
+        [ FastAPI Backend ]
+   • REST endpoints (see §29)
+   • Deterministic monthly summary
+   • Ollama narrative (streaming)
+   • Serves Vue PWA as static files
+               │
+               ▼
+        [ Vue 3 PWA (iPhone Safari) ]
+   • Dashboard, charts, transaction list
+   • Foreign spending breakdown
+   • Review queue (confirms write to Sheets)
+   • Monthly summary + Ollama narrative
+   • Offline read via service worker + IndexedDB
+```
+
+**One-directional flow.** SQLite never writes back to Sheets. Review queue confirmations write directly to Sheets (via API), bypassing SQLite.
+
+### `docker-compose.yml` — `finance-api` service (actual)
+
+```yaml
+  finance-api:
+    build:
+      context: .
+      dockerfile: finance/Dockerfile
+    container_name: finance-api
+    restart: unless-stopped
+    environment:
+      SETTINGS_FILE: /app/config/settings.toml
+    volumes:
+      - ./config/settings.toml:/app/config/settings.toml:ro
+      - ./data:/app/data
+      - ./output/xls:/app/output/xls:ro
+      - ./secrets:/app/secrets:ro
+    ports:
+      - "8090:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=5).read()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+```
+
+> **Build context is the project root** (not `finance/`), so the Dockerfile can copy both `finance/` and `pwa/dist/`. The PWA must be built (`npm run build` in `pwa/`) before `docker compose build`.
+
+### New `settings.toml` sections
+
+```toml
+[finance]
+sqlite_db  = "/Users/g4ndr1k/agentic-ai/data/finance.db"
+xlsx_input = "/Users/g4ndr1k/agentic-ai/output/xls/ALL_TRANSACTIONS.xlsx"
+
+[google_sheets]
+credentials_file  = "/Users/g4ndr1k/agentic-ai/secrets/google_credentials.json"
+spreadsheet_id    = ""        # fill after creating the Google Sheet
+transactions_tab  = "Transactions"
+aliases_tab       = "Merchant Aliases"
+categories_tab    = "Categories"
+currency_tab      = "Currency Codes"
+import_log_tab    = "Import Log"
+
+[fastapi]
+host         = "0.0.0.0"
+port         = 8090           # distinct from bridge :9100 and agent health :8080
+cors_origins = ["http://localhost:5173"]
+
+[ollama_finance]
+host            = "http://host.docker.internal:11434"
+model           = "llama3.2:3b"
+timeout_seconds = 60
+```
+
+---
+
+## 26. Stage 2 Data Schemas
+
+### 26.1 XLSX → Google Sheets column mapping
+
+| `ALL_TRANSACTIONS.xlsx` column | Google Sheets field | Notes |
+|---|---|---|
+| `Owner` | `owner` | Gandrik or Helen |
+| `Bank` | `institution` | e.g., "BCA", "Maybank" |
+| `Statement Type` | *(informs `account` label)* | "cc", "savings", "consolidated" |
+| `Tgl. Transaksi` | `date` | Converted to ISO 8601 YYYY-MM-DD |
+| `Keterangan` | `raw_description` | Unchanged |
+| `Currency` | `original_currency` | If "IDR" → null; otherwise use value |
+| `Jumlah Valuta Asing` | `original_amount` | Null when Currency = IDR |
+| `Kurs (RP)` | `exchange_rate` | Null when Currency = IDR |
+| `Jumlah (IDR)` | `amount` | Debit → negative, Credit → positive |
+| `Tipe` | *(drives sign of `amount`)* | "Debit" → negative; "Credit" → positive |
+| `Nomor Rekening/Kartu` | `account` | Card/account number |
+| *(derived)* | `hash` | SHA-256(date + amount + raw_description + institution + owner) |
+| *(derived)* | `import_date` | Date of import run |
+| *(source filename)* | `import_file` | e.g., `ALL_TRANSACTIONS.xlsx` |
+
+### 26.2 Google Sheets — Transactions tab
+
+Column order optimized for mobile scanning (most-viewed fields leftmost):
+
+| Column | Type | Example | Notes |
+|---|---|---|---|
+| `date` | Date | 2025-03-15 | ISO 8601 |
+| `amount` | Number | -758242 | IDR. Negative = expense, positive = income/refund |
+| `original_currency` | Text | USD | ISO 4217. Empty for domestic transactions |
+| `original_amount` | Number | -47.99 | Foreign amount. Empty for domestic. Negative = expense |
+| `exchange_rate` | Number | 15798.37 | `abs(amount) / abs(original_amount)`. Empty for domestic |
+| `raw_description` | Text | AMAZON.COM SEATTLE | Original description from statement |
+| `merchant` | Text | Amazon | Resolved merchant name; blank until categorized |
+| `category` | Text | Shopping | Assigned category; null = uncategorized |
+| `institution` | Text | BCA | Bank name |
+| `account` | Text | 4111-xxxx-1234 | Card/account number |
+| `owner` | Text | Gandrik | Gandrik or Helen |
+| `notes` | Text | Birthday gift | User annotations |
+| `hash` | Text | a1b2c3d4 | Dedup fingerprint |
+| `import_date` | Date | 2025-03-20 | When this row was imported |
+| `import_file` | Text | ALL_TRANSACTIONS.xlsx | Source file name |
+
+### 26.3 Google Sheets — Merchant Aliases tab
+
+| Column | Type | Example |
+|---|---|---|
+| `merchant` | Text | Amazon |
+| `alias` | Text | AMZN*MK |
+| `category` | Text | Shopping |
+| `match_type` | Text | `exact` or `regex` |
+| `added_date` | Date | 2025-03-20 |
+
+### 26.4 Google Sheets — Categories tab
+
+| Column | Type | Example | Notes |
+|---|---|---|---|
+| `category` | Text | Dining Out | |
+| `icon` | Text | 🍽️ | |
+| `sort_order` | Number | 3 | |
+| `is_recurring` | Boolean | FALSE | |
+| `monthly_budget` | Number | 8000000 | Reserved for Stage 2.x; not surfaced in Stage 2 UI |
+
+Default categories: Housing 🏠 · Utilities ⚡ · Groceries 🛒 · Dining Out 🍽️ · Transport 🚗 · Shopping 🛍️ · Healthcare 🏥 · Entertainment 🎬 · Subscriptions 🔄 · Travel ✈️ · Education 📚 · Personal Care 💇 · Gifts & Donations 🎁 · Fees & Interest 🏦 · Income 💰 · Other ❓
+
+### 26.5 Google Sheets — Currency Codes tab
+
+Used by the import step for country-to-currency hinting (transactions without explicit foreign amounts):
+
+| Column | Type | Example |
+|---|---|---|
+| `currency_code` | Text | USD |
+| `currency_name` | Text | US Dollar |
+| `symbol` | Text | $ |
+| `flag_emoji` | Text | 🇺🇸 |
+| `country_hints` | Text | US, USA, UNITED STATES |
+| `decimal_places` | Number | 2 |
+
+Common currencies for Indonesian credit card holders: USD · SGD · MYR · JPY · THB · EUR · GBP · AUD · HKD · KRW · CNY. JPY and KRW use `decimal_places = 0` (whole numbers).
+
+### 26.6 SQLite schema (`data/finance.db`)
+
+The actual schema created by `finance/db.py`. Five tables, WAL mode, foreign keys on.
+
+```sql
+-- ── Core tables ──────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    date               TEXT    NOT NULL,          -- ISO 8601 (YYYY-MM-DD)
+    amount             REAL    NOT NULL,          -- IDR; negative = expense
+    original_currency  TEXT,                      -- ISO 4217; NULL for domestic
+    original_amount    REAL,                      -- Foreign amount; NULL for domestic
+    exchange_rate      REAL,                      -- Derived; NULL for domestic
+    raw_description    TEXT    NOT NULL,
+    merchant           TEXT,
+    category           TEXT,
+    institution        TEXT    NOT NULL,          -- Bank name
+    account            TEXT,                      -- Card/account number
+    owner              TEXT    NOT NULL,          -- Gandrik or Helen
+    notes              TEXT,
+    hash               TEXT    UNIQUE NOT NULL,   -- SHA-256 dedup key
+    import_date        TEXT    NOT NULL,
+    import_file        TEXT,
+    synced_at          TEXT    NOT NULL           -- Set by sync engine
+);
+
+-- Indexes on common filter / sort columns
+CREATE INDEX IF NOT EXISTS idx_tx_date      ON transactions(date);
+CREATE INDEX IF NOT EXISTS idx_tx_yearmonth ON transactions(substr(date,1,7));
+CREATE INDEX IF NOT EXISTS idx_tx_category  ON transactions(category);
+CREATE INDEX IF NOT EXISTS idx_tx_owner     ON transactions(owner);
+CREATE INDEX IF NOT EXISTS idx_tx_hash      ON transactions(hash);
+
+CREATE TABLE IF NOT EXISTS merchant_aliases (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant     TEXT NOT NULL,
+    alias        TEXT NOT NULL,
+    category     TEXT,
+    match_type   TEXT NOT NULL DEFAULT 'exact',   -- 'exact', 'contains', 'regex'
+    added_date   TEXT,
+    synced_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    category       TEXT NOT NULL UNIQUE,
+    icon           TEXT,
+    sort_order     INTEGER NOT NULL DEFAULT 99,
+    is_recurring   INTEGER NOT NULL DEFAULT 0,    -- 0/1 boolean
+    monthly_budget REAL,
+    synced_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS currency_codes (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    currency_code  TEXT NOT NULL UNIQUE,
+    currency_name  TEXT,
+    symbol         TEXT,
+    flag_emoji     TEXT,
+    country_hints  TEXT,
+    decimal_places INTEGER NOT NULL DEFAULT 2,
+    synced_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    synced_at           TEXT    NOT NULL,
+    transactions_count  INTEGER,
+    aliases_count       INTEGER,
+    categories_count    INTEGER,
+    currencies_count    INTEGER,
+    duration_s          REAL
+);
+```
+
+> **No `sheet_row` column.** The original design included a row reference for write-back to Sheets; the actual implementation looks up the target row by `hash` instead. This is simpler and more robust to row insertions in the Sheet.
+>
+> **SQLite as pure cache.** Delete `data/finance.db` at any time and re-run `python3 -m finance.sync` to rebuild it from Google Sheets.
+
+---
+
+## 27. Stage 2 Categorization Engine
+
+### Five-layer pipeline
+
+```
+raw_description
+      │
+      ▼ Layer 1: alias exact match (Merchant Aliases tab)
+   Match? ──Yes──▶ auto-categorize → write to Sheet
+      │ No
+      ▼ Layer 2: regex match (Merchant Aliases tab, match_type = "regex")
+   Match? ──Yes──▶ auto-categorize → write to Sheet
+      │ No
+      ▼ Layer 3: Ollama llama3.2:3b suggestion
+   Response? ──Yes──▶ pre-fill review queue (merchant + category)
+      │ No / unavailable
+      ▼ Layer 3b: Anthropic Claude fallback (when Ollama unavailable)
+   Response? ──Yes──▶ pre-fill review queue (merchant + category)
+      │ No / disabled
+      ▼ Layer 4: review queue (no pre-fill)
+   User confirms → write to Sheet + expand Merchant Aliases tab
+```
+
+**Layers 1 and 2 auto-assign** (no user interaction needed). **Layers 3, 3b, and 4 always require one user confirmation tap** in the PWA review queue.
+
+Every confirmed Layer 3/4 entry writes back to the Merchant Aliases tab. Future identical raw descriptions match at Layer 1 and skip AI entirely.
+
+### Layer 1 — Merchant alias table (exact match)
+
+Stored in the Merchant Aliases Google Sheet tab. Example structure:
+
+```json
+{
+  "Amazon":  { "aliases": ["AMZN*MK", "AMAZON.COM", "AMZN MKTP US"], "default_category": "Shopping" },
+  "Grab":    { "aliases": ["GRAB* FOOD", "GRAB* TRANSPORT"],          "default_category": "Transport" },
+  "Netflix": { "aliases": ["NETFLIX.COM"],                            "default_category": "Subscriptions" }
+}
+```
+
+### Layer 2 — Regex patterns
+
+Same Merchant Aliases tab, rows where `match_type = "regex"`. Handles merchants with predictable but variable formats:
+
+| Alias (regex) | Merchant | Category |
+|---|---|---|
+| `STARBUCKS #\d+` | Starbucks | Dining Out |
+| `SQ \*.*` | Square merchant | Dining Out |
+| `GRAB\* .*` | Grab | Transport |
+
+### Layer 3 — Ollama AI suggestion
+
+Prompt structure sent to `llama3.2:3b`:
+
+```
+You are a personal finance categorizer for an Indonesian household.
+
+Known categories: Housing, Utilities, Groceries, Dining Out, Transport,
+Shopping, Healthcare, Entertainment, Subscriptions, Travel, Education,
+Personal Care, Gifts & Donations, Fees & Interest, Cash Withdrawal,
+Income, Other, Internal Transfer, External Transfer
+
+Recent confirmed examples:
+- "GRAB* TRANSPORT" → Grab, Transport
+- "NETFLIX.COM" → Netflix, Subscriptions
+- "INDOMARET" → Indomaret, Groceries
+
+Transaction: "{raw_description}"
+
+Reply with JSON only: {"merchant": "...", "category": "..."}
+```
+
+- Suggestion is **never auto-assigned**. It pre-fills the review queue entry but requires one tap to confirm.
+- If Ollama is unavailable or returns unparseable output, falls through to Layer 3b.
+- Ollama timeout from `[ollama_finance]` section in `settings.toml` (default 60 s).
+
+### Layer 3b — Anthropic Claude fallback
+
+When Ollama is unreachable or returns no parseable response, `categorizer.py` makes a single call to the Anthropic Messages API (`claude-haiku-4-20250514` by default) using the same prompt template.
+
+- Enabled only when `ANTHROPIC_API_KEY` env var is set (injected via Docker Compose from `.env`)
+- Configured via `[anthropic]` block in `settings.toml` (`api_key_env`, `model`, `enabled`)
+- Falls through to Layer 4 if the key is absent or the API call fails
+
+### Layer 4 — User review queue (fallback)
+
+Transactions that clear Layers 1–3 without a match surface in the PWA review queue with no pre-fill. The user types a merchant name and picks a category from the dropdown.
+
+### RapidFuzz fuzzy matching
+
+Used as an additional suggestion hint in Layers 3 and 4: when an unknown description enters the review queue, the closest existing alias (by RapidFuzz token-sort ratio) is shown as a secondary suggestion. Never auto-assigned.
+
+---
+
+## 28. Stage 2 Google Sheets Integration
+
+### Authentication
+
+- **Type:** OAuth 2.0, personal Google account.
+- **Credentials file:** `secrets/google_credentials.json` (gitignored, never committed).
+- **Setup:** Download OAuth 2.0 Desktop client credentials from Google Cloud Console → APIs & Services → Credentials. First run triggers a browser consent flow that saves a token file. Subsequent runs are token-refreshed automatically.
+- **Scopes required:** `https://www.googleapis.com/auth/spreadsheets`
+
+### Google Sheet structure
+
+Five tabs (created once during setup):
+
+| Tab | Purpose |
+|---|---|
+| Transactions | All imported transactions |
+| Merchant Aliases | Alias and regex rules for categorization |
+| Categories | Master category list (`monthly_budget` column reserved for Stage 2.x) |
+| Currency Codes | Country-to-currency reference for import hinting |
+| Import Log | Timestamp, source file, rows added, duplicates skipped per import run |
+
+### Write-back rules
+
+| Operation | Who writes | Where |
+|---|---|---|
+| Import new transactions | `finance.importer` | Transactions tab (append) |
+| Auto-categorize (Layers 1–2) | `finance.importer` | `merchant` + `category` columns in-place |
+| Confirm review queue item | PWA → FastAPI → Sheets API | `merchant` + `category` columns in-place; new row in Merchant Aliases tab |
+| User manual edits | User directly in Google Sheets app | Any cell |
+| SQLite sync | SQLite **never** writes to Sheets | — |
+
+### Import deduplication
+
+Each transaction is fingerprinted with SHA-256 of `date + amount + raw_description + institution + owner`. Before appending a row, the importer checks the `hash` column for an existing match. Duplicate rows are counted and logged to the Import Log tab; they are never written.
+
+Re-importing from XLSX is safe: only genuinely new rows (not yet in Sheets) are appended. Use `--overwrite` to force-replace existing rows by hash match.
+
+---
+
+## 29. Stage 2 FastAPI Backend & PWA
+
+### FastAPI endpoints (actual — 12 routes)
+
+Port `8090` (from `[fastapi]` in `settings.toml`). All read endpoints query SQLite only; write endpoints also touch Google Sheets.
+
+| Method | Path | Query params | Description |
+|---|---|---|---|
+| `GET` | `/api/health` | — | `{ status, transaction_count, needs_review, last_sync }` |
+| `GET` | `/api/owners` | — | `["Gandrik", "Helen"]` |
+| `GET` | `/api/categories` | — | List with icon, sort_order, is_recurring, monthly_budget |
+| `GET` | `/api/transactions` | `year`, `month`, `owner`, `category`, `q`, `limit` (max 1000), `offset` | Paginated; `q` searches raw_description + merchant |
+| `GET` | `/api/transactions/foreign` | `year`, `month`, `owner` | Foreign-currency transactions only |
+| `GET` | `/api/summary/years` | — | `[2024, 2025, …]` |
+| `GET` | `/api/summary/year/{year}` | — | `{ year, months: [{ month, income, expense, net, transaction_count }] }` |
+| `GET` | `/api/summary/{year}/{month}` | — | Full monthly breakdown: income, expense, net, needs_review, by_category (with pct_of_expense), by_owner |
+| `GET` | `/api/review-queue` | `limit` (default 50) | Transactions where merchant IS NULL or category IS NULL |
+| `POST` | `/api/alias` | — | Body: `{ hash, alias, merchant, category, match_type, apply_to_similar }` → writes to Sheets + updates SQLite |
+| `POST` | `/api/sync` | — | Pull all data from Google Sheets → SQLite; returns stats dict |
+| `POST` | `/api/import` | — | Body: `{ dry_run, overwrite }` → run importer; auto-syncs on success |
+
+**Static file serving:** `finance/api.py` mounts `pwa/dist/` at `/` (after all `/api/*` routes) when that directory exists. In Docker the Dockerfile copies the pre-built PWA. In dev, run `npm run dev` in `pwa/` instead (Vite proxies `/api` → `:8090`).
+
+### Deterministic monthly summary
+
+Computed entirely from SQLite — zero AI cost, zero latency, zero failure modes. Example output:
+
+```
+March 2025 Summary — Gandrik + Helen
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total Spent:         Rp 42,300,000 (+12% vs Feb)
+  Gandrik:           Rp 31,500,000 (74%)
+  Helen:             Rp 10,800,000 (26%)
+Domestic:            Rp 35,180,000 (83%)
+Foreign:             Rp  7,120,000 (17%) across 3 currencies
+
+Top Category:        Dining Out — Rp 9,800,000 (23%)
+Biggest Increase:    Dining Out +Rp 3,800,000 vs Feb
+Biggest Decrease:    Shopping   -Rp 2,100,000 vs Feb
+Recurring Total:     Rp 1,870,000 (no change)
+
+Foreign Spending:
+  USD:  $247.50  →  Rp 3,910,000  (4 transactions)
+  SGD:  S$185.00 →  Rp 2,100,000  (2 transactions)
+  JPY:  ¥8,500   →  Rp 1,110,000  (1 transaction)
+
+New Merchants:       3 (XYZ Corp, ABC Ltd, Coffee Place)
+Flagged:             $95 charge from 'XYZ Corp' — first occurrence
+```
+
+AI narrative (via Ollama `llama3.2:3b`) runs after the deterministic summary and provides a conversational paragraph. It is always supplemental — the deterministic summary is the primary output.
+
+### Vue 3 PWA views (actual — 5 routes)
+
+| Route | View | Key features |
+|---|---|---|
+| `/` | Dashboard | Month/year ‹ › navigation; All / Gandrik / Helen owner toggle; Income + Expense + Net + Txn count cards; CSS horizontal bars for top 8 expense categories (with % and budget overflow highlight); Chart.js grouped bar chart (12-month income vs expense); Owner split table |
+| `/transactions` | Transactions | Year, month, owner, category dropdowns; debounced text search; paginated list (50/page) with expandable detail rows (raw_description, institution, account, foreign fields, hash) |
+| `/review` | Review Queue | Ordered list of uncategorised transactions; tap to expand inline alias form (merchant input, category dropdown, match type radio, apply-to-similar checkbox); POST /api/alias on save; removes affected rows from list + decrements nav badge; green toast notification |
+| `/foreign` | Foreign Spend | Year/month/owner filters; transactions grouped by `original_currency`; per-group subtotal row; summary cards (unique currencies, total IDR equivalent); flag emoji per currency |
+| `/settings` | Settings | API health status (live); Sync button (POST /api/sync) with result display; Import button (POST /api/import) with dry_run + overwrite checkboxes and result display; About section |
+
+**Navigation:** dark navy (`#1e3a5f`) top bar + 5-item bottom nav bar; review item shows orange/red badge with pending count. Mobile-first layout, max-width 640 px, safe-area-inset padding.
+
+**IDR formatting:** amounts ≥ 1 M display as `Rp 92,6 jt` (juta); ≥ 1 B as `Rp 1,2 M`. Income green (`#22c55e`), expense red (`#ef4444`).
+
+### Offline behavior (service worker)
+
+vite-plugin-pwa generates a Workbox service worker. API GET routes (except `/sync`, `/import`, `/alias`) use NetworkFirst strategy with 5-minute cache and 8-second network timeout. Stale data is served offline when the network is unavailable. Write operations require connectivity.
+
+---
+
+## 30. Stage 2 Monthly Workflow
+
+```
+1. Download statements from bank websites (PDF or ZIP)
+   → Drop into data/pdf_inbox/
+
+2. Stage 1 processes automatically (batch_process.py --watch is running)
+   → Unlocks PDFs, parses all banks, writes output/xls/ALL_TRANSACTIONS.xlsx
+
+3. Run Stage 2 import (one command):
+      python3 -m finance.importer
+   → Reads ALL_TRANSACTIONS.xlsx (immutable)
+   → Maps columns, generates hashes
+   → Layers 1 + 2: known merchants auto-categorized
+   → Layer 3: Ollama pre-fills suggestions for unknowns
+   → Appends only new rows to Google Sheet (dedup by hash)
+   → Logs import to Import Log tab
+
+4. Open PWA → Review Queue  (~5 minutes)
+   → AI-suggested entries: confirm with one tap
+   → Unknown entries: pick category, confirm
+   → Each confirmation writes to Sheet + expands alias table
+
+5. (Optional) Open Google Sheet on phone or desktop
+   → Correct anything, add notes, fix forex data
+   → If Sheet is corrupted or heavily wrong: re-run importer with --overwrite
+
+6. Tap "Refresh Data" in PWA
+   → SQLite syncs from Google Sheets
+   → Charts and summary update instantly
+
+7. View dashboard and monthly summary
+   → Combined Gandrik + Helen view (default); toggle by owner
+   → Foreign spending breakdown by currency and category
+   → AI narrative generated on demand
+   → Done in ~5–10 minutes total
+```
+
+---
+
+## 31. Stage 2 Setup Checklist
+
+### One-time Google Cloud + Sheet setup (completed)
+
+- [x] **Install Python dependencies:**
+  ```bash
+  /opt/homebrew/bin/pip3.13 install --break-system-packages -r finance/requirements.txt
+  ```
+- [x] **Google Cloud project:** Created at console.cloud.google.com
+- [x] **Enable Sheets API:** APIs & Services → Library → Google Sheets API → Enabled
+- [x] **Create OAuth credentials:** APIs & Services → Credentials → OAuth 2.0 Client ID → Desktop app → Downloaded JSON → saved as `secrets/google_credentials.json`
+- [x] **Add test user:** OAuth consent screen → Test users → added `g4ndr1k@gmail.com` (required for unverified personal OAuth apps)
+- [x] **Create Google Sheet:** Blank Sheet in personal Google account; Spreadsheet ID copied into `settings.toml` → `[google_sheets] spreadsheet_id`
+- [x] **Create Sheet structure:**
+  ```bash
+  python3 -m finance.setup_sheets
+  # Browser opened once for OAuth consent → token saved to secrets/google_token.json
+  # Created: Transactions · Merchant Aliases · Categories · Currency Codes · Import Log
+  # Seeded: 16 default categories, 18 currencies
+  ```
+- [x] **`settings.toml`** updated with `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections
+
+### Running the importer
+
+```bash
+# Preview without writing
+python3 -m finance.importer --dry-run
+
+# Standard import (skip duplicates)
+python3 -m finance.importer
+
+# Re-import and replace existing rows
+python3 -m finance.importer --overwrite
+
+# Import a specific file
+python3 -m finance.importer --file /path/to/file.xlsx
+
+# Verbose output
+python3 -m finance.importer -v
+```
+
+OAuth token (`secrets/google_token.json`) is refreshed automatically when it expires — no manual re-auth needed.
+
+### Stage 2.1 — Built and working ✅
+
+- [x] **SQLite sync engine** (`finance/db.py` + `finance/sync.py`) — 415 unique transactions from Sheets on first run; 34 duplicate hashes deduplicated automatically
+- [x] **FastAPI backend** (`finance/api.py` + `finance/server.py`) — 12 endpoints verified; boots on `:8090`
+- [x] **Vue 3 PWA** (`pwa/`) — production build: 346 KB JS / 12 KB CSS; service worker + Workbox generated
+- [x] **`finance-api` Docker service** — built, started, and confirmed healthy; both `finance-api` and `mail-agent` running
+
+### Docker deployment (done)
+
+```bash
+# One-time build (re-run after any code or PWA change)
+cd pwa && npm run build && cd ..
+docker compose build finance-api
+docker compose up -d finance-api
+
+# Verify
+docker compose ps                                                  # both containers: healthy
+curl -s http://localhost:8090/api/health | python3 -m json.tool   # transaction_count: 415
+curl -s -o /dev/null -w "%{http_code}" http://localhost:8090/     # 200 (PWA index.html)
+```
+
+### Remaining steps
+
+- [ ] **Configure Synology reverse proxy:** Add rule pointing to `mac-mini-ip:8090` with HTTPS + Let's Encrypt wildcard cert
+- [ ] **Install PWA on iPhone:** Navigate to HTTPS URL in Safari → Share → Add to Home Screen
+
+---
+
+---
+
+## 32. Stage 2 Operations Reference
+
+### Sync engine
+
+```bash
+# Pull all data from Google Sheets → SQLite (replaces all rows atomically)
+python3 -m finance.sync
+
+# Show last sync time and row counts (no sync performed)
+python3 -m finance.sync --status
+
+# Verbose / debug output
+python3 -m finance.sync -v
+
+# Inspect the database directly
+sqlite3 data/finance.db "SELECT synced_at, transactions_count, duration_s FROM sync_log ORDER BY id DESC LIMIT 5;"
+```
+
+### Finance API server
+
+```bash
+# Start server (reads host/port from settings.toml — default 0.0.0.0:8090)
+python3 -m finance.server
+
+# Dev mode with auto-reload on file changes
+python3 -m finance.server --reload
+
+# Custom host/port
+python3 -m finance.server --host 127.0.0.1 --port 8091
+
+# Swagger UI (auto-generated)
+open http://localhost:8090/docs
+
+# Quick endpoint checks
+curl -s http://localhost:8090/api/health | python3 -m json.tool
+curl -s http://localhost:8090/api/owners
+curl -s "http://localhost:8090/api/summary/2025/12" | python3 -m json.tool
+curl -s "http://localhost:8090/api/review-queue?limit=5" | python3 -m json.tool
+```
+
+### PWA development
+
+```bash
+# Install dependencies (first time only)
+cd pwa && npm install
+
+# Dev server with hot reload (proxies /api → localhost:8090)
+npm run dev
+# → http://localhost:5173
+
+# Production build (output: pwa/dist/)
+npm run build
+
+# Preview production build locally
+npm run preview
+```
+
+### Docker service
+
+```bash
+# First deployment (must build PWA first)
+cd pwa && npm run build && cd ..
+docker compose build finance-api
+docker compose up -d finance-api
+
+# Logs
+docker compose logs -f finance-api
+
+# Restart after code changes
+cd pwa && npm run build && cd ..
+docker compose build finance-api
+docker compose up -d --force-recreate finance-api
+
+# Health check
+docker compose ps finance-api
+curl -s http://localhost:8090/api/health
+```
+
+### Triggering sync/import from the PWA
+
+- **Settings → Sync Now** — pulls latest Sheets data into SQLite (replaces all rows)
+- **Settings → Import** — runs the XLSX importer and auto-syncs afterwards
+
+### Recovery procedures
+
+| Scenario | Fix |
+|---|---|
+| `finance.db` is corrupted or stale | Delete `data/finance.db`; run `python3 -m finance.sync` to rebuild |
+| Google Sheet has wrong data | Edit directly in Sheets; run sync to pull changes |
+| Duplicate transactions in Sheets | Run `python3 -m finance.importer --overwrite` to re-import clean from XLSX |
+| PWA shows stale data after sync | Tap Settings → Sync Now; hard-refresh browser if needed (`Cmd+Shift+R`) |
+| Review badge count wrong | Tap Settings → Refresh status; badge reads from `/api/health` |
+| `UNIQUE constraint failed: transactions.hash` during sync | Duplicate hashes in Sheets; sync deduplicates automatically (first occurrence wins); to clean Sheets run importer with `--overwrite` |
+
+
+*Guide last updated 2026-03-28 · v2.1.0 · Stage 1 complete · Stage 2 fully built (sync + FastAPI + Vue 3 PWA)*

@@ -41,3 +41,6 @@ data/pdf_unlocked/
 data/pdf_jobs.db
 data/seen_attachments.db
 output/xls/
+node_modules/
+pwa/node_modules/
+pwa/dist/
