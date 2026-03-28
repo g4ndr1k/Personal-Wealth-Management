@@ -1,6 +1,6 @@
 # Agentic Mail Alert System — Build & Operations Guide
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase post-repair
 
@@ -30,6 +30,7 @@
 20. [Known Limitations](#20-known-limitations)
 21. [Troubleshooting](#21-troubleshooting)
 22. [Version History](#22-version-history)
+23. [Stage 2 — Personal Finance Dashboard](#23-stage-2--personal-finance-dashboard)
 
 ---
 
@@ -57,11 +58,22 @@ The system alerts on:
 | `security_alert` | Security or account-access emails |
 | `financial_other` | Other finance-adjacent messages |
 
+### Stage 2 — Personal Finance Dashboard
+
+In addition to the mail alert system, the project includes a second stage:
+
+- Scans Mail.app for bank PDF attachments (statements, e-notices)
+- Unlocks password-protected PDFs using per-bank secrets
+- Parses transaction data with a multi-layer extractor (pdfplumber → LLM fallback)
+- Appends transactions to `ALL_TRANSACTIONS.xlsx` (one sheet per bank, one combined sheet)
+- Syncs to Google Sheets for live cross-device access
+- Exposes a **FastAPI** service (`finance-api`, port 8090) serving the data and a Vue 3 PWA
+- Accessible on the local network at `https://adrianto.synology.me:8443` via Synology reverse proxy
+
 ### What it does NOT do
 
 - Reply to email
 - Modify mailboxes or move messages
-- Process attachments or PDFs
 - Browse websites
 - Use OpenAI or Gemini in the current production flow (those provider files are stubs)
 
@@ -104,7 +116,17 @@ The system alerts on:
 │                                                 │
 │  Mail.app syncs → ~/Library/Mail/V*/…/          │
 │  Messages.app  → ~/Library/Messages/chat.db     │
+│                                                 │
+│  ┌───────────────────────────────────────────┐  │
+│  │ finance-api (Docker · 0.0.0.0:8090)       │  │
+│  │ · FastAPI — transaction query API         │  │
+│  │ · Serves pre-built Vue 3 PWA (pwa/dist/)  │  │
+│  │ · Google Sheets sync                      │  │
+│  └───────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────┘
+         ↑ Synology NAS (192.168.1.44)
+         │ reverse proxy :8443 → finance-api :8090
+         │ cert: Let's Encrypt (adrianto.synology.me)
 ```
 
 ### Trust boundaries
@@ -122,6 +144,7 @@ The system alerts on:
 
 ### Fully implemented
 
+**Stage 1 — Mail alert system**
 - Host bridge service (Python, HTTP)
 - Dockerized agent service (Python, Docker Compose)
 - Mail.app SQLite polling with schema validation
@@ -130,6 +153,7 @@ The system alerts on:
 - Ollama local LLM classification
 - Anthropic Claude API fallback classification
 - Apple Mail category prefilter (skips promotions)
+- Sender domain allowlist (`allowed_sender_domains`)
 - Message-ID deduplication
 - Persistent `paused` and `quiet` flags (survive container restarts)
 - Agent health endpoint on port `8080`
@@ -138,6 +162,18 @@ The system alerts on:
 - Bearer token auth on all bridge endpoints except `/healthz`
 - ACK-token checkpoint system (mail + commands)
 - LaunchAgent plists for Ollama, bridge, Mail.app, Docker agent
+
+**Stage 2 — Personal finance dashboard**
+- Bank PDF attachment scanner (Mail.app → `data/pdf_inbox/`)
+- PDF password unlock (per-bank passwords in `secrets/banks.toml`)
+- Multi-layer transaction parser: pdfplumber → regex → LLM fallback
+- Excel output: per-bank sheets + `ALL_TRANSACTIONS` combined sheet
+- Owner name mapping (customer name → canonical label)
+- Google Sheets sync (OAuth2, auto token refresh)
+- FastAPI backend (`finance-api` Docker service, port 8090)
+- Vue 3 PWA served as static files from `pwa/dist/` inside the container
+- Synology DSM reverse proxy: `https://adrianto.synology.me:8443` → `http://192.168.1.205:8090`
+- Let's Encrypt TLS certificate (auto-managed by Synology DDNS)
 
 ### Present but NOT integrated
 
@@ -269,19 +305,46 @@ agentic-ai/
 │   ├── rate_limit.py             # Sliding-window rate limiter
 │   ├── mail_source.py            # Mail.app SQLite adapter
 │   └── messages_source.py        # Messages.app SQLite adapter + AppleScript sender
+├── finance/
+│   ├── Dockerfile                # finance-api image (python:3.12-slim + pwa/dist/)
+│   ├── requirements.txt
+│   └── app/
+│       ├── main.py               # FastAPI app entry point
+│       ├── config.py             # Settings loader
+│       ├── scanner.py            # Mail attachment scanner
+│       ├── pdf_unlock.py         # PDF password removal (pikepdf)
+│       ├── parser.py             # Transaction extractor (pdfplumber + LLM)
+│       ├── excel_writer.py       # XLSX output builder
+│       ├── sheets_sync.py        # Google Sheets OAuth2 sync
+│       └── db.py                 # SQLite job/state store
+├── pwa/                          # Vue 3 PWA source
+│   ├── src/
+│   ├── dist/                     # Pre-built static files (served by finance-api)
+│   └── package.json
 ├── config/
 │   └── settings.toml             # All runtime configuration
 ├── data/                         # Runtime SQLite DBs (gitignored)
 │   ├── agent.db
-│   └── bridge.db
+│   ├── bridge.db
+│   ├── finance.db                # Stage 2 read cache
+│   ├── pdf_jobs.db               # PDF processing job queue
+│   ├── seen_attachments.db       # Mail attachment dedup tracker
+│   ├── pdf_inbox/                # Downloaded PDFs awaiting processing
+│   └── pdf_unlocked/             # Password-removed PDF copies
+├── output/
+│   └── xls/                      # Excel output files (gitignored)
+│       └── ALL_TRANSACTIONS.xlsx
 ├── logs/                         # Log files (gitignored)
 ├── scripts/
 │   ├── post_reboot_check.sh      # Post-boot health check
 │   ├── tahoe_validate.sh         # Mail schema validator
 │   ├── run_bridge.sh             # Bridge startup wrapper
 │   └── start_agent.sh            # Docker agent startup wrapper (waits for Docker Desktop)
-├── secrets/                      # Auth token (gitignored)
-│   └── bridge.token
+├── secrets/                      # Auth tokens and credentials (gitignored)
+│   ├── bridge.token
+│   ├── banks.toml                # Per-bank PDF passwords
+│   ├── google_credentials.json   # OAuth2 client credentials
+│   └── google_token.json         # Saved OAuth2 token (auto-refreshed)
 ├── .env                          # API keys (gitignored)
 └── docker-compose.yml
 ```
@@ -488,6 +551,83 @@ alert_on_categories = [
   "financial_other"
 ]
 ```
+
+### `[classifier]` — sender domain allowlist
+
+```toml
+allowed_sender_domains = [
+  "maybank.co.id",
+  "cimbniaga.co.id",
+  "permatabank.co.id",
+  "bca.co.id",
+  "klikbca.com",
+]
+```
+
+Emails whose `sender_email` domain does not match this list are silently skipped before any LLM call. Add domains as needed.
+
+### `[pdf]` — Stage 2 PDF pipeline
+
+| Key | Description |
+|---|---|
+| `inbox_dir` | Directory where downloaded PDF attachments are saved |
+| `unlocked_dir` | Directory where password-removed copies are written |
+| `xls_output_dir` | Directory for Excel output files |
+| `bank_passwords_file` | Path to `secrets/banks.toml` (gitignored) |
+| `jobs_db` | SQLite DB for PDF processing jobs |
+| `attachment_seen_db` | SQLite DB for deduplicating Mail.app attachments |
+| `attachment_lookback_days` | How many days back to scan for attachments (default 60) |
+| `parser_llm_model` | Ollama model for LLM fallback parsing |
+
+### `[owners]` — customer name → label mapping
+
+```toml
+[owners]
+"Emanuel" = "Gandrik"
+"Dian Pratiwi" = "Helen"
+```
+
+Substring match, case-insensitive, first match wins. Used for Excel file naming (e.g. `Maybank_Gandrik.xlsx`) and the `Owner` column in `ALL_TRANSACTIONS`.
+
+### `[finance]` — Stage 2 read layer
+
+| Key | Description |
+|---|---|
+| `xlsx_input` | Path to `ALL_TRANSACTIONS.xlsx` (Stage 1 output, never edit manually) |
+| `sqlite_db` | Path to `data/finance.db` (read cache, safe to delete and rebuild) |
+
+### `[google_sheets]` — Sheets sync
+
+| Key | Description |
+|---|---|
+| `credentials_file` | OAuth2 Desktop client JSON from Google Cloud Console |
+| `token_file` | Auto-saved OAuth2 token (auto-refreshed on expiry) |
+| `spreadsheet_id` | ID from the Google Sheet URL |
+| `transactions_tab` | Sheet tab for transactions (default `"Transactions"`) |
+| `aliases_tab` | Sheet tab for merchant aliases (default `"Merchant Aliases"`) |
+| `categories_tab` | Sheet tab for categories (default `"Categories"`) |
+| `currency_tab` | Sheet tab for currency codes (default `"Currency Codes"`) |
+| `import_log_tab` | Sheet tab for import audit log (default `"Import Log"`) |
+
+### `[fastapi]` — Finance API server
+
+| Key | Default | Description |
+|---|---|---|
+| `host` | `"0.0.0.0"` | Bind address |
+| `port` | `8090` | Port (distinct from bridge :9100 and agent health :8080) |
+| `cors_origins` | see below | Allowed CORS origins |
+
+```toml
+cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
+```
+
+### `[ollama_finance]` — Ollama for finance LLM fallback
+
+| Key | Default | Description |
+|---|---|---|
+| `host` | `"http://host.docker.internal:11434"` | Reuses the same Ollama instance as the mail agent |
+| `model` | `"llama3.2:3b"` | Model for transaction parsing LLM fallback |
+| `timeout_seconds` | `60` | Request timeout |
 
 ---
 
@@ -827,7 +967,29 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  finance-api:
+    build: ./finance
+    container_name: finance-api
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./secrets:/app/secrets:ro
+    environment:
+      SETTINGS_FILE: /app/config/settings.toml
 ```
+
+The `finance-api` container:
+- Builds from `finance/Dockerfile` (Python 3.12-slim base)
+- Serves the FastAPI app on `0.0.0.0:8090`
+- Serves the pre-built Vue 3 PWA static files from `pwa/dist/` at the root path
+- Mounts `output/` so the Excel files written on the host are visible inside the container
 
 ### Build
 
@@ -1435,6 +1597,21 @@ docker compose up -d
 
 ## 22. Version History
 
+### v1.3.0
+
+- Added: Stage 2 — Personal Finance Dashboard (PDF pipeline, FastAPI, Vue 3 PWA)
+- Added: `finance/` module — PDF scanner, password unlock, transaction parser, Excel writer, Google Sheets sync
+- Added: `finance-api` Docker service in `docker-compose.yml` (port 8090)
+- Added: `pwa/dist/` — pre-built Vue 3 PWA served as static files by `finance-api`
+- Added: Synology DSM reverse proxy rule — `https://adrianto.synology.me:8443` → `http://192.168.1.205:8090` with Let's Encrypt TLS
+- Added: `[pdf]`, `[owners]`, `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` config sections in `settings.toml`
+- Added: `secrets/banks.toml` — per-bank PDF passwords (gitignored)
+- Added: `secrets/google_credentials.json` / `google_token.json` — Google Sheets OAuth2 (gitignored)
+- Added: `data/pdf_jobs.db`, `data/seen_attachments.db`, `data/finance.db` — Stage 2 SQLite stores
+- Added: `output/xls/ALL_TRANSACTIONS.xlsx` — master transaction ledger
+- Added: `allowed_sender_domains` allowlist to classifier (silently skips non-bank senders before any LLM call)
+- Changed: Architecture diagram updated to show `finance-api` container and Synology reverse proxy
+
 ### v1.2.0
 
 - Added: `com.agentic.agent` LaunchAgent — Docker agent container auto-starts on reboot via `scripts/start_agent.sh`
@@ -1475,4 +1652,125 @@ docker compose up -d
 
 ---
 
-*Guide last updated 2026-03-24 · validated against checked-in codebase*
+## 23. Stage 2 — Personal Finance Dashboard
+
+### Overview
+
+Stage 2 adds a personal finance dashboard on top of the mail alert system. It scans bank PDF attachments from Mail.app, extracts transactions, aggregates them into Excel, syncs to Google Sheets, and exposes them via a FastAPI + Vue 3 PWA.
+
+### Data flow
+
+```
+Mail.app attachments (PDFs)
+  ↓ scanner (seen_attachments.db dedup)
+data/pdf_inbox/
+  ↓ pdf_unlock.py (secrets/banks.toml passwords)
+data/pdf_unlocked/
+  ↓ parser.py (pdfplumber → regex → Ollama LLM fallback)
+output/xls/<Bank>_<Owner>.xlsx  +  ALL_TRANSACTIONS.xlsx
+  ↓ sheets_sync.py (OAuth2)
+Google Sheets (live, cross-device)
+  ↓
+finance-api (FastAPI, port 8090)
+  ↑ Vue 3 PWA (pwa/dist/, served at /)
+```
+
+### Setup
+
+#### 1. Bank passwords file
+
+Create `secrets/banks.toml` (gitignored):
+
+```toml
+[banks]
+maybank = "your-maybank-pdf-password"
+bca = "your-bca-pdf-password"
+cimb = "your-cimb-pdf-password"
+```
+
+#### 2. Google Sheets OAuth2
+
+1. Go to **Google Cloud Console** → **APIs & Services** → **Credentials**
+2. Create an **OAuth 2.0 Client ID** → type **Desktop app**
+3. Download the JSON and save to `secrets/google_credentials.json`
+4. Create a Google Sheet and copy its ID from the URL:
+   `https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit`
+5. Set `spreadsheet_id` in `settings.toml` under `[google_sheets]`
+6. On first run, a browser window opens for OAuth consent — the token is saved to `secrets/google_token.json` automatically thereafter
+
+#### 3. Build and start finance-api
+
+```bash
+cd ~/agentic-ai
+docker compose build finance-api
+docker compose up -d finance-api
+```
+
+Verify:
+
+```bash
+docker compose ps finance-api          # should show "Up"
+curl -s http://localhost:8090/health   # should return JSON
+```
+
+#### 4. Run the PDF pipeline manually
+
+```bash
+docker exec finance-api python3 -m finance.scanner
+```
+
+Or trigger via the API (if implemented as an endpoint).
+
+### Accessing the dashboard
+
+- **LAN (direct):** `http://192.168.1.205:8090`
+- **LAN (via Synology DDNS + reverse proxy):** `https://adrianto.synology.me:8443`
+
+The Synology NAS (192.168.1.44) runs a reverse proxy rule:
+- Source: HTTPS `adrianto.synology.me:8443`
+- Destination: HTTP `192.168.1.205:8090`
+- Certificate: Let's Encrypt auto-managed via Synology DDNS (expires 2026-06-26, auto-renewed)
+
+External access is **not configured** — no port forwards are set on the EdgeRouter or Huawei ONT. The dashboard is intentionally LAN-only.
+
+### finance-api operations
+
+```bash
+# View logs
+docker compose logs -f finance-api
+
+# Restart
+docker compose restart finance-api
+
+# Rebuild after code changes
+docker compose build --no-cache finance-api
+docker compose up -d finance-api
+
+# Reset Stage 2 SQLite cache (safe — rebuilds from Google Sheets or XLSX)
+rm -f data/finance.db
+docker compose restart finance-api
+```
+
+### Google Sheets structure
+
+| Tab | Purpose |
+|---|---|
+| `Transactions` | All transactions from all banks and owners |
+| `Merchant Aliases` | Normalise merchant names (raw → canonical) |
+| `Categories` | Transaction categories and colours |
+| `Currency Codes` | ISO currency code reference |
+| `Import Log` | Audit log of sync operations |
+
+### Known limitations (Stage 2)
+
+| Limitation | Detail |
+|---|---|
+| PDF format dependency | Parser tuned for specific bank PDF layouts; may break after bank statement redesigns |
+| LLM fallback cost | Ollama fallback is slow (~5–15 s per page); use only when rule-based parser fails |
+| Google Sheets quota | Free tier has API rate limits; bulk imports should be batched |
+| No external access | CGNAT on the ISP PPPoE connection prevents inbound port forwarding |
+| PWA is static | The Vue 3 PWA is pre-built; run `npm run build` in `pwa/` and rebuild the container after UI changes |
+
+---
+
+*Guide last updated 2026-03-28 · validated against checked-in codebase*
