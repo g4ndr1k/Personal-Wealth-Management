@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 2.2.0 · Stage 1 complete · Stage 2 fully built (sync engine + FastAPI + Vue 3 PWA)
+**Version:** 2.3.0 · Stage 1 complete · Stage 2 fully built (sync engine + FastAPI + Vue 3 PWA)
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase 2026-03-28
 
@@ -1983,6 +1983,24 @@ docker compose up -d
 
 ## 23. Version History
 
+### v2.3.0 (2026-03-28)
+
+#### Bug fixes
+
+- **Fixed: truncated transaction descriptions in BCA Savings parser** — `_SKIP_RE` included `[A-Z][a-z]` with `re.IGNORECASE`, which accidentally matched *any* two-letter sequence, causing merchant continuation lines such as `LIPPO GENERAL INSU` and `Pembayaran Klaim M` to break out of the look-ahead loop. Fixed by adding a targeted `_CONT_STOP_RE` (without the over-broad pattern) used only for continuation collection; also relaxed the secondary continuation filter from `^[A-Z0-9]` to exclude only pure-digit strings.
+- **Fixed: all other PDF parsers silently dropping multi-line descriptions** — four CC parsers and the CIMB Niaga consolidated parser only captured the first line of a wrapped description. All six parsers now collect continuation lines (non-date, non-structural lines following a transaction anchor) and join them with ` / `.
+
+#### Changed
+
+- **`parsers/bca_savings.py`** — added `_CONT_STOP_RE`; continuation loop uses it instead of `_SKIP_RE`; continuation filter now keeps any non-pure-digit line (including mixed-case and REF: lines).
+- **`parsers/cimb_niaga_consol.py`** — `description = desc_lines[0]` → `description = " / ".join(desc_lines)`.
+- **`parsers/bca_cc.py`** — converted `for` loop to indexed `while` with look-ahead; continuation lines appended with ` / ` separator.
+- **`parsers/permata_cc.py`** — converted `_parse_transactions_from_lines` to indexed `while` loop; look-ahead after each `_TX_PATTERN` match collects continuation lines before the next anchor or structural marker.
+- **`parsers/maybank_cc.py`** — extended existing EXCHANGE RATE look-ahead to also collect description continuation lines before the rate line.
+- **`parsers/cimb_niaga_cc.py`** — converted `_parse_transactions` to indexed `while` loop; look-ahead after each `_TX_PAT` match collects continuation lines.
+
+---
+
 ### v2.2.0 (2026-03-28)
 
 #### Bug fixes
@@ -3074,4 +3092,4 @@ curl -s http://localhost:8090/api/health
 | `UNIQUE constraint failed: transactions.hash` during sync | Duplicate hashes in Sheets; sync deduplicates automatically (first occurrence wins); to clean Sheets run importer with `--overwrite` |
 
 
-*Guide last updated 2026-03-28 · v2.1.0 · Stage 1 complete · Stage 2 fully built (sync + FastAPI + Vue 3 PWA)*
+*Guide last updated 2026-03-28 · v2.3.0 · Stage 1 complete · Stage 2 fully built (sync + FastAPI + Vue 3 PWA)*
