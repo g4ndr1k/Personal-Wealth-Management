@@ -276,10 +276,14 @@ def get_annual_summary(year: int):
         month_rows = conn.execute(
             """
             SELECT
-                CAST(strftime('%m', date) AS INTEGER)            AS month,
-                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END) AS expense,
-                COUNT(*)                                          AS tx_count
+                CAST(strftime('%m', date) AS INTEGER) AS month,
+                SUM(CASE WHEN amount > 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END)      AS income,
+                SUM(CASE WHEN amount < 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END)      AS expense,
+                COUNT(*)                               AS tx_count
             FROM transactions
             WHERE strftime('%Y', date) = ?
             GROUP BY month
@@ -291,8 +295,12 @@ def get_annual_summary(year: int):
         totals = conn.execute(
             """
             SELECT
-                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END) AS expense,
+                SUM(CASE WHEN amount > 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END) AS income,
+                SUM(CASE WHEN amount < 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
             WHERE strftime('%Y', date) = ?
@@ -356,13 +364,17 @@ def get_monthly_summary(year: int, month: int):
             (period,),
         ).fetchall()
 
-        # ── Per-owner totals ──────────────────────────────────────────────────
+        # ── Per-owner totals (Internal Transfer excluded from income/expense) ──
         owner_rows = conn.execute(
             """
             SELECT
                 owner,
-                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END) AS expense,
+                SUM(CASE WHEN amount > 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END) AS income,
+                SUM(CASE WHEN amount < 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
             WHERE strftime('%Y-%m', date) = ?
@@ -372,12 +384,16 @@ def get_monthly_summary(year: int, month: int):
             (period,),
         ).fetchall()
 
-        # ── Grand totals ──────────────────────────────────────────────────────
+        # ── Grand totals (Internal Transfer excluded from income/expense) ─────
         totals = conn.execute(
             """
             SELECT
-                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END) AS expense,
+                SUM(CASE WHEN amount > 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END) AS income,
+                SUM(CASE WHEN amount < 0
+                          AND (category IS NULL OR category != 'Internal Transfer')
+                          THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
             WHERE strftime('%Y-%m', date) = ?
@@ -397,16 +413,18 @@ def get_monthly_summary(year: int, month: int):
     total_income  = totals["income"]  or 0.0
     total_expense = totals["expense"] or 0.0
 
+    TRANSFER_CATS = {"Internal Transfer"}   # excluded from expense % calculation
     by_category = []
     for r in cat_rows:
-        amt = r["total_amount"] or 0.0
+        amt  = r["total_amount"] or 0.0
+        cat_name = r["category"] or "Uncategorised"
         pct = (
             round(abs(amt) / abs(total_expense) * 100, 1)
-            if total_expense and amt < 0
+            if total_expense and amt < 0 and cat_name not in TRANSFER_CATS
             else 0.0
         )
         by_category.append({
-            "category":       r["category"] or "Uncategorised",
+            "category":       cat_name,
             "icon":           r["icon"]       or "",
             "sort_order":     r["sort_order"] or 99,
             "amount":         round(amt, 2),

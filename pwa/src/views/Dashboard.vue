@@ -166,10 +166,11 @@ const displayIncome  = computed(() => ownerRow.value ? ownerRow.value.income  : 
 const displayExpense = computed(() => ownerRow.value ? ownerRow.value.expense : summary.value?.total_expense ?? 0)
 const displayNet     = computed(() => ownerRow.value ? ownerRow.value.net     : summary.value?.net            ?? 0)
 
+const EXCLUDED_FROM_SPENDING = new Set(['Internal Transfer'])
 const topCats = computed(() => {
   const cats = summary.value?.by_category || []
   return cats
-    .filter(c => c.amount < 0)       // only expense rows
+    .filter(c => c.amount < 0 && !EXCLUDED_FROM_SPENDING.has(c.category))
     .sort((a, b) => a.amount - b.amount) // most negative first
     .slice(0, 8)
 })
