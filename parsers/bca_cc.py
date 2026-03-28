@@ -247,9 +247,12 @@ def _parse_transactions(text: str, card_number: str, report_year: int, report_mo
                         errors: list, ollama_client=None) -> list[Transaction]:
     txns = []
     lines = text.splitlines()
+    i = 0
 
-    for line in lines:
-        line = line.strip()
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+
         if not line:
             continue
         if _SKIP_PATTERNS.match(line):
@@ -286,10 +289,27 @@ def _parse_transactions(text: str, card_number: str, report_year: int, report_mo
             continue
         is_credit = bool(cr_flag)
 
+        # Collect continuation lines (description wrap-around from pdfplumber)
+        desc = desc.strip()
+        while i < len(lines):
+            cont = lines[i].strip()
+            if not cont:
+                break
+            # Stop on a new transaction anchor (DD-MON DD-MON) or skip patterns
+            if re.match(r"^\d{2}-[A-Z]{3}\s+\d{2}-[A-Z]{3}\b", cont, re.IGNORECASE):
+                break
+            if _SKIP_PATTERNS.match(cont):
+                break
+            # Stop on pure-amount lines or opening-balance lines
+            if re.match(r"^[\d.]+$", cont) or cont.upper().startswith("SALDO"):
+                break
+            desc = desc + " / " + cont
+            i += 1
+
         txns.append(Transaction(
             date_transaction=date_tx,
             date_posted=date_post,
-            description=desc.strip(),
+            description=desc,
             currency="IDR",
             foreign_amount=None,
             exchange_rate=None,

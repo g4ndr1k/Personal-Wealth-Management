@@ -132,8 +132,11 @@ def _parse_transactions(
     closing_balance = 0.0
     in_detail = False
 
-    for line in lines:
-        line = line.strip()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+
         if not line:
             continue
 
@@ -182,40 +185,61 @@ def _parse_transactions(
 
         # Regular transaction line
         tx_m = _TX_PAT.match(line)
-        if tx_m:
-            date_tx = _parse_ddmm(tx_m.group(1), stmt_date)
-            date_posted = _parse_ddmm(tx_m.group(2), stmt_date)
-            description = tx_m.group(3).strip()
-            amount = _parse_amount(tx_m.group(4))
-            is_credit = tx_m.group(5) is not None
+        if not tx_m:
+            continue
 
-            # Detect and extract foreign currency from description
-            currency = "IDR"
-            foreign_amount = None
-            exchange_rate = None
-            fx_m = _FX_PAT.search(description)
-            if fx_m:
-                currency = fx_m.group(1)
-                foreign_amount = float(fx_m.group(2))
-                exchange_rate = float(fx_m.group(3))
-                description = description[:fx_m.start()].strip()
+        date_tx = _parse_ddmm(tx_m.group(1), stmt_date)
+        date_posted = _parse_ddmm(tx_m.group(2), stmt_date)
+        description = tx_m.group(3).strip()
+        amount = _parse_amount(tx_m.group(4))
+        is_credit = tx_m.group(5) is not None
 
-            # Credit (payment/refund) = negative spend; Debit (charge) = positive
-            amount_idr = -amount if is_credit else amount
+        # Collect continuation lines (description wrap-around from pdfplumber)
+        while i < len(lines):
+            cont = lines[i].strip()
+            if not cont:
+                break
+            # Stop on structural markers
+            if ("PERINCIAN TAGIHAN" in cont or "RINGKASAN TAGIHAN" in cont or
+                    any(h in cont for h in _SKIP_HEADERS)):
+                break
+            # Stop on new transaction anchor (DD/MM DD/MM), balance, subtotal, card sep
+            if (_TX_PAT.match(cont) or _LAST_BAL.match(cont) or _END_BAL.match(cont) or
+                    _SUBTOTAL.match(cont) or _CARD_SEP.match(cont)):
+                break
+            # Stop on pure-number / amount-only lines
+            if re.match(r"^[\d,]+\.\d{2}$", cont):
+                break
+            description = description + " / " + cont
+            i += 1
 
-            txns.append(Transaction(
-                date_transaction=date_tx or "",
-                date_posted=date_posted,
-                description=description,
-                currency=currency,
-                foreign_amount=foreign_amount,
-                exchange_rate=exchange_rate,
-                amount_idr=amount_idr,
-                tx_type="Credit" if is_credit else "Debit",
-                balance=None,
-                account_number=current_card,
-                owner=current_owner,
-            ))
+        # Detect and extract foreign currency from description
+        currency = "IDR"
+        foreign_amount = None
+        exchange_rate = None
+        fx_m = _FX_PAT.search(description)
+        if fx_m:
+            currency = fx_m.group(1)
+            foreign_amount = float(fx_m.group(2))
+            exchange_rate = float(fx_m.group(3))
+            description = description[:fx_m.start()].strip()
+
+        # Credit (payment/refund) = negative spend; Debit (charge) = positive
+        amount_idr = -amount if is_credit else amount
+
+        txns.append(Transaction(
+            date_transaction=date_tx or "",
+            date_posted=date_posted,
+            description=description,
+            currency=currency,
+            foreign_amount=foreign_amount,
+            exchange_rate=exchange_rate,
+            amount_idr=amount_idr,
+            tx_type="Credit" if is_credit else "Debit",
+            balance=None,
+            account_number=current_card,
+            owner=current_owner,
+        ))
 
     return txns, opening_balance, closing_balance
 

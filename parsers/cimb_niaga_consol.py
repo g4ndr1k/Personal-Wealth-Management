@@ -256,9 +256,9 @@ def _parse_tx_tables(
                 amount_idr = credit_amt if is_credit else -debit_amt
                 running_saldo[current_acct] = running_saldo.get(current_acct, 0.0) + amount_idr
 
-                # Use only the first line of multi-line description
+                # Join all lines of a multi-line description
                 desc_lines = [ln.strip() for ln in desc_raw.split("\n") if ln.strip()]
-                description = desc_lines[0] if desc_lines else desc_raw
+                description = " / ".join(desc_lines) if desc_lines else desc_raw
 
                 date_str = _parse_ddmm(tx_date_str_raw, stmt_date)
 

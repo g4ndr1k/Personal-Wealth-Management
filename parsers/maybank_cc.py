@@ -270,19 +270,37 @@ def _parse_transactions(text: str, card_number: str, errors: list, ollama_client
         date_tx = parse_date_ddmmyyyy(date_tx_raw) or date_tx_raw
         date_post = parse_date_ddmmyyyy(date_post_raw) or date_post_raw
 
-        # Check if next line is EXCHANGE RATE (foreign currency transaction spans 2 lines)
-        next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
-        ex_rate = None
-        if _EX_RATE.match(next_line):
-            ex_rate_match = _EX_RATE.match(next_line)
-            ex_rate = parse_idr_amount(ex_rate_match.group(1)) if ex_rate_match else None
-            i += 1  # consume the exchange rate line
+        i += 1  # advance past the anchor line
 
-        # Parse the rest of the main line
+        # Collect continuation lines and look for EXCHANGE RATE
+        ex_rate = None
+        while i < len(lines):
+            cont = lines[i].strip()
+            if not cont:
+                break
+            # EXCHANGE RATE line → capture rate and consume
+            ex_m = _EX_RATE.match(cont)
+            if ex_m:
+                ex_rate = parse_idr_amount(ex_m.group(1))
+                i += 1
+                break
+            # Stop on a new transaction anchor (DD-MM-YY DD-MM-YY)
+            if re.match(r"^\d{2}-\d{2}-\d{2}\s+\d{2}-\d{2}-\d{2}\b", cont):
+                break
+            # Stop on balance-forward or end-of-statement markers
+            if _BALANCE_FWD.search(cont) or cont.upper().startswith("END OF STATEMENT"):
+                break
+            # Stop on pure-number lines (stray amounts)
+            if re.match(r"^[\d.,]+$", cont):
+                break
+            # It's a description continuation — append to rest
+            rest = rest.strip() + " / " + cont
+            i += 1
+
+        # Parse the (possibly extended) description
         txn = _parse_tx_rest(rest, date_tx, date_post, card_number, ex_rate, errors, ollama_client)
         if txn:
             transactions.append(txn)
-        i += 1
 
     return transactions
 

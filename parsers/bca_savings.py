@@ -53,12 +53,22 @@ _MONTHS_FULL = {
     "SEPTEMBER": "09", "OKTOBER": "10", "NOVEMBER": "11", "DESEMBER": "12",
 }
 
-# Lines that are NOT transaction rows
+# Lines that are NOT transaction rows (main loop — skips structural/header lines)
 _SKIP_RE = re.compile(
     r"^(TANGGAL|KETERANGAN|CBG|MUTASI|SALDO|CATATAN|•|Apabila|BCA berhak|"
     r"telah|Rekening|REKENING TAHAPAN|KCU|HALAMAN|PERIODE|MATA UANG|"
     r"NO\. REKENING|INDONESIA|GD |JL |JAKARTA|Bersambung|KUNINGAN|"
     r"\d+ /\d+|[A-Z][a-z])",  # continuation lines often start mixed case
+    re.IGNORECASE
+)
+
+# Targeted stop pattern for continuation collection — does NOT include the
+# broad [A-Z][a-z] catch-all so merchant/payee continuation lines are captured.
+_CONT_STOP_RE = re.compile(
+    r"^(TANGGAL|KETERANGAN|CBG|MUTASI|SALDO|CATATAN|•|Apabila|BCA berhak|"
+    r"telah|REKENING TAHAPAN|KCU|HALAMAN|PERIODE|MATA UANG|"
+    r"NO\. REKENING|INDONESIA|GD |JL |JAKARTA|Bersambung|KUNINGAN|"
+    r"\d+ /\d+)",
     re.IGNORECASE
 )
 
@@ -232,22 +242,26 @@ def _parse_transactions(all_texts: list, account_number: str, year: str, month: 
                 if not next_line:
                     j += 1
                     break
-                # Stop if next line is another transaction or a structural line
-                if _TX_ANCHOR.match(next_line) or _SKIP_RE.match(next_line):
+                # Stop if next line is another transaction or a structural/header line.
+                # Use _CONT_STOP_RE (not _SKIP_RE) so mixed-case merchant/payee names
+                # like "Pembayaran Klaim M" and "LIPPO GENERAL INSU" are still captured.
+                if _TX_ANCHOR.match(next_line) or _CONT_STOP_RE.match(next_line):
                     break
                 continuation.append(next_line)
                 j += 1
 
-            # Build full description from continuation
-            # The reference/amount number lines in continuation are not useful for description
+            # Build full description from continuation.
+            # Skip pure numeric/reference lines; keep everything else (merchant names,
+            # payment descriptions, REF: lines, mixed-case counterparty text).
             desc_parts = [rest]
             for cont in continuation:
-                # Skip pure number lines, reference codes, and lines starting with dashes
+                # Skip pure number/separator lines and bare dashes
                 if re.match(r"^[\d./\-]+$", cont) or cont == "-":
                     continue
-                # Keep human-readable continuation (counterparty names, notes)
-                if re.match(r"^[A-Z0-9]", cont) and not re.match(r"^\d{12,}$", cont):
-                    desc_parts.append(cont)
+                # Skip long account/card number sequences (12+ digits only)
+                if re.match(r"^\d{12,}$", cont):
+                    continue
+                desc_parts.append(cont)
 
             # Parse amount from the anchor line's tail
             tail_match = _AMOUNT_TAIL.search(rest)
@@ -270,11 +284,8 @@ def _parse_transactions(all_texts: list, account_number: str, year: str, month: 
             # Remove trailing CBG code from description if present
             if cbg:
                 desc_raw = desc_raw.rstrip()
-            # Append meaningful continuation
-            extra_desc = " ".join(
-                c for c in desc_parts[1:]
-                if not re.match(r"^[\d./\-]+$", c) and c != "-"
-            )
+            # Append meaningful continuation (already filtered above)
+            extra_desc = " / ".join(desc_parts[1:]) if len(desc_parts) > 1 else ""
             full_desc = (desc_raw + (" / " + extra_desc if extra_desc else "")).strip()
 
             date_iso = _bca_savings_date(date_raw, year)

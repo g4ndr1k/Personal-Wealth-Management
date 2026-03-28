@@ -144,9 +144,15 @@ def _parse_transactions_from_lines(
     current_card = primary_card
 
     in_detil = False
+    _HEADER_LINES = {
+        "Tanggal Transaksi Tanggal Pembukuan Keterangan Transaksi Jumlah (Rp)",
+        "Tanggal Transaksi", "Tanggal Pembukuan", "Keterangan Transaksi", "Jumlah (Rp)",
+    }
 
-    for line in lines:
-        line = line.strip()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
 
         # Start (or re-start) of transaction section on each page
         if "DETIL TRANSAKSI" in line:
@@ -161,13 +167,8 @@ def _parse_transactions_from_lines(
             in_detil = False
             continue
 
-        # Skip header rows
-        if line in ("Tanggal Transaksi Tanggal Pembukuan Keterangan Transaksi Jumlah (Rp)",
-                    "Tanggal Transaksi", "Tanggal Pembukuan", "Keterangan Transaksi", "Jumlah (Rp)"):
-            continue
-
-        # Skip opening balance
-        if "TAGIHAN BULAN LALU" in line:
+        # Skip header rows and opening balance
+        if line in _HEADER_LINES or "TAGIHAN BULAN LALU" in line:
             continue
 
         # Card separator line → switch owner
@@ -193,32 +194,56 @@ def _parse_transactions_from_lines(
 
         # Regular transaction line
         tx_m = _TX_PATTERN.match(line)
-        if tx_m:
-            tgl_tx_str = tx_m.group(1)
-            tgl_bk_str = tx_m.group(2)
-            description = tx_m.group(3).strip()
-            amount_str = tx_m.group(4)
-            is_credit = tx_m.group(5) is not None
+        if not tx_m:
+            continue
 
-            date_tx = _parse_ddmm_date(tgl_tx_str, cetak)
-            date_posted = _parse_ddmm_date(tgl_bk_str, cetak)
-            amount = _parse_amount_str(amount_str)
-            if is_credit:
-                amount = -amount  # credit = negative spend
+        tgl_tx_str = tx_m.group(1)
+        tgl_bk_str = tx_m.group(2)
+        description = tx_m.group(3).strip()
+        amount_str = tx_m.group(4)
+        is_credit = tx_m.group(5) is not None
 
-            txns.append(Transaction(
-                date_transaction=date_tx or "",
-                date_posted=date_posted,
-                description=description,
-                currency="IDR",
-                foreign_amount=None,
-                exchange_rate=None,
-                amount_idr=float(amount),
-                tx_type="Credit" if is_credit else "Debit",
-                balance=None,
-                account_number=current_card,
-                owner=current_owner,
-            ))
+        date_tx = _parse_ddmm_date(tgl_tx_str, cetak)
+        date_posted = _parse_ddmm_date(tgl_bk_str, cetak)
+        amount = _parse_amount_str(amount_str)
+        if is_credit:
+            amount = -amount  # credit = negative spend
+
+        # Collect continuation lines (description wrap-around from pdfplumber)
+        while i < len(lines):
+            cont = lines[i].strip()
+            if not cont:
+                break
+            # Stop on structural markers
+            if ("DETIL TRANSAKSI" in cont or cont.startswith("JUMLAH POIN") or
+                    cont.startswith("Sub Total") or cont in _HEADER_LINES or
+                    "TAGIHAN BULAN LALU" in cont):
+                break
+            # Stop on a new transaction anchor (DDMM DDMM)
+            if _TX_PATTERN.match(cont) or _SEPARATOR_PATTERN.match(cont):
+                break
+            # Stop on FX annotation (will be processed in the next iteration)
+            if _FX_PATTERN.search(cont):
+                break
+            # Stop on pure-number lines
+            if re.match(r"^[\d,]+$", cont):
+                break
+            description = description + " / " + cont
+            i += 1
+
+        txns.append(Transaction(
+            date_transaction=date_tx or "",
+            date_posted=date_posted,
+            description=description,
+            currency="IDR",
+            foreign_amount=None,
+            exchange_rate=None,
+            amount_idr=float(amount),
+            tx_type="Credit" if is_credit else "Debit",
+            balance=None,
+            account_number=current_card,
+            owner=current_owner,
+        ))
 
     return txns
 
