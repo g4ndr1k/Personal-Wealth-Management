@@ -94,6 +94,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
+import { formatIDR } from '../utils/currency.js'
 
 const store = useFinanceStore()
 
@@ -138,12 +139,7 @@ function ccyFlag(ccy) { return CCY_FLAGS[ccy] || '🌐' }
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 function fmt(n) {
-  if (n === null || n === undefined) return 'Rp 0'
-  const abs = Math.abs(n)
-  const sign = n < 0 ? '-' : ''
-  if (abs >= 1_000_000_000) return `${sign}Rp ${(abs / 1_000_000_000).toFixed(1)} M`
-  if (abs >= 1_000_000)     return `${sign}Rp ${(abs / 1_000_000).toFixed(1)} jt`
-  return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(n)
+  return formatIDR(n)
 }
 
 function fmtFX(n) {

@@ -134,6 +134,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import Chart from 'chart.js/auto'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
+import { formatIDR } from '../utils/currency.js'
 
 const store = useFinanceStore()
 const trendRef = ref(null)
@@ -177,20 +178,11 @@ const topCats = computed(() => {
 
 // ── Formatters ───────────────────────────────────────────────────────────────
 function fmt(n) {
-  if (n === null || n === undefined) return 'Rp 0'
-  const abs = Math.abs(n)
-  const sign = n < 0 ? '-' : ''
-  if (abs >= 1_000_000_000) return `${sign}Rp ${(abs / 1_000_000_000).toFixed(1).replace('.', ',')} M`
-  if (abs >= 1_000_000)     return `${sign}Rp ${(abs / 1_000_000).toFixed(1).replace('.', ',')} jt`
-  return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(n)
+  return formatIDR(n)
 }
 
 function fmtShort(n) {
-  const abs = Math.abs(n)
-  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}M`
-  if (abs >= 1_000_000)     return `${(n / 1_000_000).toFixed(0)}jt`
-  if (abs >= 1_000)         return `${(n / 1_000).toFixed(0)}rb`
-  return String(Math.round(n))
+  return formatIDR(n)
 }
 
 function catIcon(name) {

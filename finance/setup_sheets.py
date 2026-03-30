@@ -44,6 +44,7 @@ TABS: dict[str, list[str]] = {
     ],
     "aliases_tab": [
         "merchant", "alias", "category", "match_type", "added_date",
+        "owner_filter", "account_filter",
     ],
     "categories_tab": [
         "category", "icon", "sort_order", "is_recurring", "monthly_budget",
@@ -70,14 +71,20 @@ DEFAULT_CATEGORIES = [
     ["Shopping",         "🛍️", 6,  "FALSE", ""],
     ["Healthcare",       "🏥", 7,  "FALSE", ""],
     ["Entertainment",    "🎬", 8,  "FALSE", ""],
-    ["Subscriptions",    "🔄", 9,  "TRUE",  ""],
+    ["Subscriptions",    "📱", 9,  "TRUE",  ""],
     ["Travel",           "✈️", 10, "FALSE", ""],
     ["Education",        "📚", 11, "FALSE", ""],
     ["Personal Care",    "💇", 12, "FALSE", ""],
     ["Gifts & Donations","🎁", 13, "FALSE", ""],
     ["Fees & Interest",  "🏦", 14, "FALSE", ""],
-    ["Income",           "💰", 15, "FALSE", ""],
-    ["Other",            "❓", 16, "FALSE", ""],
+    ["Cash Withdrawal",  "💵", 15, "FALSE", ""],
+    ["Income",           "💰", 16, "FALSE", ""],
+    ["Other",            "❓", 17, "FALSE", ""],
+    ["Internal Transfer","🔁", 18, "FALSE", ""],
+    ["External Transfer","↗️", 19, "FALSE", ""],
+    ["Household Expenses","🧺", 20, "FALSE", ""],
+    ["Child Support",    "👧", 21, "TRUE",  ""],
+    ["Opening Balance",  "🏦", 22, "FALSE", ""],
 ]
 
 DEFAULT_CURRENCIES = [

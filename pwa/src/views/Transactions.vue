@@ -45,9 +45,9 @@
       <div v-if="totalCount > 0" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;color:var(--text-muted)">
         <span>{{ totalCount.toLocaleString() }} transaction{{ totalCount !== 1 ? 's' : '' }}</span>
         <span>
-          <span class="text-income">+{{ fmt(totals.income) }}</span>
+          <span class="text-income">{{ fmt(totals.income) }}</span>
           &nbsp;
-          <span class="text-expense">-{{ fmt(Math.abs(totals.expense)) }}</span>
+          <span class="text-expense">{{ fmt(Math.abs(totals.expense)) }}</span>
         </span>
       </div>
 
@@ -156,6 +156,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
+import { formatIDR } from '../utils/currency.js'
 
 const store = useFinanceStore()
 
@@ -190,12 +191,7 @@ function monthName(m) { return MONTHS_LONG[m - 1] }
 function catIcon(name) { return store.categoryMap[name]?.icon || '📁' }
 
 function fmt(n) {
-  if (n === null || n === undefined) return 'Rp 0'
-  const abs = Math.abs(n)
-  const sign = n < 0 ? '-' : ''
-  if (abs >= 1_000_000_000) return `${sign}Rp ${(abs / 1_000_000_000).toFixed(1)} M`
-  if (abs >= 1_000_000)     return `${sign}Rp ${(abs / 1_000_000).toFixed(1)} jt`
-  return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(n)
+  return formatIDR(n)
 }
 
 let searchTimer = null

@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 2.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
+**Version:** 2.5.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase 2026-03-29
 
@@ -188,9 +188,9 @@ The system alerts on:
   - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation, XLSX date parser
   - `finance/sheets.py` — Google Sheets API v4 client: OAuth 2.0 token management (personal account), read/write transactions, aliases, categories, currency hints, import log
-  - `finance/categorizer.py` — 4-layer categorization engine: exact alias → regex → Ollama AI suggestion → review queue flag
+  - `finance/categorizer.py` — account-aware categorization engine: exact alias → contains alias → regex → Ollama AI suggestion → review queue flag, plus cross-account internal transfer matching
   - `finance/importer.py` — CLI entry point: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, batch-appends to Google Sheets; `--dry-run`, `--overwrite`, `--file`, `-v`
-  - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 16 default categories and 18 currency codes
+  - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 22 default categories and 18 currency codes
   - `finance/db.py` — SQLite schema (5 tables + 5 indexes), WAL mode, `open_db()` connection helper
   - `finance/sync.py` — Sheets → SQLite sync engine: atomic DELETE + INSERT per table, hash deduplication, sync_log, `--status` CLI flag
   - `finance/api.py` — FastAPI app: 12 REST endpoints, CORS, SQLite `_db()` context manager, monthly summary aggregation, alias write-back to Sheets, auto-sync after import; also mounts `pwa/dist/` at `/` when present
@@ -1993,6 +1993,24 @@ docker compose up -d
 
 ## 23. Version History
 
+### v2.5.0 (2026-03-30)
+
+#### Features
+
+- **Added: household/account-aware finance rules** — extended the live Merchant Aliases setup for household expenses, child support, healthcare, and income patterns. Included account-aware salary cleanup so Gandrik salary is now represented by a single canonical alias: `PwC Indonesia Salary` → `KR OTOMATIS LLG-ANZ INDONESIA` on account `2171138631`.
+- **Added: transfer-aware internal matching hardening** — `finance/categorizer.py` now requires transfer-like descriptions before pairing same-date/same-amount debit and credit rows as `Internal Transfer`, reducing false positives from unrelated matching amounts.
+- **Added: full IDR formatting in the PWA** — Dashboard, Transactions, Review Queue, and Foreign Spend now render full Rupiah amounts such as `Rp 100,000,000` using comma thousand separators instead of compact `jt` / `M` notation.
+
+#### Changed
+
+- **`finance/setup_sheets.py`** — default Merchant Aliases headers now include `owner_filter` and `account_filter`; default categories expanded to 22, including `Cash Withdrawal`, `Internal Transfer`, `External Transfer`, `Household Expenses`, `Child Support`, and `Opening Balance`.
+- **`scripts/add_household_rules.py` / `scripts/apply_household_rules.py`** — updated to seed and backfill the newer household rules and the canonical PwC salary merchant naming.
+- **`pwa/src/utils/currency.js`** — introduced a shared IDR formatter using full `en-US`-style comma separators.
+
+#### UI behavior
+
+- **Amounts no longer show explicit signs in the PWA** — negative numbers no longer render with a leading minus sign; expense/income color is now the primary visual indicator.
+
 ### v2.4.0 (2026-03-29)
 
 #### Features
@@ -2609,13 +2627,22 @@ Column order optimized for mobile scanning (most-viewed fields leftmost):
 
 ### 26.3 Google Sheets — Merchant Aliases tab
 
-| Column | Type | Example |
-|---|---|---|
-| `merchant` | Text | Amazon |
-| `alias` | Text | AMZN*MK |
-| `category` | Text | Shopping |
-| `match_type` | Text | `exact` or `regex` |
-| `added_date` | Date | 2025-03-20 |
+| Column | Type | Example | Notes |
+|---|---|---|---|
+| `merchant` | Text | Amazon | Canonical merchant name |
+| `alias` | Text | AMZN*MK | Pattern to match against raw_description |
+| `category` | Text | Shopping | Category to assign |
+| `match_type` | Text | `exact` / `contains` / `regex` | Match strategy |
+| `added_date` | Date | 2025-03-20 | When the rule was created |
+| `owner_filter` | Text | Helen | Optional: only match this owner (blank = any) |
+| `account_filter` | Text | 5500346622 | Optional: only match this account (blank = any) |
+
+**Match types:**
+- `exact` — alias must match the full raw_description (case-insensitive)
+- `contains` — alias must appear as a substring of raw_description (case-insensitive)
+- `regex` — alias is a Python regex pattern (case-insensitive)
+
+**Account-aware filtering:** When `owner_filter` and/or `account_filter` are set, the rule only matches if the transaction's owner/account matches. This enables the same description pattern (e.g. "TARIKAN ATM") to categorise differently depending on which account it belongs to. Filtered rules are always checked before generic (unfiltered) rules within the same layer.
 
 ### 26.4 Google Sheets — Categories tab
 
@@ -2627,7 +2654,7 @@ Column order optimized for mobile scanning (most-viewed fields leftmost):
 | `is_recurring` | Boolean | FALSE | |
 | `monthly_budget` | Number | 8000000 | Reserved for Stage 2.x; not surfaced in Stage 2 UI |
 
-Default categories: Housing 🏠 · Utilities ⚡ · Groceries 🛒 · Dining Out 🍽️ · Transport 🚗 · Shopping 🛍️ · Healthcare 🏥 · Entertainment 🎬 · Subscriptions 🔄 · Travel ✈️ · Education 📚 · Personal Care 💇 · Gifts & Donations 🎁 · Fees & Interest 🏦 · Income 💰 · Other ❓
+Default categories: Housing 🏠 · Utilities ⚡ · Groceries 🛒 · Dining Out 🍽️ · Transport 🚗 · Shopping 🛍️ · Healthcare 🏥 · Entertainment 🎬 · Subscriptions 📱 · Travel ✈️ · Education 📚 · Personal Care 💇 · Gifts & Donations 🎁 · Fees & Interest 🏦 · Cash Withdrawal 💵 · Income 💰 · Other ❓ · Internal Transfer 🔁 · External Transfer ↗️ · Household Expenses 🧺 · Child Support 👧 · Opening Balance 🏦
 
 ### 26.5 Google Sheets — Currency Codes tab
 
@@ -2728,15 +2755,18 @@ CREATE TABLE IF NOT EXISTS sync_log (
 
 ## 27. Stage 2 Categorization Engine
 
-### Five-layer pipeline
+### Six-layer pipeline (account-aware)
 
 ```
-raw_description
+(raw_description, owner, account)
       │
-      ▼ Layer 1: alias exact match (Merchant Aliases tab)
+      ▼ Layer 1: alias exact match (Merchant Aliases tab, with owner/account filters)
    Match? ──Yes──▶ auto-categorize → write to Sheet
       │ No
-      ▼ Layer 2: regex match (Merchant Aliases tab, match_type = "regex")
+      ▼ Layer 1b: alias contains match (match_type = "contains", with filters)
+   Match? ──Yes──▶ auto-categorize → write to Sheet
+      │ No
+      ▼ Layer 2: regex match (match_type = "regex", with filters)
    Match? ──Yes──▶ auto-categorize → write to Sheet
       │ No
       ▼ Layer 3: Ollama llama3.2:3b suggestion
@@ -2747,33 +2777,58 @@ raw_description
       │ No / disabled
       ▼ Layer 4: review queue (no pre-fill)
    User confirms → write to Sheet + expand Merchant Aliases tab
+
+After all transactions are categorized:
+      ▼ Post-processing: cross-account internal transfer matching
+   Found matching DB/CR pair? ──Yes──▶ re-categorize both as Internal Transfer
 ```
 
-**Layers 1 and 2 auto-assign** (no user interaction needed). **Layers 3, 3b, and 4 always require one user confirmation tap** in the PWA review queue.
+**Layers 1, 1b, and 2 auto-assign** (no user interaction needed). **Layers 3, 3b, and 4 always require one user confirmation tap** in the PWA review queue.
 
 Every confirmed Layer 3/4 entry writes back to the Merchant Aliases tab. Future identical raw descriptions match at Layer 1 and skip AI entirely.
 
+### Account-aware alias matching
+
+All alias layers (exact, contains, regex) support two optional filter columns: `owner_filter` and `account_filter`. When set, the alias only matches if the transaction's owner and/or account number matches.
+
+**Priority:** Within each layer, filtered (specific) rules are always checked before generic (unfiltered) rules. This ensures that, e.g., "TARIKAN ATM" from Helen's BCA 5500346622 → Household Expenses, while the same pattern from any other account → Cash Withdrawal (generic regex).
+
+**Example account-aware rules:**
+
+| merchant | alias | category | match_type | owner_filter | account_filter |
+|---|---|---|---|---|---|
+| Household Cash | TARIKAN ATM | Household Expenses | contains | Helen | 5500346622 |
+| Healthcare (Ivan) | IVAN | Healthcare | contains | Helen | 2684118322 |
+| ANZ Indonesia (Salary) | LLG-ANZ | Income | contains | Gandrik | 2171138631 |
+| ERHA Clinic (Income) | ERHA CLINIC | Income | contains | Helen | 4123968773 |
+| Child Support (Katina) | KATINA MIKAELA | Child Support | contains | | |
+| Household Staff (Rini) | FRANSISCA RINI | Household Expenses | contains | | |
+
+### Cross-account internal transfer matching
+
+After individual transaction categorization, a post-processing step (`match_internal_transfers()`) detects matching debit/credit pairs across known internal account pairs.
+
+**How it works:**
+1. For each configured account pair (A ↔ B), find transactions where account A has a debit on date D for amount X, and account B has a credit on the same date D for the same amount X.
+2. Only pair rows whose `raw_description` still looks transfer-like (for example `TRSF E-BANKING`, `TRF INCOMING`, `TRF BIFAST`, `TRF KE`, `PB DARI`, `PB KE`, `BI-FAST`). This avoids reclassifying unrelated same-day/same-amount debit and credit rows.
+3. Both sides are re-categorised as "Internal Transfer".
+
+**Configured account pairs** (in `categorizer.py::INTERNAL_ACCOUNT_PAIRS`):
+- Gandrik BCA (2171138631) ↔ Helen BCA (5500346622) — monthly household allowance
+- Helen Permata (4123968773) ↔ Helen BCA (2684118322) — savings ↔ spending
+- Helen Permata (4123968773) ↔ Gandrik Permata (4123968447) — cross-account
+
 ### Layer 1 — Merchant alias table (exact match)
 
-Stored in the Merchant Aliases Google Sheet tab. Example structure:
+Stored in the Merchant Aliases Google Sheet tab. Exact matches compare the full raw_description (case-insensitive) against the alias column.
 
-```json
-{
-  "Amazon":  { "aliases": ["AMZN*MK", "AMAZON.COM", "AMZN MKTP US"], "default_category": "Shopping" },
-  "Grab":    { "aliases": ["GRAB* FOOD", "GRAB* TRANSPORT"],          "default_category": "Transport" },
-  "Netflix": { "aliases": ["NETFLIX.COM"],                            "default_category": "Subscriptions" }
-}
-```
+### Layer 1b — Contains match
+
+Same tab, rows where `match_type = "contains"`. The alias is a substring that must appear within the raw_description (case-insensitive). Useful for merchant names embedded in longer descriptions with date/reference prefixes.
 
 ### Layer 2 — Regex patterns
 
-Same Merchant Aliases tab, rows where `match_type = "regex"`. Handles merchants with predictable but variable formats:
-
-| Alias (regex) | Merchant | Category |
-|---|---|---|
-| `STARBUCKS #\d+` | Starbucks | Dining Out |
-| `SQ \*.*` | Square merchant | Dining Out |
-| `GRAB\* .*` | Grab | Transport |
+Same tab, rows where `match_type = "regex"`. Python regex with `re.IGNORECASE`. Handles merchants with variable date/reference suffixes.
 
 ### Layer 3 — Ollama AI suggestion
 
@@ -2785,7 +2840,8 @@ You are a personal finance categorizer for an Indonesian household.
 Known categories: Housing, Utilities, Groceries, Dining Out, Transport,
 Shopping, Healthcare, Entertainment, Subscriptions, Travel, Education,
 Personal Care, Gifts & Donations, Fees & Interest, Cash Withdrawal,
-Income, Other, Internal Transfer, External Transfer
+Income, Other, Internal Transfer, External Transfer, Household Expenses,
+Child Support
 
 Recent confirmed examples:
 - "GRAB* TRANSPORT" → Grab, Transport
@@ -2812,10 +2868,6 @@ When Ollama is unreachable or returns no parseable response, `categorizer.py` ma
 ### Layer 4 — User review queue (fallback)
 
 Transactions that clear Layers 1–3 without a match surface in the PWA review queue with no pre-fill. The user types a merchant name and picks a category from the dropdown.
-
-### RapidFuzz fuzzy matching
-
-Used as an additional suggestion hint in Layers 3 and 4: when an unknown description enters the review queue, the closest existing alias (by RapidFuzz token-sort ratio) is shown as a secondary suggestion. Never auto-assigned.
 
 ---
 
@@ -2922,7 +2974,7 @@ AI narrative (via Ollama `llama3.2:3b`) runs after the deterministic summary and
 
 **Navigation:** dark navy (`#1e3a5f`) top bar + 5-item bottom nav bar; review item shows orange/red badge with pending count. Mobile-first layout, max-width 640 px, safe-area-inset padding.
 
-**IDR formatting:** amounts ≥ 1 M display as `Rp 92,6 jt` (juta); ≥ 1 B as `Rp 1,2 M`. Income green (`#22c55e`), expense red (`#ef4444`).
+**IDR formatting:** PWA views render full Rupiah amounts such as `Rp 92,600,000` using comma thousand separators (`en-US` style). Negative values do not show a leading minus sign; income remains green (`#22c55e`), expense red (`#ef4444`).
 
 ### Offline behavior (service worker)
 
