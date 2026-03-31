@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 2.6.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
+**Version:** 2.7.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase 2026-03-31
 
@@ -2000,6 +2000,27 @@ docker compose up -d
 ---
 
 ## 23. Version History
+
+### v2.7.0 (2026-03-31)
+
+#### Features
+
+- **Added: Layer 3 AI categorization fixes** — fixed a critical bug where all Ollama calls silently failed when running on the Mac host: `settings.toml` had `host = "http://host.docker.internal:11434"` which only resolves inside Docker. Changed to `localhost:11434` for local runs. Added `OLLAMA_FINANCE_HOST` env var in `docker-compose.yml` so the Docker container still resolves via `host.docker.internal`. Result: L3 suggested went from 0 → 107–110 (all transactions now categorized; L4 review queue = 0).
+- **Added: qwen2.5:7b as the default Ollama model** — replaces `llama3.2:3b`. Scores 10/14 on the internal test set (vs 9/14 for llama3.2:3b); better merchant name cleanup and category nuance (Transport vs Travel, Shopping vs Household Expenses).
+- **Added: richer categorization prompt** — per-category guidance in `finance/categorizer.py` distinguishes Transport (daily commute: Grab, Gojek, fuel) from Travel (airlines, airports, hotels, Airbnb), Shopping (fashion, general retail) from Household Expenses (IKEA, ACE Hardware), and adds an "if airline name → always Travel, not Transport" hard rule.
+- **Added: permanent Layer 1b aliases for persistent LLM misclassifications** — 19 `contains` aliases seeded via `finance/_seed_aliases.py`. Merchants that both qwen2.5:7b and llama3.2:3b consistently miscategorize are now caught at Layer 1 before any LLM call:
+  - **Household Expenses:** IKEA, ACE HARDWARE, INFORMA, COURTS
+  - **Travel (airlines):** CATHAY, GARUDA, CITILINK, LION AIR, BATIK AIR, AIRASIA, SRIWIJAYA, SUPER AIR JET, WINGS AIR
+  - **Travel (booking/accommodation):** AIRBNB, BOOKING.COM, AGODA, TRAVELOKA, TIKET.COM, KLOOK
+
+#### Changed
+
+- `config/settings.toml` — `[ollama_finance]` host changed from `http://host.docker.internal:11434` → `http://localhost:11434`; model changed from `llama3.2:3b` → `qwen2.5:7b`.
+- `docker-compose.yml` — added `OLLAMA_FINANCE_HOST: http://host.docker.internal:11434` to `finance-api` environment so Docker containers still reach Ollama on the host.
+- `finance/config.py` — `get_ollama_finance_config()` now honours `OLLAMA_FINANCE_HOST` and `OLLAMA_FINANCE_MODEL` env vars (Docker override pattern consistent with other config values).
+- `finance/_seed_aliases.py` — new one-time utility script; safe to re-run (skips existing aliases by pattern+match_type key).
+
+---
 
 ### v2.6.0 (2026-03-31)
 
