@@ -100,8 +100,10 @@ def get_fastapi_config(cfg: dict) -> FastAPIConfig:
 def get_ollama_finance_config(cfg: dict) -> OllamaFinanceConfig:
     s = cfg.get("ollama_finance", {})
     return OllamaFinanceConfig(
-        host=s.get("host", "http://localhost:11434"),
-        model=s.get("model", "llama3.2:3b"),
+        # OLLAMA_FINANCE_HOST lets Docker containers point to host.docker.internal
+        # while the settings.toml default (localhost) is used for host-side runs.
+        host=os.environ.get("OLLAMA_FINANCE_HOST") or s.get("host", "http://localhost:11434"),
+        model=os.environ.get("OLLAMA_FINANCE_MODEL") or s.get("model", "qwen2.5:7b"),
         timeout_seconds=s.get("timeout_seconds", 60),
     )
 

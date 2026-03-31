@@ -210,22 +210,21 @@ class Categorizer:
                 log.debug("L2 regex: %r → %s / %s", desc, merchant, category)
                 return CategorizationResult(merchant, category, layer=2, confidence="auto")
 
-        # ── Layer 3: AI suggestion (Claude primary, Ollama offline fallback) ──
-        # Claude is tried first when an API key is configured — it has far
-        # better knowledge of global merchant names and category nuances.
-        # Ollama acts as a local fallback when Claude is unavailable.
-        suggestion = self._anthropic_suggest(desc)
-        if suggestion:
-            merchant, category = suggestion
-            log.debug("L3 claude: %r → %s / %s", desc, merchant, category)
-            return CategorizationResult(
-                merchant, category, layer=3, confidence="suggested"
-            )
-
+        # ── Layer 3: AI suggestion (Ollama primary, Claude fallback) ──────────
+        # Ollama runs locally with no API cost.  Claude is used as a fallback
+        # if an ANTHROPIC_API_KEY is configured and Ollama fails/is unavailable.
         suggestion = self._ollama_suggest(desc)
         if suggestion:
             merchant, category = suggestion
             log.debug("L3 ollama: %r → %s / %s", desc, merchant, category)
+            return CategorizationResult(
+                merchant, category, layer=3, confidence="suggested"
+            )
+
+        suggestion = self._anthropic_suggest(desc)
+        if suggestion:
+            merchant, category = suggestion
+            log.debug("L3 claude: %r → %s / %s", desc, merchant, category)
             return CategorizationResult(
                 merchant, category, layer=3, confidence="suggested"
             )

@@ -140,7 +140,8 @@ port         = 8090           # distinct from bridge :9100 and agent health :808
 cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 
 [ollama_finance]
-# Reuse the existing Ollama instance (same model as mail agent)
-host            = "http://host.docker.internal:11434"
-model           = "llama3.2:3b"
+# Use localhost when running on the Mac host directly.
+# Docker overrides this via OLLAMA_FINANCE_HOST env var (host.docker.internal).
+host            = "http://localhost:11434"
+model           = "qwen2.5:7b"
 timeout_seconds = 60
