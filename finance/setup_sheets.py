@@ -57,6 +57,9 @@ TABS: dict[str, list[str]] = {
         "import_date", "import_file", "rows_added",
         "rows_skipped", "rows_total", "duration_s", "notes",
     ],
+    "pdf_import_log_tab": [
+        "month", "label", "expected", "actual", "status", "files", "last_processed",
+    ],
 }
 
 # ── Default seed data ──────────────────────────────────────────────────────────
@@ -137,11 +140,12 @@ def setup(cfg_path: str | None = None):
 
     # Map config key → desired tab title
     tab_map = {
-        "transactions_tab": sheets_cfg.transactions_tab,
-        "aliases_tab":      sheets_cfg.aliases_tab,
-        "categories_tab":   sheets_cfg.categories_tab,
-        "currency_tab":     sheets_cfg.currency_tab,
-        "import_log_tab":   sheets_cfg.import_log_tab,
+        "transactions_tab":   sheets_cfg.transactions_tab,
+        "aliases_tab":        sheets_cfg.aliases_tab,
+        "categories_tab":     sheets_cfg.categories_tab,
+        "currency_tab":       sheets_cfg.currency_tab,
+        "import_log_tab":     sheets_cfg.import_log_tab,
+        "pdf_import_log_tab": sheets_cfg.pdf_import_log_tab,
     }
 
     # ── Step 1: get existing sheet metadata ───────────────────────────────────

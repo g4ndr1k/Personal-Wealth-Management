@@ -130,8 +130,9 @@ transactions_tab = "Transactions"
 aliases_tab      = "Merchant Aliases"
 categories_tab   = "Categories"
 currency_tab     = "Currency Codes"
-import_log_tab   = "Import Log"
-overrides_tab    = "Category Overrides"
+import_log_tab        = "Import Log"
+overrides_tab         = "Category Overrides"
+pdf_import_log_tab    = "PDF Import Log"
 
 [fastapi]
 host         = "0.0.0.0"

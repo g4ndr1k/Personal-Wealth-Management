@@ -44,7 +44,7 @@ from finance.config import (
 )
 from finance.models import FinanceTransaction, parse_xlsx_date
 from finance.sheets import SheetsClient
-from finance.categorizer import Categorizer
+from finance.categorizer import Categorizer, match_internal_transfers
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +73,11 @@ _EXPECTED_HEADERS = [
     "Currency", "Jumlah Valuta Asing", "Kurs (RP)",
     "Jumlah (IDR)", "Tipe", "Saldo (IDR)", "Nomor Rekening/Kartu",
 ]
+
+# Transactions dated before this cutoff are silently dropped.
+# CC billing cycles can span two calendar months, so a 2026 statement may
+# contain December 2025 charges — we exclude those pre-cutoff rows here.
+_MIN_TX_DATE = "2026-01-01"
 
 
 # ── Core import logic ─────────────────────────────────────────────────────────
@@ -176,7 +181,9 @@ def run(
 
         if txn.hash in existing_hashes:
             if overwrite:
-                result = categorizer.categorize(txn.raw_description)
+                result = categorizer.categorize(
+                    txn.raw_description, owner=txn.owner, account=txn.account,
+                )
                 txn.merchant = result.merchant
                 txn.category = result.category
                 by_layer[result.layer] += 1
@@ -186,20 +193,27 @@ def run(
             continue
 
         # Categorize new row
-        result = categorizer.categorize(txn.raw_description)
+        result = categorizer.categorize(
+            txn.raw_description, owner=txn.owner, account=txn.account,
+        )
         txn.merchant = result.merchant
         txn.category = result.category
         by_layer[result.layer] += 1
         new_txns.append(txn)
 
     total_valid = len(data_rows) - parse_errors
+
+    # ── Post-processing: cross-account internal transfer matching ───────────
+    all_txns = new_txns + overwrite_txns
+    cross_matched = match_internal_transfers(all_txns)
+
     log.info(
         "Parsed: %d valid | %d new | %d duplicate (skipped) | %d parse errors",
         total_valid, len(new_txns), skipped, parse_errors,
     )
     log.info(
-        "Categorization: L1 auto=%d  L2 auto=%d  L3 suggested=%d  L4 review=%d",
-        by_layer[1], by_layer[2], by_layer[3], by_layer[4],
+        "Categorization: L1 auto=%d  L2 auto=%d  L3 suggested=%d  L4 review=%d  cross=%d",
+        by_layer[1], by_layer[2], by_layer[3], by_layer[4], cross_matched,
     )
 
     if dry_run:
@@ -240,6 +254,18 @@ def run(
         notes=notes,
     )
 
+    # ── 7. Sync PDF Import Log ────────────────────────────────────────────────
+    try:
+        from finance.pdf_log_sync import build_log_rows, DEFAULT_REGISTRY_DB
+        pdf_rows = build_log_rows(DEFAULT_REGISTRY_DB)
+        if pdf_rows:
+            sheets_client.write_pdf_import_log(pdf_rows)
+            log.info("PDF Import Log updated (%d rows).", len(pdf_rows))
+        else:
+            log.debug("PDF Import Log: registry empty, nothing to write.")
+    except Exception as _pdf_exc:
+        log.warning("PDF Import Log sync failed (non-fatal): %s", _pdf_exc)
+
     return _stats(added, skipped, total_valid, parse_errors, by_layer, duration)
 
 
@@ -270,6 +296,8 @@ def _parse_row(row: tuple, import_file: str) -> Optional[FinanceTransaction]:
     date_str = parse_xlsx_date(cell(_C_DATE_TX))
     if not date_str:
         return None
+    if date_str < _MIN_TX_DATE:
+        return None  # pre-2026 transaction — drop silently
 
     # IDR amount with sign
     amount_raw = _float(cell(_C_AMOUNT_IDR))

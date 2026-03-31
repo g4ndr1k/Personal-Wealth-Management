@@ -33,7 +33,7 @@ TRANSACTIONS_HEADERS = [
 # hash is column M (index 12, 1-based = 13)
 HASH_COL_LETTER = "M"
 
-ALIASES_HEADERS  = ["merchant", "alias", "category", "match_type", "added_date"]
+ALIASES_HEADERS  = ["merchant", "alias", "category", "match_type", "added_date", "owner_filter", "account_filter"]
 CATEGORIES_HEADERS = ["category", "icon", "sort_order", "is_recurring", "monthly_budget"]
 CURRENCY_HEADERS = [
     "currency_code", "currency_name", "symbol",
@@ -44,6 +44,9 @@ IMPORT_LOG_HEADERS = [
     "rows_skipped", "rows_total", "duration_s", "notes",
 ]
 OVERRIDES_HEADERS = ["hash", "category", "notes", "updated_at"]
+PDF_IMPORT_LOG_HEADERS = [
+    "month", "label", "expected", "actual", "status", "files", "last_processed",
+]
 
 
 class SheetsClient:
@@ -118,8 +121,8 @@ class SheetsClient:
         return result
 
     def read_aliases(self) -> list[dict]:
-        """Return Merchant Aliases rows as list of dicts."""
-        rows = self._get(f"{self.cfg.aliases_tab}!A:E")
+        """Return Merchant Aliases rows as list of dicts (columns A–G)."""
+        rows = self._get(f"{self.cfg.aliases_tab}!A:G")
         if len(rows) < 2:
             return []
         headers = [h.strip().lower() for h in rows[0]]
@@ -290,13 +293,16 @@ class SheetsClient:
         alias: str,
         category: str,
         match_type: str = "exact",
+        owner_filter: str = "",
+        account_filter: str = "",
     ):
-        """Append one row to the Merchant Aliases tab."""
+        """Append one row to the Merchant Aliases tab (columns A–G)."""
         try:
             self._append(
-                f"{self.cfg.aliases_tab}!A:E",
+                f"{self.cfg.aliases_tab}!A:G",
                 [[merchant, alias, category, match_type,
-                  datetime.now().strftime("%Y-%m-%d")]],
+                  datetime.now().strftime("%Y-%m-%d"),
+                  owner_filter, account_filter]],
             )
         except HttpError as e:
             log.error("Failed to append alias (%s → %s): %s", alias, merchant, e)
@@ -304,11 +310,11 @@ class SheetsClient:
     def update_alias_category(self, alias: str, new_category: str):
         """Update the category column for an existing alias row (matched by alias column B)."""
         try:
-            rows = self._get(f"{self.cfg.aliases_tab}!A:E")
+            rows = self._get(f"{self.cfg.aliases_tab}!A:G")
             for i, row in enumerate(rows):
                 if i == 0:
                     continue  # skip header
-                r = list(row) + [""] * (5 - len(row))
+                r = list(row) + [""] * (7 - len(row))
                 if r[1].strip() == alias:
                     self._update(
                         f"{self.cfg.aliases_tab}!C{i + 1}",
@@ -319,6 +325,31 @@ class SheetsClient:
             log.warning("Alias not found for update: %s", alias[:40])
         except HttpError as e:
             log.error("Failed to update alias category (%s): %s", alias[:40], e)
+
+    def write_pdf_import_log(self, rows: list[list]):
+        """Rewrite all data rows in the PDF Import Log tab.
+
+        Clears all existing data rows (keeping row 1 header), then appends the
+        new rows.  Safe to call repeatedly — always produces a clean snapshot.
+        """
+        tab = self.cfg.pdf_import_log_tab
+        qtab = f"'{tab}'"
+        try:
+            self.service.spreadsheets().values().clear(
+                spreadsheetId=self.cfg.spreadsheet_id,
+                range=f"{qtab}!A2:G",
+                body={},
+            ).execute()
+        except HttpError as e:
+            log.warning("Could not clear PDF Import Log rows: %s", e)
+
+        if rows:
+            try:
+                self._append(f"{qtab}!A:G", rows)
+                log.info("PDF Import Log: wrote %d rows.", len(rows))
+            except HttpError as e:
+                log.error("Failed to write PDF Import Log: %s", e)
+                raise
 
     def log_import(
         self,

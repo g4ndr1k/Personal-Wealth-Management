@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 2.5.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
+**Version:** 2.6.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-03-29
+**Last validated against:** checked-in codebase 2026-03-31
 
 ---
 
@@ -1613,6 +1613,14 @@ Detection is automatic — the router (`parsers/router.py`) reads the first page
 - Running balance computed from `SALDO AWAL` + debit/credit deltas
 - Detection: bank name `CIMB Niaga` + `COMBINE STATEMENT` (consol-specific English title)
 
+**Maybank Credit Card** (`maybank_cc.py`):
+- Date format: `DD-MM-YY`; normalized to `DD/MM/YYYY`
+- Supports both IDR-only and foreign-currency rows extracted from monolithic page text
+- Indonesian amount parsing fix: dot-thousands values such as `147.857` and `17.093` are treated as full IDR integers, while decimal foreign amounts such as `8,65` still parse correctly
+- Foreign rows may have merged merchant/currency text (for example `WWW.AMAZON.COUSD`); the parser splits the trailing ISO code and captures the following foreign amount + IDR amount
+- Exchange-rate lines `EXCHANGE RATE RP: ...` are attached to the preceding foreign transaction
+- Example corrected row: `AMAZON DIGI* ... 8,65 147.857` → `foreign_amount=8.65`, `exchange_rate=17093`, `amount_idr=147857`
+
 ### 3-layer parsing pipeline
 
 Each bank parser applies three layers in order:
@@ -1993,6 +2001,25 @@ docker compose up -d
 
 ## 23. Version History
 
+### v2.6.0 (2026-03-31)
+
+#### Features
+
+- **Added: PDF Import Log tab** — new "PDF Import Log" Google Sheet tab provides a monthly checklist of expected vs. actually processed PDFs per bank/statement type. Shows `✓ Complete`, `⚠ Partial`, or `✗ Missing` status for all 14 expected monthly PDFs across Permata, BCA, CIMB Niaga, and Maybank. Implemented in `finance/pdf_log_sync.py`.
+- **Added: auto-sync of PDF Import Log on every import** — `finance/importer` now runs `pdf_log_sync.build_log_rows()` automatically as step 7, immediately after writing to the Import Log tab. No separate command needed.
+- **Added: transaction date cutoff (2026-01-01)** — transactions dated before 2026-01-01 are silently dropped during import. CC billing cycles can span two calendar months; this prevents December 2025 charges from appearing in the 2026 ledger.
+- **Added: filename-based month fallback for PDF Import Log** — for banks whose parsers do not populate `period_start`/`period_end` (Permata, CIMB Niaga), the statement month is extracted from the filename using Indonesian month names (`Februari 2026`) or embedded `DD-MM-YYYY` dates.
+- **Added: period-end date used for statement month** — the PDF Import Log uses the *end* date of the billing period (not the start) to assign a statement to its month, correctly placing multi-month CC cycles in their closing month.
+
+#### Changed
+
+- `finance/config.py` — `SheetsConfig` gains `pdf_import_log_tab` field (default: `"PDF Import Log"`).
+- `finance/sheets.py` — new `write_pdf_import_log()` method; new `PDF_IMPORT_LOG_HEADERS` constant.
+- `finance/setup_sheets.py` — "PDF Import Log" tab added to `TABS` dict and `tab_map`; created with header formatting on first run.
+- `config/settings.toml` — new `pdf_import_log_tab = "PDF Import Log"` under `[google_sheets]`.
+
+---
+
 ### v2.5.0 (2026-03-30)
 
 #### Features
@@ -2005,11 +2032,17 @@ docker compose up -d
 
 - **`finance/setup_sheets.py`** — default Merchant Aliases headers now include `owner_filter` and `account_filter`; default categories expanded to 22, including `Cash Withdrawal`, `Internal Transfer`, `External Transfer`, `Household Expenses`, `Child Support`, and `Opening Balance`.
 - **`scripts/add_household_rules.py` / `scripts/apply_household_rules.py`** — updated to seed and backfill the newer household rules and the canonical PwC salary merchant naming.
+- **`scripts/cleanup_aliases.py`** — canonical Amazon digital-content alias updated from `Subscriptions` to `Entertainment` for `^AMAZON DIGI`.
+- **`scripts/fix_maybank_foreign_amounts.py`** — added one-time repair utility to patch already-imported Maybank foreign rows in XLSX, Google Sheets, and SQLite when Indonesian dot-thousands values had previously been interpreted as decimals.
 - **`pwa/src/utils/currency.js`** — introduced a shared IDR formatter using full `en-US`-style comma separators.
 
 #### UI behavior
 
 - **Amounts no longer show explicit signs in the PWA** — negative numbers no longer render with a leading minus sign; expense/income color is now the primary visual indicator.
+
+#### Bug fixes
+
+- **Fixed: Maybank foreign-currency rows parsed 1000× too small when statements used Indonesian dot-thousands formatting** — values such as `147.857` and `17.093` were previously parsed as decimal numbers instead of full IDR integers. `parse_idr_amount()` in `parsers/base.py` now treats dot-only multi-group values as thousands separators when each trailing group is exactly 3 digits, while still preserving decimal forms such as `8,65` and `1.705,00`.
 
 ### v2.4.0 (2026-03-29)
 
@@ -2882,15 +2915,16 @@ Transactions that clear Layers 1–3 without a match surface in the PWA review q
 
 ### Google Sheet structure
 
-Five tabs (created once during setup):
+Six tabs (created once during setup):
 
 | Tab | Purpose |
 |---|---|
-| Transactions | All imported transactions |
+| Transactions | All imported transactions (2026-01-01 onwards) |
 | Merchant Aliases | Alias and regex rules for categorization |
 | Categories | Master category list (`monthly_budget` column reserved for Stage 2.x) |
 | Currency Codes | Country-to-currency reference for import hinting |
 | Import Log | Timestamp, source file, rows added, duplicates skipped per import run |
+| PDF Import Log | Monthly checklist — expected vs. actually processed PDFs per bank/type |
 
 ### Write-back rules
 
@@ -2907,6 +2941,58 @@ Five tabs (created once during setup):
 Each transaction is fingerprinted with SHA-256 of `date + amount + raw_description + institution + owner`. Before appending a row, the importer checks the `hash` column for an existing match. Duplicate rows are counted and logged to the Import Log tab; they are never written.
 
 Re-importing from XLSX is safe: only genuinely new rows (not yet in Sheets) are appended. Use `--overwrite` to force-replace existing rows by hash match.
+
+### Transaction date cutoff
+
+All transactions dated before **2026-01-01** are silently dropped during import (`_MIN_TX_DATE` constant in `finance/importer.py`). This is necessary because CC billing cycles can span two calendar months — a January 2026 statement may contain December 2025 charges that would otherwise pollute the 2025 view.
+
+To move the cutoff forward in future years, update `_MIN_TX_DATE` in `finance/importer.py`, clear the Transactions tab, and re-run the importer.
+
+### PDF Import Log tab
+
+`finance/pdf_log_sync.py` maintains a **monthly checklist** in the "PDF Import Log" sheet tab. It reads `data/processed_files.db` (the Stage 1 registry) and compares each calendar month against the expected PDF manifest, producing one row per expected source per month.
+
+**Columns:** `month` · `label` · `expected` · `actual` · `status` · `files` · `last_processed`
+
+**Status values:**
+
+| Status | Meaning |
+|---|---|
+| `✓ Complete` | All expected PDFs for this source were processed |
+| `⚠ Partial (n/m)` | Some but not all PDFs arrived |
+| `✗ Missing` | No PDFs processed for this source this month |
+
+**Expected manifest** (14 PDFs/month total):
+
+| Label | Bank | Type | Expected/month |
+|---|---|---|---|
+| Permata Credit Card | Permata | cc | 2 (Permata Black + PermataVisa Infinite) |
+| Permata Savings & RDN | Permata | savings | 4 (Gandrik Savings, Gandrik RDN, Helen Savings × 2) |
+| BCA Credit Card | BCA | cc | 1 |
+| BCA Savings (Tahapan) | BCA | savings | 3 (Gandrik + Helen × 2) |
+| Niaga Credit Card | CIMB Niaga | cc | 1 |
+| Niaga Consolidated | CIMB Niaga | consol | 1 |
+| Maybank Savings | Maybank | consolidated | 1 |
+| Maybank Credit Card | Maybank | cc | 1 |
+
+**Month assignment logic:** The *period end date* (second date in the `DD/MM/YYYY – DD/MM/YYYY` registry field) is used as the statement month — not the transaction dates. For banks whose parsers leave the period field empty (Permata, CIMB Niaga), the month is extracted from the filename (Indonesian month names or `DD-MM-YYYY` patterns). Only months ≥ `2026-01` are emitted.
+
+**Auto-sync:** `finance/importer` calls `pdf_log_sync.build_log_rows()` automatically at step 7 of every import run. The tab is always a fresh snapshot — data rows are cleared and rewritten on each sync.
+
+**Manual sync (standalone):**
+```bash
+# Sync all months
+python3 -m finance.pdf_log_sync
+
+# Sync last 6 months only
+python3 -m finance.pdf_log_sync --months 6
+
+# Preview without writing to sheet
+python3 -m finance.pdf_log_sync --dry-run
+
+# Custom registry path
+python3 -m finance.pdf_log_sync --registry /path/to/processed_files.db
+```
 
 ---
 
@@ -2994,11 +3080,13 @@ vite-plugin-pwa generates a Workbox service worker. API GET routes (except `/syn
 3. Run Stage 2 import (one command):
       python3 -m finance.importer
    → Reads ALL_TRANSACTIONS.xlsx (immutable)
+   → Drops transactions dated before 2026-01-01 (CC cross-month charges)
    → Maps columns, generates hashes
    → Layers 1 + 2: known merchants auto-categorized
    → Layer 3: Ollama pre-fills suggestions for unknowns
    → Appends only new rows to Google Sheet (dedup by hash)
    → Logs import to Import Log tab
+   → Refreshes PDF Import Log tab (checklist of expected vs. received PDFs)
 
 4. Open PWA → Review Queue  (~5 minutes)
    → AI-suggested entries: confirm with one tap
@@ -3039,7 +3127,7 @@ vite-plugin-pwa generates a Workbox service worker. API GET routes (except `/syn
   ```bash
   python3 -m finance.setup_sheets
   # Browser opened once for OAuth consent → token saved to secrets/google_token.json
-  # Created: Transactions · Merchant Aliases · Categories · Currency Codes · Import Log
+  # Created: Transactions · Merchant Aliases · Categories · Currency Codes · Import Log · PDF Import Log
   # Seeded: 16 default categories, 18 currencies
   ```
 - [x] **`settings.toml`** updated with `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections
@@ -3188,6 +3276,9 @@ curl -s http://localhost:8090/api/health
 | PWA shows stale data after sync | Tap Settings → Sync Now; hard-refresh browser if needed (`Cmd+Shift+R`) |
 | Review badge count wrong | Tap Settings → Refresh status; badge reads from `/api/health` |
 | `UNIQUE constraint failed: transactions.hash` during sync | Duplicate hashes in Sheets; sync deduplicates automatically (first occurrence wins); to clean Sheets run importer with `--overwrite` |
+| PDF Import Log shows ✗ Missing for a month | PDF was not processed — drop it into `data/pdf_inbox/` and re-run `python3 scripts/batch_process.py`, then `python3 -m finance.importer` |
+| PDF Import Log shows wrong month | Parser did not capture period dates — the filename fallback was used; check `finance/pdf_log_sync.py` `_extract_month_from_filename()` for the filename pattern |
+| Pre-2026 transactions visible in Sheets | Clear Transactions tab and re-run `python3 -m finance.importer` (cutoff is enforced at import time, not retroactively) |
 
 
 ---
