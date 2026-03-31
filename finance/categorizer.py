@@ -210,7 +210,18 @@ class Categorizer:
                 log.debug("L2 regex: %r → %s / %s", desc, merchant, category)
                 return CategorizationResult(merchant, category, layer=2, confidence="auto")
 
-        # ── Layer 3: AI suggestion (Ollama first, Anthropic fallback) ────────
+        # ── Layer 3: AI suggestion (Claude primary, Ollama offline fallback) ──
+        # Claude is tried first when an API key is configured — it has far
+        # better knowledge of global merchant names and category nuances.
+        # Ollama acts as a local fallback when Claude is unavailable.
+        suggestion = self._anthropic_suggest(desc)
+        if suggestion:
+            merchant, category = suggestion
+            log.debug("L3 claude: %r → %s / %s", desc, merchant, category)
+            return CategorizationResult(
+                merchant, category, layer=3, confidence="suggested"
+            )
+
         suggestion = self._ollama_suggest(desc)
         if suggestion:
             merchant, category = suggestion
@@ -219,17 +230,57 @@ class Categorizer:
                 merchant, category, layer=3, confidence="suggested"
             )
 
-        suggestion = self._anthropic_suggest(desc)
-        if suggestion:
-            merchant, category = suggestion
-            log.debug("L3 anthropic: %r → %s / %s", desc, merchant, category)
-            return CategorizationResult(
-                merchant, category, layer=3, confidence="suggested"
-            )
-
         # ── Layer 4: review queue ─────────────────────────────────────────────
         log.debug("L4 review: %r → no suggestion", desc)
         return CategorizationResult(None, None, layer=4, confidence="none")
+
+    # ── Shared prompt builder ─────────────────────────────────────────────────
+
+    def _build_prompt(self, desc: str) -> str:
+        """Build the categorization prompt used by both Ollama and Anthropic."""
+        if self._examples:
+            examples_text = "\n".join(
+                f'- "{d}" → {m}, {c}' for d, m, c in self._examples
+            )
+        else:
+            examples_text = (
+                '- "GRAB* A8NPTNG SOUTH JAKARTA" → Grab, Transport\n'
+                '- "NETFLIX.COM" → Netflix, Subscriptions\n'
+                '- "INDOMARET" → Indomaret, Groceries\n'
+                '- "IKEA ALAM SUTERA" → IKEA, Household Expenses\n'
+                '- "CATHAY PACIFIC AIRWAYS" → Cathay Pacific, Travel\n'
+                '- "SINGAPORE AIRLINES" → Singapore Airlines, Travel\n'
+                '- "AIRBNB * XYZ" → Airbnb, Travel\n'
+                '- "ZARA GRAND INDONESIA" → Zara, Shopping\n'
+                '- "CANVA* 12345" → Canva, Subscriptions\n'
+                '- "STEAM PURCHASE" → Steam, Entertainment'
+            )
+
+        categories_text = ", ".join(self.categories)
+
+        return (
+            "You are a personal finance categorizer for an Indonesian household.\n\n"
+            f"Available categories: {categories_text}\n\n"
+            "Category guidance (use these rules to choose precisely):\n"
+            "- Transport: daily commute — ride-hailing (Grab, Gojek), fuel (SPBU, Pertamina), parking, toll\n"
+            "- Travel: airlines, airports, hotels, Airbnb, travel agencies, overseas transit\n"
+            "- Household Expenses: home furnishings, appliances, hardware (IKEA, ACE Hardware, Informa, Depo Bangunan)\n"
+            "- Shopping: fashion, accessories, general retail (Zara, H&M, Uniqlo, Tokopedia, Shopee)\n"
+            "- Groceries: supermarkets, convenience stores, fresh produce (Indomaret, Alfamart, Ranch Market, Grand Lucky)\n"
+            "- Subscriptions: recurring digital services with a period or reference code (Netflix, Spotify, Canva, Adobe, iCloud)\n"
+            "- Dining Out: restaurants, cafes, fast food, food delivery (Starbucks, McDonald's, GrabFood)\n"
+            "- Healthcare: clinics, hospitals, pharmacies, dental, lab tests\n"
+            "- Education: schools, courses, tutoring, books, stationery\n"
+            "- Entertainment: gaming, cinema, streaming one-off purchases (Steam, PlayStation Store)\n\n"
+            "Rules:\n"
+            "- Extract a clean merchant name (remove location suffixes, reference codes, asterisks).\n"
+            "- If the raw text is an airline name, always use Travel — not Transport.\n"
+            "- If the raw text contains a country or city code at the end (e.g. NLD, GBR, USA, KL), "
+            "it is likely a foreign transaction; classify by the merchant type, not the location.\n\n"
+            f"Recent confirmed examples:\n{examples_text}\n\n"
+            f'Transaction: "{desc}"\n\n'
+            'Reply with JSON only, no explanation: {"merchant": "...", "category": "..."}'
+        )
 
     # ── Ollama ────────────────────────────────────────────────────────────────
 
@@ -238,27 +289,7 @@ class Categorizer:
         Ask Ollama for a (merchant, category) suggestion.
         Returns None if Ollama is unavailable, times out, or returns garbage.
         """
-        if self._examples:
-            examples_text = "\n".join(
-                f'- "{d}" → {m}, {c}' for d, m, c in self._examples
-            )
-        else:
-            examples_text = (
-                '- "GRAB* TRANSPORT" → Grab, Transport\n'
-                '- "NETFLIX.COM" → Netflix, Subscriptions\n'
-                '- "INDOMARET" → Indomaret, Groceries'
-            )
-
-        categories_text = ", ".join(self.categories)
-
-        prompt = (
-            "You are a personal finance categorizer for an Indonesian household.\n\n"
-            f"Known categories: {categories_text}\n\n"
-            f"Recent confirmed examples:\n{examples_text}\n\n"
-            f'Transaction: "{desc}"\n\n'
-            'Reply with JSON only, no explanation: {"merchant": "...", "category": "..."}'
-        )
-
+        prompt = self._build_prompt(desc)
         payload = json.dumps({
             "model": self.ollama_model,
             "prompt": prompt,
@@ -292,32 +323,15 @@ class Categorizer:
     def _anthropic_suggest(self, desc: str) -> Optional[tuple[str, str]]:
         """
         Ask Anthropic Claude for a (merchant, category) suggestion.
-        Used as a fallback when Ollama is unavailable or times out.
+        Primary Layer 3 provider when the API key is configured; Ollama is
+        the fallback for offline/air-gapped environments.
         Returns None if the API key is missing, the call fails, or the
         response cannot be parsed.
         """
         if not self.anthropic_api_key:
             return None
 
-        categories_text = ", ".join(self.categories)
-        if self._examples:
-            examples_text = "\n".join(
-                f'- "{d}" → {m}, {c}' for d, m, c in self._examples
-            )
-        else:
-            examples_text = (
-                '- "GRAB* TRANSPORT" → Grab, Transport\n'
-                '- "NETFLIX.COM" → Netflix, Subscriptions\n'
-                '- "INDOMARET" → Indomaret, Groceries'
-            )
-
-        prompt = (
-            "You are a personal finance categorizer for an Indonesian household.\n\n"
-            f"Known categories: {categories_text}\n\n"
-            f"Recent confirmed examples:\n{examples_text}\n\n"
-            f'Transaction: "{desc}"\n\n'
-            'Reply with JSON only, no explanation: {"merchant": "...", "category": "..."}'
-        )
+        prompt = self._build_prompt(desc)
 
         payload = json.dumps({
             "model": self.anthropic_model,
