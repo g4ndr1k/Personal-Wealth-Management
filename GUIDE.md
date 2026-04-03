@@ -198,7 +198,9 @@ The system alerts on:
   - `finance/Dockerfile` — `python:3.12-slim` image; installs google-auth, fastapi, uvicorn[standard], rapidfuzz, openpyxl; copies `pwa/dist/` for production static serving
   - `finance/requirements.txt` — Python dependencies: `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `rapidfuzz`, `fastapi`, `uvicorn[standard]`
 - Stage 2 Vue 3 PWA (`pwa/`) — see §29
-  - `pwa/src/views/Dashboard.vue` — month/owner navigation, summary cards, category bars, Chart.js 12-month trend, owner split table
+  - `pwa/src/views/Dashboard.vue` — month/owner navigation, summary cards, **spending by group** rollup with category chips, Chart.js 12-month trend, owner split table
+  - `pwa/src/views/GroupDrilldown.vue` — Level 1 drill-down: group → category list with amounts, tx counts, mini bar chart
+  - `pwa/src/views/CategoryDrilldown.vue` — Level 2 drill-down: category → transaction list with inline edit (merchant, category, alias, notes, apply-to-similar); breadcrumb back to group
   - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), expandable detail rows
   - `pwa/src/views/ReviewQueue.vue` — inline alias form: merchant, category, match type, apply-to-similar, toast feedback
   - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
@@ -396,15 +398,17 @@ agentic-ai/
 │       ├── main.js
 │       ├── App.vue               # Shell: top bar + bottom nav + review badge
 │       ├── style.css             # CSS variables, cards, buttons, forms, toast
-│       ├── router/index.js       # 5 routes: /, /transactions, /review, /foreign, /settings
+│       ├── router/index.js       # 7 routes: /, /transactions, /review, /foreign, /settings, /group-drilldown, /category-drilldown
 │       ├── api/client.js         # fetch wrapper for all 12 /api/* endpoints
 │       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month, reviewCount
 │       └── views/
-│           ├── Dashboard.vue     # Month nav, summary cards, category bars, Chart.js trend, owner table
-│           ├── Transactions.vue  # Filters + paginated list + expandable detail rows
-│           ├── ReviewQueue.vue   # Inline alias form + apply-to-similar + toast
-│           ├── ForeignSpend.vue  # Grouped by currency, per-currency subtotals
-│           └── Settings.vue      # Sync, Import, health status
+│           ├── Dashboard.vue         # Month nav, summary cards, spending-by-group, Chart.js trend, owner table
+│           ├── GroupDrilldown.vue    # Level 1 drill-down: group → categories (amounts, tx count, mini bars)
+│           ├── CategoryDrilldown.vue # Level 2 drill-down: category → transactions + inline edit + breadcrumb
+│           ├── Transactions.vue      # Filters + paginated list + expandable detail rows
+│           ├── ReviewQueue.vue       # Inline alias form + apply-to-similar + toast
+│           ├── ForeignSpend.vue      # Grouped by currency, per-currency subtotals
+│           └── Settings.vue          # Sync, Import, health status
 ├── config/
 │   └── settings.toml             # All runtime configuration (Stage 1 + Stage 2 sections)
 ├── data/                         # Runtime SQLite DBs (gitignored)
@@ -2000,6 +2004,39 @@ docker compose up -d
 ---
 
 ## 23. Version History
+
+### v2.9.0 (2026-04-03)
+
+#### Features
+
+- **Spending by Group (Dashboard)** — the "Spending by Category" section on the Dashboard is replaced with "Spending by Group". All expense categories are rolled up into their `category_group` (up to 7 visible groups; `System / Tracking` is excluded). Each group row shows the group icon, name, total spend, % of total monthly expense, and up to 3 category chips. Groups are sorted by total descending. Tapping a group navigates to the new Group Drilldown view.
+
+- **Two-level drill-down navigation**
+  - **Level 1 — `GroupDrilldown.vue` (`/group-drilldown`)**: shows all spending categories within the selected group for the current month. Columns: icon, category name, transaction count, amount (IDR), % of group total. A mini horizontal bar chart below the list gives a quick visual breakdown when more than one category is present. No extra API call — the `by_category` payload from the Dashboard `summaryMonth` response is passed as a query parameter.
+  - **Level 2 — `CategoryDrilldown.vue` (`/category-drilldown`)**: all individual transactions for the selected category and month. Each row expands to show full details + an edit form (merchant name, category, notes, alias match type, apply-to-similar). Save calls `POST /api/alias` (writes Merchant Aliases tab + batch-updates all matching transactions) and optionally `PATCH /api/transaction/{hash}/category` for notes.
+
+- **Breadcrumb back-navigation** — `CategoryDrilldown.vue` reads a `fromGroup` query parameter. When present, a tappable breadcrumb (e.g. `❤️ Health & Family ›`) is displayed above the category title. The back button calls `router.back()` to restore the group view from browser history.
+
+- **"Hobbies" category** — new category added to `Lifestyle & Personal` group:
+
+  | Category | Icon | Sort | Group | Subcategory |
+  |---|---|---|---|---|
+  | Hobbies | 🎮 | 13 | Lifestyle & Personal | Hobbies |
+
+  Appended directly to the live Google Sheets Categories tab and synced into SQLite (total: 32 categories). `finance/categorizer.py` and `finance/setup_sheets.py` updated accordingly; sort orders for all subsequent categories bumped by 1 (max sort_order: 32).
+
+#### Changed
+
+- **`pwa/src/views/Dashboard.vue`** — `topCats` computed replaced by `spendingGroups`; new `drillToGroup()` function navigates to `/group-drilldown` with `byCategory` + `totalExpense` encoded in the query string. `GROUP_ICONS` constant maps each of the 8 groups to an emoji.
+- **`pwa/src/views/GroupDrilldown.vue`** — new view (see above). Reads `byCategoryRaw` and `totalExpense` from route query; uses `store.categoryMap` for `category_group` lookups. Transaction count sourced from `c.count` field in the `by_category` API response.
+- **`pwa/src/views/CategoryDrilldown.vue`** — reads `fromGroup` query param; renders breadcrumb; `goBack()` uses `router.back()` for correct history traversal.
+- **`pwa/src/router/index.js`** — two new routes: `/group-drilldown` and `/category-drilldown`.
+
+#### Fixed
+
+- `GroupDrilldown.vue` was reading `c.transaction_count` for the transaction count sub-label; the actual field name returned by `GET /api/summary/{year}/{month}` → `by_category` is `c.count`. Fixed to `c.count ?? 0`.
+
+---
 
 ### v2.8.1 (2026-04-03)
 
