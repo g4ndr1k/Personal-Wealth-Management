@@ -48,6 +48,7 @@ TABS: dict[str, list[str]] = {
     ],
     "categories_tab": [
         "category", "icon", "sort_order", "is_recurring", "monthly_budget",
+        "category_group", "subcategory",
     ],
     "currency_tab": [
         "currency_code", "currency_name", "symbol",
@@ -65,29 +66,46 @@ TABS: dict[str, list[str]] = {
 # ── Default seed data ──────────────────────────────────────────────────────────
 
 DEFAULT_CATEGORIES = [
-    # [category, icon, sort_order, is_recurring, monthly_budget]
-    ["Housing",          "🏠", 1,  "TRUE",  ""],
-    ["Utilities",        "⚡", 2,  "TRUE",  ""],
-    ["Groceries",        "🛒", 3,  "FALSE", ""],
-    ["Dining Out",       "🍽️", 4,  "FALSE", ""],
-    ["Transport",        "🚗", 5,  "FALSE", ""],
-    ["Shopping",         "🛍️", 6,  "FALSE", ""],
-    ["Healthcare",       "🏥", 7,  "FALSE", ""],
-    ["Entertainment",    "🎬", 8,  "FALSE", ""],
-    ["Subscriptions",    "📱", 9,  "TRUE",  ""],
-    ["Travel",           "✈️", 10, "FALSE", ""],
-    ["Education",        "📚", 11, "FALSE", ""],
-    ["Personal Care",    "💇", 12, "FALSE", ""],
-    ["Gifts & Donations","🎁", 13, "FALSE", ""],
-    ["Fees & Interest",  "🏦", 14, "FALSE", ""],
-    ["Cash Withdrawal",  "💵", 15, "FALSE", ""],
-    ["Income",           "💰", 16, "FALSE", ""],
-    ["Other",            "❓", 17, "FALSE", ""],
-    ["Internal Transfer","🔁", 18, "FALSE", ""],
-    ["External Transfer","↗️", 19, "FALSE", ""],
-    ["Household Expenses","🧺", 20, "FALSE", ""],
-    ["Child Support",    "👧", 21, "TRUE",  ""],
-    ["Opening Balance",  "🏦", 22, "FALSE", ""],
+    # [category, icon, sort_order, is_recurring, monthly_budget, category_group, subcategory]
+    # ── 1. Housing & Bills ────────────────────────────────────────────────────
+    ["Housing",          "🏠", 1,  "TRUE",  "", "Housing & Bills",      "Housing"],
+    ["Utilities",        "⚡", 2,  "TRUE",  "", "Housing & Bills",      "Utilities"],
+    ["Phone Bill",       "📞", 3,  "TRUE",  "", "Housing & Bills",      "Communication"],
+    ["Internet",         "🌐", 4,  "TRUE",  "", "Housing & Bills",      "Communication"],
+    # ── 2. Food & Dining ─────────────────────────────────────────────────────
+    ["Groceries",        "🛒", 5,  "FALSE", "", "Food & Dining",        "Groceries"],
+    ["Dining Out",       "🍽️", 6,  "FALSE", "", "Food & Dining",        "Dining Out"],
+    ["Delivery & Takeout","🛵", 7,  "FALSE", "", "Food & Dining",        "Delivery & Takeout"],
+    # ── 3. Transportation ────────────────────────────────────────────────────
+    ["Auto",             "🚗", 8,  "FALSE", "", "Transportation",       "Auto"],
+    ["Rideshare",        "🚕", 9,  "FALSE", "", "Transportation",       "Rideshare"],
+    # ── 4. Lifestyle & Personal ──────────────────────────────────────────────
+    ["Shopping",         "🛍️", 10, "FALSE", "", "Lifestyle & Personal", "Shopping"],
+    ["Personal Care",    "💇", 11, "FALSE", "", "Lifestyle & Personal", "Personal Care"],
+    ["Entertainment",    "🎬", 12, "FALSE", "", "Lifestyle & Personal", "Entertainment"],
+    ["Subscriptions",    "📱", 13, "TRUE",  "", "Lifestyle & Personal", "Subscriptions"],
+    # ── 5. Health & Family ───────────────────────────────────────────────────
+    ["Healthcare",       "🏥", 14, "FALSE", "", "Health & Family",      "Healthcare"],
+    ["Family",           "👨‍👩‍👧", 15, "TRUE",  "", "Health & Family",      "Family"],
+    ["Household",        "🧺", 16, "FALSE", "", "Health & Family",      "Household"],
+    ["Education",        "📚", 17, "FALSE", "", "Health & Family",      "Education"],
+    ["Gifts & Donations","🎁", 18, "FALSE", "", "Health & Family",      "Gifts & Donations"],
+    # ── 6. Travel ────────────────────────────────────────────────────────────
+    ["Flights & Hotels", "✈️", 19, "FALSE", "", "Travel",               "Flights & Hotels"],
+    ["Vacation Spending","🏖️", 20, "FALSE", "", "Travel",               "Vacation Spending"],
+    # ── 7. Financial & Legal ─────────────────────────────────────────────────
+    ["Fees & Interest",  "🏦", 21, "FALSE", "", "Financial & Legal",    "Fees & Interest"],
+    ["Taxes",            "📋", 22, "FALSE", "", "Financial & Legal",    "Taxes"],
+    # ── 8. System / Tracking (Non-Expense Categories) ────────────────────────
+    ["Income",           "💰", 23, "FALSE", "", "System / Tracking",    "Income"],
+    ["Dividends",        "📈", 24, "FALSE", "", "System / Tracking",    "Dividends"],
+    ["Interest Income",  "🏦", 25, "FALSE", "", "System / Tracking",    "Interest"],
+    ["Capital Gains",    "📊", 26, "FALSE", "", "System / Tracking",    "Capital Gains"],
+    ["Other Income",     "💵", 27, "FALSE", "", "System / Tracking",    "Other Income"],
+    ["Transfer",         "🔁", 28, "FALSE", "", "System / Tracking",    "Transfer"],
+    ["Cash Withdrawal",  "🏧", 29, "FALSE", "", "System / Tracking",    "Cash Withdrawal"],
+    ["Adjustment",       "🔧", 30, "FALSE", "", "System / Tracking",    "Adjustment"],
+    ["Other",            "❓", 31, "FALSE", "", "System / Tracking",    "Other"],
 ]
 
 DEFAULT_CURRENCIES = [
@@ -191,7 +209,7 @@ def setup(cfg_path: str | None = None):
     existing_cats = client._get(f"{cat_tab}!A2:A2")
     if not existing_cats or not existing_cats[0]:
         log.info("Seeding %s with %d default categories …", cat_tab, len(DEFAULT_CATEGORIES))
-        client._append(f"{cat_tab}!A:E", DEFAULT_CATEGORIES)
+        client._append(f"{cat_tab}!A:G", DEFAULT_CATEGORIES)
     else:
         log.info("%s already has data — skipping seed.", cat_tab)
 

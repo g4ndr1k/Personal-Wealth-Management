@@ -114,8 +114,10 @@ class AliasRequest(BaseModel):
     alias:            str   # raw_description pattern to match (written to Sheets)
     merchant:         str   # canonical merchant name
     category:         str
-    match_type:       str   = "exact"   # "exact" | "regex"
+    match_type:       str   = "exact"   # "exact" | "contains" | "regex"
     apply_to_similar: bool  = True      # also update uncategorised rows with same raw_desc
+    owner_filter:     str   = ""        # optional: only match this owner (e.g. "Helen")
+    account_filter:   str   = ""        # optional: only match this account number
 
 
 class ImportRequest(BaseModel):
@@ -168,7 +170,8 @@ def get_owners():
 def get_categories():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT category, icon, sort_order, is_recurring, monthly_budget "
+            "SELECT category, icon, sort_order, is_recurring, monthly_budget, "
+            "       category_group, subcategory "
             "FROM categories ORDER BY sort_order, category"
         ).fetchall()
         if rows:
@@ -180,7 +183,8 @@ def get_categories():
         ).fetchall()
     return [
         {"category": r[0], "icon": "", "sort_order": 99,
-         "is_recurring": 0, "monthly_budget": None}
+         "is_recurring": 0, "monthly_budget": None,
+         "category_group": "", "subcategory": ""}
         for r in rows
     ]
 
@@ -285,10 +289,10 @@ def get_annual_summary(year: int):
             SELECT
                 CAST(strftime('%m', date) AS INTEGER) AS month,
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END)      AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END)      AS expense,
                 COUNT(*)                               AS tx_count
             FROM transactions
@@ -303,10 +307,10 @@ def get_annual_summary(year: int):
             """
             SELECT
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -377,10 +381,10 @@ def get_monthly_summary(year: int, month: int):
             SELECT
                 owner,
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -396,10 +400,10 @@ def get_monthly_summary(year: int, month: int):
             """
             SELECT
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Internal Transfer','Opening Balance'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -420,7 +424,7 @@ def get_monthly_summary(year: int, month: int):
     total_income  = totals["income"]  or 0.0
     total_expense = totals["expense"] or 0.0
 
-    TRANSFER_CATS = {"Internal Transfer", "Opening Balance"}  # excluded from income/expense % calculation
+    TRANSFER_CATS = {"Transfer", "Adjustment"}  # excluded from income/expense % calculation
     by_category = []
     for r in cat_rows:
         amt  = r["total_amount"] or 0.0
@@ -516,6 +520,8 @@ def post_alias(req: AliasRequest):
         alias=req.alias,
         category=req.category,
         match_type=req.match_type,
+        owner_filter=req.owner_filter,
+        account_filter=req.account_filter,
     )
     log.info("Alias saved: %s → %s  [%s]", req.alias, req.merchant, req.category)
 

@@ -46,13 +46,15 @@ CREATE INDEX IF NOT EXISTS idx_tx_owner     ON transactions(owner);
 CREATE INDEX IF NOT EXISTS idx_tx_hash      ON transactions(hash);
 
 CREATE TABLE IF NOT EXISTS merchant_aliases (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    merchant    TEXT    NOT NULL,
-    alias       TEXT    NOT NULL,
-    category    TEXT,
-    match_type  TEXT    DEFAULT 'exact',
-    added_date  TEXT,
-    synced_at   TEXT    NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    merchant        TEXT    NOT NULL,
+    alias           TEXT    NOT NULL,
+    category        TEXT,
+    match_type      TEXT    DEFAULT 'exact',
+    added_date      TEXT,
+    owner_filter    TEXT    DEFAULT '',
+    account_filter  TEXT    DEFAULT '',
+    synced_at       TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS categories (
@@ -62,6 +64,8 @@ CREATE TABLE IF NOT EXISTS categories (
     sort_order      INTEGER DEFAULT 99,
     is_recurring    INTEGER DEFAULT 0,
     monthly_budget  REAL,
+    category_group  TEXT    DEFAULT '',
+    subcategory     TEXT    DEFAULT '',
     synced_at       TEXT    NOT NULL
 );
 

@@ -31,6 +31,7 @@ from datetime import datetime
 from finance.config import load_config, get_finance_config, get_sheets_config
 from finance.db import open_db
 from finance.sheets import SheetsClient
+from finance.categorizer import migrate_category
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,17 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
         )
     tx_rows = deduped_tx
 
+    # Migrate legacy category names to new taxonomy
+    migrated = 0
+    for r in tx_rows:
+        old_cat = r.get("category")
+        new_cat = migrate_category(old_cat)
+        if new_cat != old_cat:
+            r["category"] = new_cat
+            migrated += 1
+    if migrated:
+        log.info("Migrated %d transaction(s) from legacy category names.", migrated)
+
     # Apply category overrides — these take priority over auto-categorised values
     if overrides:
         applied = 0
@@ -134,9 +146,11 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
             conn.executemany(
                 """
                 INSERT INTO merchant_aliases
-                    (merchant, alias, category, match_type, added_date, synced_at)
+                    (merchant, alias, category, match_type, added_date,
+                     owner_filter, account_filter, synced_at)
                 VALUES
-                    (:merchant, :alias, :category, :match_type, :added_date, :synced_at)
+                    (:merchant, :alias, :category, :match_type, :added_date,
+                     :owner_filter, :account_filter, :synced_at)
                 """,
                 [{**r, "synced_at": now} for r in alias_rows],
             )
@@ -146,9 +160,11 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
             conn.executemany(
                 """
                 INSERT INTO categories
-                    (category, icon, sort_order, is_recurring, monthly_budget, synced_at)
+                    (category, icon, sort_order, is_recurring, monthly_budget,
+                     category_group, subcategory, synced_at)
                 VALUES
-                    (:category, :icon, :sort_order, :is_recurring, :monthly_budget, :synced_at)
+                    (:category, :icon, :sort_order, :is_recurring, :monthly_budget,
+                     :category_group, :subcategory, :synced_at)
                 """,
                 [{**r, "synced_at": now} for r in cat_rows],
             )
@@ -234,33 +250,35 @@ def _read_transactions(client: SheetsClient) -> list[dict]:
 
 
 def _read_aliases(client: SheetsClient) -> list[dict]:
-    """Read Merchant Aliases tab (A–E) → list of row dicts."""
-    rows = client._get(f"{client.cfg.aliases_tab}!A:E")
+    """Read Merchant Aliases tab (A–G) → list of row dicts."""
+    rows = client._get(f"{client.cfg.aliases_tab}!A:G")
     if len(rows) < 2:
         return []
     result = []
     for row in rows[1:]:
-        r = list(row) + [""] * (5 - len(row))
+        r = list(row) + [""] * (7 - len(row))
         if not r[0] and not r[1]:
             continue
         result.append({
-            "merchant":   (r[0] or "").strip(),
-            "alias":      (r[1] or "").strip(),
-            "category":   (r[2] or "").strip() or None,
-            "match_type": (r[3] or "exact").strip(),
-            "added_date": (r[4] or "").strip(),
+            "merchant":       (r[0] or "").strip(),
+            "alias":          (r[1] or "").strip(),
+            "category":       (r[2] or "").strip() or None,
+            "match_type":     (r[3] or "exact").strip(),
+            "added_date":     (r[4] or "").strip(),
+            "owner_filter":   (r[5] or "").strip(),
+            "account_filter": (r[6] or "").strip(),
         })
     return result
 
 
 def _read_categories(client: SheetsClient) -> list[dict]:
-    """Read Categories tab (A–E) → list of row dicts."""
-    rows = client._get(f"{client.cfg.categories_tab}!A:E")
+    """Read Categories tab (A–G) → list of row dicts."""
+    rows = client._get(f"{client.cfg.categories_tab}!A:G")
     if len(rows) < 2:
         return []
     result = []
     for row in rows[1:]:
-        r = list(row) + [""] * (5 - len(row))
+        r = list(row) + [""] * (7 - len(row))
         if not r[0]:
             continue
         try:
@@ -273,6 +291,8 @@ def _read_categories(client: SheetsClient) -> list[dict]:
             "sort_order":     sort_order,
             "is_recurring":   1 if str(r[3]).upper() == "TRUE" else 0,
             "monthly_budget": _float_or_none(r[4]),
+            "category_group": (r[5] or "").strip(),
+            "subcategory":    (r[6] or "").strip(),
         })
     return result
 

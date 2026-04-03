@@ -19,10 +19,10 @@ log = logging.getLogger(__name__)
 # Format: (alias_pattern, canonical_merchant, category)
 PERMANENT_ALIASES: list[tuple[str, str, str]] = [
     # Home & household
-    ("IKEA",           "IKEA",           "Household Expenses"),
-    ("ACE HARDWARE",   "ACE Hardware",   "Household Expenses"),
-    ("INFORMA",        "Informa",        "Household Expenses"),
-    ("COURTS",         "Courts",         "Household Expenses"),
+    ("IKEA",           "IKEA",           "Household"),
+    ("ACE HARDWARE",   "ACE Hardware",   "Household"),
+    ("INFORMA",        "Informa",        "Household"),
+    ("COURTS",         "Courts",         "Household"),
     # Travel — airlines
     ("CATHAY",         "Cathay Pacific", "Travel"),
     ("GARUDA",         "Garuda Indonesia","Travel"),

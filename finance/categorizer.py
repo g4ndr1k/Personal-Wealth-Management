@@ -30,13 +30,42 @@ log = logging.getLogger(__name__)
 
 # Fallback category list used when the Sheets Categories tab is empty
 DEFAULT_CATEGORIES = [
-    "Housing", "Utilities", "Groceries", "Dining Out", "Transport",
-    "Shopping", "Healthcare", "Entertainment", "Subscriptions", "Travel",
-    "Education", "Personal Care", "Gifts & Donations", "Fees & Interest",
-    "Cash Withdrawal", "Income", "Other", "Internal Transfer",
-    "External Transfer", "Household Expenses", "Child Support",
-    "Opening Balance",
+    # Housing & Bills
+    "Housing", "Utilities", "Phone Bill", "Internet",
+    # Food & Dining
+    "Groceries", "Dining Out", "Delivery & Takeout",
+    # Transportation
+    "Auto", "Rideshare",
+    # Lifestyle & Personal
+    "Shopping", "Personal Care", "Entertainment", "Subscriptions",
+    # Health & Family
+    "Healthcare", "Family", "Household", "Education", "Gifts & Donations",
+    # Travel
+    "Flights & Hotels", "Vacation Spending",
+    # Financial & Legal
+    "Fees & Interest", "Taxes",
+    # System / Tracking
+    "Income", "Dividends", "Interest Income", "Capital Gains",
+    "Other Income", "Transfer", "Cash Withdrawal", "Adjustment", "Other",
 ]
+
+# ── Legacy → new category name mapping ────────────────────────────────────────
+# Applied during categorization and sync to migrate old category names.
+CATEGORY_MIGRATION_MAP: dict[str, str] = {
+    "Internal Transfer":  "Transfer",
+    "External Transfer":  "Transfer",
+    "Opening Balance":    "Adjustment",
+    "Transport":          "Auto",          # old generic → new subcategory
+    "Household Expenses": "Household",
+    "Child Support":      "Family",
+    "Travel":             "Flights & Hotels",  # legacy catch-all → primary travel subcategory
+}
+
+def migrate_category(category: str | None) -> str | None:
+    """Map legacy category names to their new equivalents."""
+    if category and category in CATEGORY_MIGRATION_MAP:
+        return CATEGORY_MIGRATION_MAP[category]
+    return category
 
 
 @dataclass
@@ -129,7 +158,7 @@ class Categorizer:
 
         # Sort contains and regex: filtered (specific) rules first, generic last.
         # This ensures account-aware rules take priority when the same substring
-        # matches — e.g. "TARIKAN ATM" for Helen/5500346622 → Household Expenses
+        # matches — e.g. "TARIKAN ATM" for Helen/5500346622 → Household
         # before the generic ATM Withdrawal rule.
         def _specificity(rule):
             return (0 if (rule[3] or rule[4]) else 1)  # filtered=0, generic=1
@@ -243,16 +272,19 @@ class Categorizer:
             )
         else:
             examples_text = (
-                '- "GRAB* A8NPTNG SOUTH JAKARTA" → Grab, Transport\n'
+                '- "GRAB* A8NPTNG SOUTH JAKARTA" → Grab, Rideshare\n'
                 '- "NETFLIX.COM" → Netflix, Subscriptions\n'
                 '- "INDOMARET" → Indomaret, Groceries\n'
-                '- "IKEA ALAM SUTERA" → IKEA, Household Expenses\n'
-                '- "CATHAY PACIFIC AIRWAYS" → Cathay Pacific, Travel\n'
-                '- "SINGAPORE AIRLINES" → Singapore Airlines, Travel\n'
-                '- "AIRBNB * XYZ" → Airbnb, Travel\n'
+                '- "IKEA ALAM SUTERA" → IKEA, Household\n'
+                '- "CATHAY PACIFIC AIRWAYS" → Cathay Pacific, Flights & Hotels\n'
+                '- "SINGAPORE AIRLINES" → Singapore Airlines, Flights & Hotels\n'
+                '- "AIRBNB * XYZ" → Airbnb, Flights & Hotels\n'
                 '- "ZARA GRAND INDONESIA" → Zara, Shopping\n'
                 '- "CANVA* 12345" → Canva, Subscriptions\n'
-                '- "STEAM PURCHASE" → Steam, Entertainment'
+                '- "STEAM PURCHASE" → Steam, Entertainment\n'
+                '- "GRABFOOD" → GrabFood, Delivery & Takeout\n'
+                '- "GOJEK GORIDE" → Gojek, Rideshare\n'
+                '- "PERTAMINA SPBU" → Pertamina, Auto'
             )
 
         categories_text = ", ".join(self.categories)
@@ -261,21 +293,36 @@ class Categorizer:
             "You are a personal finance categorizer for an Indonesian household.\n\n"
             f"Available categories: {categories_text}\n\n"
             "Category guidance (use these rules to choose precisely):\n"
-            "- Transport: daily commute — ride-hailing (Grab, Gojek), fuel (SPBU, Pertamina), parking, toll\n"
-            "- Travel: airlines, airports, hotels, Airbnb, travel agencies, overseas transit\n"
-            "- Household Expenses: home furnishings, appliances, hardware (IKEA, ACE Hardware, Informa, Depo Bangunan)\n"
-            "- Shopping: fashion, accessories, general retail (Zara, H&M, Uniqlo, Tokopedia, Shopee)\n"
+            "- Auto: fuel (SPBU, Pertamina), vehicle repairs, registration, insurance, parking, toll\n"
+            "- Rideshare: ride-hailing apps (Grab, Gojek, Uber) for transport\n"
+            "- Delivery & Takeout: food delivery apps (GrabFood, GoFood, ShopeeFood) — track delivery fees separately\n"
+            "- Flights & Hotels: airlines, airports, hotels, Airbnb, travel agencies, booking platforms\n"
+            "- Vacation Spending: food, transport, and activities while on vacation (overseas transactions)\n"
+            "- Household: home furnishings, appliances, hardware (IKEA, ACE Hardware, Informa, Depo Bangunan), cleaning supplies\n"
+            "- Shopping: fashion, accessories, electronics, general retail (Zara, H&M, Uniqlo, Tokopedia, Shopee)\n"
             "- Groceries: supermarkets, convenience stores, fresh produce (Indomaret, Alfamart, Ranch Market, Grand Lucky)\n"
             "- Subscriptions: recurring digital services with a period or reference code (Netflix, Spotify, Canva, Adobe, iCloud)\n"
-            "- Dining Out: restaurants, cafes, fast food, food delivery (Starbucks, McDonald's, GrabFood)\n"
+            "- Dining Out: restaurants, cafes, fast food, bars, coffee shops (Starbucks, McDonald's)\n"
             "- Healthcare: clinics, hospitals, pharmacies, dental, lab tests\n"
-            "- Education: schools, courses, tutoring, books, stationery\n"
-            "- Entertainment: gaming, cinema, streaming one-off purchases (Steam, PlayStation Store)\n\n"
+            "- Education: schools, courses, tutoring, books, stationery, school fees\n"
+            "- Entertainment: gaming, cinema, concerts, hobbies (Steam, PlayStation Store)\n"
+            "- Personal Care: haircuts, gym, skincare, spa\n"
+            "- Family: childcare expenses\n"
+            "- Phone Bill: mobile phone bills\n"
+            "- Internet: broadband / WiFi bills\n"
+            "- Income: salary, wages, bonuses\n"
+            "- Dividends: stock dividend payouts\n"
+            "- Interest Income: savings account interest, bond coupons\n"
+            "- Capital Gains: profit from selling stocks or assets\n"
+            "- Other Income: tax refunds, gifts received, side hustles\n"
+            "- Transfer: internal account transfers (savings↔checking) and external (paying credit cards)\n"
+            "- Adjustment: opening balances or balance corrections\n\n"
             "Rules:\n"
             "- Extract a clean merchant name (remove location suffixes, reference codes, asterisks).\n"
-            "- If the raw text is an airline name, always use Travel — not Transport.\n"
+            "- If the raw text is an airline name, always use Flights & Hotels — not Auto or Rideshare.\n"
             "- If the raw text contains a country or city code at the end (e.g. NLD, GBR, USA, KL), "
-            "it is likely a foreign transaction; classify by the merchant type, not the location.\n\n"
+            "it is likely a foreign transaction; classify by the merchant type, not the location.\n"
+            "- GrabFood/GoFood → Delivery & Takeout; GrabCar/GoBike → Rideshare.\n\n"
             f"Recent confirmed examples:\n{examples_text}\n\n"
             f'Transaction: "{desc}"\n\n'
             'Reply with JSON only, no explanation: {"merchant": "...", "category": "..."}'
@@ -408,7 +455,7 @@ class Categorizer:
 # ── Cross-account internal transfer matching ─────────────────────────────────
 
 # Known internal account pairs: (owner_a, account_a) ↔ (owner_b, account_b)
-# Transfers between these pairs should be categorised as "Internal Transfer".
+# Transfers between these pairs should be categorised as "Transfer".
 INTERNAL_ACCOUNT_PAIRS: list[tuple[tuple[str, str], tuple[str, str]]] = [
     # Gandrik BCA ↔ Helen BCA (monthly household allowance)
     (("Gandrik", "2171138631"), ("Helen", "5500346622")),
@@ -417,6 +464,11 @@ INTERNAL_ACCOUNT_PAIRS: list[tuple[tuple[str, str], tuple[str, str]]] = [
     # Helen Permata ↔ Gandrik Permata
     (("Helen", "4123968773"), ("Gandrik", "4123968447")),
 ]
+
+# ── Helen BCA cash withdrawal → Household ────────────────────────────────────
+# Cash withdrawals from Helen's BCA account are household expenses (cash for
+# daily household spending).
+HELEN_BCA_HOUSEHOLD_ACCOUNT = ("Helen", "5500346622")
 
 _TRANSFER_DESCRIPTION_HINTS = (
     "TRSF E-BANKING ",
@@ -440,7 +492,10 @@ def _looks_like_transfer(txn) -> bool:
 def match_internal_transfers(transactions: list) -> int:
     """
     Post-processing: detect matching debit/credit pairs across internal accounts
-    and re-categorise both sides as "Internal Transfer".
+    and re-categorise both sides as "Transfer".
+
+    Also re-categorises cash withdrawals from Helen BCA (5500346622) as
+    "Household" (daily household spending in cash).
 
     Each transaction must have attributes: date, amount, owner, account,
     category, merchant, raw_description.
@@ -470,11 +525,11 @@ def match_internal_transfers(transactions: list) -> int:
                 counterparts = by_key.get(counterpart_key, [])
                 for cp in counterparts:
                     if cp.amount > 0 and id(cp) not in seen and _looks_like_transfer(cp):
-                        # Found a matching credit — mark both as Internal Transfer
+                        # Found a matching credit — mark both as Transfer
                         for t in (txn, cp):
-                            if t.category != "Internal Transfer":
-                                t.merchant = "Internal Transfer"
-                                t.category = "Internal Transfer"
+                            if t.category != "Transfer":
+                                t.merchant = "Transfer"
+                                t.category = "Transfer"
                                 matched += 1
                         seen.add(id(txn))
                         seen.add(id(cp))
@@ -488,15 +543,33 @@ def match_internal_transfers(transactions: list) -> int:
                 for cp in counterparts:
                     if cp.amount > 0 and id(cp) not in seen and _looks_like_transfer(cp):
                         for t in (txn, cp):
-                            if t.category != "Internal Transfer":
-                                t.merchant = "Internal Transfer"
-                                t.category = "Internal Transfer"
+                            if t.category != "Transfer":
+                                t.merchant = "Transfer"
+                                t.category = "Transfer"
                                 matched += 1
                         seen.add(id(txn))
                         seen.add(id(cp))
                         break
 
+    # ── Helen BCA cash withdrawals → Household ───────────────────────────────
+    # Any cash withdrawal from Helen's BCA account (5500346622) is re-categorised
+    # as "Household" because she uses ATM cash for daily household spending.
+    h_owner, h_account = HELEN_BCA_HOUSEHOLD_ACCOUNT
+    _ATM_HINTS = ("TARIKAN ATM", "TARIKAN TUNAI", "CASH WITHDRAWAL", "CW-ATM")
+    for txn in transactions:
+        if id(txn) in seen:
+            continue
+        if (txn.owner == h_owner and txn.account == h_account
+                and txn.amount < 0
+                and txn.category == "Cash Withdrawal"):
+            desc_upper = (getattr(txn, "raw_description", "") or "").upper()
+            if any(hint in desc_upper for hint in _ATM_HINTS):
+                txn.category = "Household"
+                txn.merchant = "Cash (Household)"
+                matched += 1
+                seen.add(id(txn))
+
     if matched:
-        log.info("Cross-account matching: %d transactions → Internal Transfer", matched)
+        log.info("Cross-account matching: %d transactions re-categorised", matched)
 
     return matched

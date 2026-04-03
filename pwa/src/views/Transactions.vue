@@ -274,7 +274,7 @@ async function load() {
 
     // Compute income/expense totals from this page's data
     // Exclude non-cashflow categories (same as API summary endpoints)
-    const EXCLUDE_CATS = new Set(['Internal Transfer', 'Opening Balance'])
+    const EXCLUDE_CATS = new Set(['Transfer', 'Adjustment'])
     let inc = 0, exp = 0
     for (const tx of transactions.value) {
       if (EXCLUDE_CATS.has(tx.category)) continue
