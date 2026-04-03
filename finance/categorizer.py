@@ -50,15 +50,15 @@ DEFAULT_CATEGORIES = [
 ]
 
 # ── Legacy → new category name mapping ────────────────────────────────────────
-# Applied during categorization and sync to migrate old category names.
+# Applied during sync to migrate old category names on existing transactions.
 CATEGORY_MIGRATION_MAP: dict[str, str] = {
     "Internal Transfer":  "Transfer",
     "External Transfer":  "Transfer",
     "Opening Balance":    "Adjustment",
-    "Transport":          "Auto",          # old generic → new subcategory
+    "Transport":          "Auto",
     "Household Expenses": "Household",
     "Child Support":      "Family",
-    "Travel":             "Flights & Hotels",  # legacy catch-all → primary travel subcategory
+    "Travel":             "Flights & Hotels",
 }
 
 def migrate_category(category: str | None) -> str | None:
@@ -466,8 +466,7 @@ INTERNAL_ACCOUNT_PAIRS: list[tuple[tuple[str, str], tuple[str, str]]] = [
 ]
 
 # ── Helen BCA cash withdrawal → Household ────────────────────────────────────
-# Cash withdrawals from Helen's BCA account are household expenses (cash for
-# daily household spending).
+# Cash withdrawals from Helen's BCA account are household expenses.
 HELEN_BCA_HOUSEHOLD_ACCOUNT = ("Helen", "5500346622")
 
 _TRANSFER_DESCRIPTION_HINTS = (

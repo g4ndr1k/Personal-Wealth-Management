@@ -114,10 +114,8 @@ class AliasRequest(BaseModel):
     alias:            str   # raw_description pattern to match (written to Sheets)
     merchant:         str   # canonical merchant name
     category:         str
-    match_type:       str   = "exact"   # "exact" | "contains" | "regex"
+    match_type:       str   = "exact"   # "exact" | "regex"
     apply_to_similar: bool  = True      # also update uncategorised rows with same raw_desc
-    owner_filter:     str   = ""        # optional: only match this owner (e.g. "Helen")
-    account_filter:   str   = ""        # optional: only match this account number
 
 
 class ImportRequest(BaseModel):
@@ -520,8 +518,6 @@ def post_alias(req: AliasRequest):
         alias=req.alias,
         category=req.category,
         match_type=req.match_type,
-        owner_filter=req.owner_filter,
-        account_filter=req.account_filter,
     )
     log.info("Alias saved: %s → %s  [%s]", req.alias, req.merchant, req.category)
 

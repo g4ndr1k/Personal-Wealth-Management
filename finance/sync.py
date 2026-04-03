@@ -109,12 +109,13 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
         log.info("Migrated %d transaction(s) from legacy category names.", migrated)
 
     # Apply category overrides — these take priority over auto-categorised values
+    # Also migrate any legacy names stored in the overrides tab.
     if overrides:
         applied = 0
         for r in tx_rows:
             ov = overrides.get(r["hash"])
             if ov:
-                r["category"] = ov["category"]
+                r["category"] = migrate_category(ov["category"]) or ov["category"]
                 if ov.get("notes"):
                     r["notes"] = ov["notes"]
                 applied += 1
@@ -146,11 +147,9 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
             conn.executemany(
                 """
                 INSERT INTO merchant_aliases
-                    (merchant, alias, category, match_type, added_date,
-                     owner_filter, account_filter, synced_at)
+                    (merchant, alias, category, match_type, added_date, synced_at)
                 VALUES
-                    (:merchant, :alias, :category, :match_type, :added_date,
-                     :owner_filter, :account_filter, :synced_at)
+                    (:merchant, :alias, :category, :match_type, :added_date, :synced_at)
                 """,
                 [{**r, "synced_at": now} for r in alias_rows],
             )
@@ -250,23 +249,21 @@ def _read_transactions(client: SheetsClient) -> list[dict]:
 
 
 def _read_aliases(client: SheetsClient) -> list[dict]:
-    """Read Merchant Aliases tab (A–G) → list of row dicts."""
-    rows = client._get(f"{client.cfg.aliases_tab}!A:G")
+    """Read Merchant Aliases tab (A–E) → list of row dicts."""
+    rows = client._get(f"{client.cfg.aliases_tab}!A:E")
     if len(rows) < 2:
         return []
     result = []
     for row in rows[1:]:
-        r = list(row) + [""] * (7 - len(row))
+        r = list(row) + [""] * (5 - len(row))
         if not r[0] and not r[1]:
             continue
         result.append({
-            "merchant":       (r[0] or "").strip(),
-            "alias":          (r[1] or "").strip(),
-            "category":       (r[2] or "").strip() or None,
-            "match_type":     (r[3] or "exact").strip(),
-            "added_date":     (r[4] or "").strip(),
-            "owner_filter":   (r[5] or "").strip(),
-            "account_filter": (r[6] or "").strip(),
+            "merchant":   (r[0] or "").strip(),
+            "alias":      (r[1] or "").strip(),
+            "category":   (r[2] or "").strip() or None,
+            "match_type": (r[3] or "exact").strip(),
+            "added_date": (r[4] or "").strip(),
         })
     return result
 
