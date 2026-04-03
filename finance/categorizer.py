@@ -37,7 +37,7 @@ DEFAULT_CATEGORIES = [
     # Transportation
     "Auto", "Rideshare",
     # Lifestyle & Personal
-    "Shopping", "Personal Care", "Entertainment", "Subscriptions",
+    "Shopping", "Personal Care", "Entertainment", "Hobbies", "Subscriptions",
     # Health & Family
     "Healthcare", "Family", "Household", "Education", "Gifts & Donations",
     # Travel

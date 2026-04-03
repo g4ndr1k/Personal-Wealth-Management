@@ -62,42 +62,49 @@
         </div>
       </div>
 
-      <!-- Category breakdown -->
+      <!-- Spending by Group -->
       <div class="card">
-        <div class="card-title">Spending by Category</div>
-        <div v-if="!topCats.length" class="empty-state" style="padding:16px 0">
+        <div class="card-title">Spending by Group</div>
+        <div v-if="!spendingGroups.length" class="empty-state" style="padding:16px 0">
           <div class="e-sub">No expense data this month</div>
         </div>
         <div v-else>
           <div
-            v-for="cat in topCats"
-            :key="cat.category"
+            v-for="grp in spendingGroups"
+            :key="grp.group"
             class="cat-row cat-row-tappable"
-            @click="drillDown(cat)"
+            @click="drillToGroup(grp)"
             role="button"
-            :aria-label="`View ${cat.category} transactions`"
+            :aria-label="`View ${grp.group} spending`"
           >
             <div class="cat-header">
               <span class="cat-name">
-                <span>{{ catIcon(cat.category) }}</span>
-                {{ cat.category }}
+                <span>{{ grp.icon }}</span>
+                {{ grp.group }}
               </span>
               <span style="display:flex;align-items:center;gap:4px">
-                <span class="cat-amount">{{ fmt(Math.abs(cat.amount)) }}</span>
-                <span class="cat-pct">{{ (cat.pct_of_expense || 0).toFixed(0) }}%</span>
+                <span class="cat-amount">{{ fmt(grp.total) }}</span>
+                <span class="cat-pct">{{ grp.pct }}%</span>
                 <span class="cat-drill-chevron">›</span>
               </span>
             </div>
             <div class="cat-bar-bg">
               <div
                 class="cat-bar-fill"
-                :class="{ 'over-budget': cat.budget && Math.abs(cat.total) > cat.budget }"
-                :style="{ width: Math.min(cat.pct_of_expense || 0, 100) + '%' }"
+                :style="{ width: grp.pct + '%' }"
               ></div>
             </div>
-          </div>
-          <div v-if="summary.by_category?.length > 8" style="font-size:11px;color:var(--text-muted);margin-top:6px;text-align:right">
-            +{{ summary.by_category.length - 8 }} more categories
+            <!-- Category chips -->
+            <div class="grp-cats">
+              <span
+                v-for="c in grp.topCats"
+                :key="c"
+                class="grp-cat-chip"
+              >{{ catIcon(c) }} {{ c }}</span>
+              <span v-if="grp.moreCats > 0" class="grp-cat-chip grp-cat-more">
+                +{{ grp.moreCats }} more
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -178,12 +185,46 @@ const displayExpense = computed(() => ownerRow.value ? ownerRow.value.expense : 
 const displayNet     = computed(() => ownerRow.value ? ownerRow.value.net     : summary.value?.net            ?? 0)
 
 const EXCLUDED_FROM_SPENDING = new Set(['Transfer', 'Adjustment'])
-const topCats = computed(() => {
+
+// Icons for each group (mirrors GroupDrilldown.vue)
+const GROUP_ICONS = {
+  'Housing & Bills':      '🏠',
+  'Food & Dining':        '🍽️',
+  'Transportation':       '🚗',
+  'Lifestyle & Personal': '🛍️',
+  'Health & Family':      '❤️',
+  'Travel':               '✈️',
+  'Financial & Legal':    '⚖️',
+  'System / Tracking':    '🔧',
+}
+
+// Roll up by_category into groups, exclude system cats, sort by total desc
+const spendingGroups = computed(() => {
   const cats = summary.value?.by_category || []
-  return cats
-    .filter(c => c.amount < 0 && !EXCLUDED_FROM_SPENDING.has(c.category))
-    .sort((a, b) => a.amount - b.amount) // most negative first
-    .slice(0, 8)
+  const totalExpense = Math.abs(summary.value?.total_expense ?? 0)
+
+  // Aggregate per group
+  const map = {}
+  for (const c of cats) {
+    if (c.amount >= 0 || EXCLUDED_FROM_SPENDING.has(c.category)) continue
+    const meta  = store.categoryMap[c.category]
+    const grp   = meta?.category_group || 'Other'
+    if (grp === 'System / Tracking') continue
+    if (!map[grp]) map[grp] = { group: grp, total: 0, cats: [] }
+    map[grp].total += Math.abs(c.amount)
+    map[grp].cats.push(c.category)
+  }
+
+  return Object.values(map)
+    .sort((a, b) => b.total - a.total)
+    .map(g => ({
+      group:    g.group,
+      icon:     GROUP_ICONS[g.group] || '📁',
+      total:    g.total,
+      pct:      totalExpense > 0 ? Math.round((g.total / totalExpense) * 100) : 0,
+      topCats:  g.cats.slice(0, 3),
+      moreCats: Math.max(0, g.cats.length - 3),
+    }))
 })
 
 // ── Formatters ───────────────────────────────────────────────────────────────
@@ -199,14 +240,18 @@ function catIcon(name) {
   return store.categoryMap[name]?.icon || '📁'
 }
 
-// ── Category drill-down ──────────────────────────────────────────────────────
-function drillDown(cat) {
+// ── Group drill-down (Level 1) ───────────────────────────────────────────────
+function drillToGroup(grp) {
+  const cats        = summary.value?.by_category || []
+  const totalExpense = Math.abs(summary.value?.total_expense ?? 0)
   router.push({
-    path: '/category-drilldown',
+    path: '/group-drilldown',
     query: {
-      category: cat.category,
-      year:     store.selectedYear,
-      month:    store.selectedMonth,
+      group:         grp.group,
+      year:          store.selectedYear,
+      month:         store.selectedMonth,
+      totalExpense,
+      byCategory:    encodeURIComponent(JSON.stringify(cats)),
       ...(store.selectedOwner ? { owner: store.selectedOwner } : {}),
     },
   })
@@ -323,5 +368,27 @@ onUnmounted(() => { if (trendChart) trendChart.destroy() })
   color: var(--text-muted);
   margin-left: 2px;
   font-weight: 400;
+}
+
+/* Category chips below each group bar */
+.grp-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.grp-cat-chip {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--neutral);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+.grp-cat-more {
+  color: var(--text-muted);
+  font-style: italic;
 }
 </style>

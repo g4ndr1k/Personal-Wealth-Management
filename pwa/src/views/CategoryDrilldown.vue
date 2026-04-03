@@ -6,6 +6,10 @@
         <span class="back-arrow">‹</span>
       </button>
       <div class="drill-title-block">
+        <!-- Breadcrumb when coming from a group -->
+        <div v-if="fromGroup" class="drill-breadcrumb" @click="goBack">
+          {{ groupIcon }} {{ fromGroup }} ›
+        </div>
         <div class="drill-title">
           <span v-if="catMeta">{{ catMeta.icon }}</span>
           {{ category }}
@@ -211,10 +215,23 @@ const route  = useRoute()
 const store  = useFinanceStore()
 
 // ── Route params ────────────────────────────────────────────────────────────
-const category = route.query.category || ''
-const year     = Number(route.query.year)  || new Date().getFullYear()
-const month    = Number(route.query.month) || new Date().getMonth() + 1
-const owner    = route.query.owner || ''
+const category  = route.query.category || ''
+const year      = Number(route.query.year)  || new Date().getFullYear()
+const month     = Number(route.query.month) || new Date().getMonth() + 1
+const owner     = route.query.owner || ''
+const fromGroup = route.query.fromGroup ? decodeURIComponent(route.query.fromGroup) : ''
+
+const GROUP_ICONS = {
+  'Housing & Bills':      '🏠',
+  'Food & Dining':        '🍽️',
+  'Transportation':       '🚗',
+  'Lifestyle & Personal': '🛍️',
+  'Health & Family':      '❤️',
+  'Travel':               '✈️',
+  'Financial & Legal':    '⚖️',
+  'System / Tracking':    '🔧',
+}
+const groupIcon = computed(() => GROUP_ICONS[fromGroup] || '📁')
 
 // ── State ───────────────────────────────────────────────────────────────────
 const transactions = ref([])
@@ -267,6 +284,8 @@ function similarCount(tx) {
 
 // ── Navigation ───────────────────────────────────────────────────────────────
 function goBack() {
+  // If we arrived from a group drilldown, go back properly via router.back()
+  // so the group view is restored from history (preserving its byCategory data).
   if (window.history.length > 2) {
     router.back()
   } else {
@@ -423,6 +442,18 @@ onMounted(load)
 .drill-title-block {
   min-width: 0;
 }
+.drill-breadcrumb {
+  font-size: 11px;
+  color: var(--primary-light);
+  font-weight: 700;
+  margin-bottom: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.drill-breadcrumb:active { opacity: 0.7; }
+
 .drill-title {
   font-size: 18px;
   font-weight: 800;
