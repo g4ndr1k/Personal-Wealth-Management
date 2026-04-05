@@ -31,7 +31,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+import hmac
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -78,6 +80,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+def require_api_key(x_api_key: str = Header(default="")):
+    """Validate X-Api-Key header against FINANCE_API_KEY env var.
+
+    Set FINANCE_API_KEY in the environment before starting the server.
+    If the env var is unset the server refuses all protected requests so
+    deployments without a key fail loudly rather than silently open.
+    """
+    expected = os.environ.get("FINANCE_API_KEY", "")
+    if not expected:
+        raise HTTPException(status_code=500, detail="FINANCE_API_KEY not configured")
+    if not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ── DB connection helper ──────────────────────────────────────────────────────
@@ -499,7 +517,7 @@ def get_review_queue(limit: int = Query(50, ge=1, le=200)):
 
 # ── /api/alias ────────────────────────────────────────────────────────────────
 
-@app.post("/api/alias")
+@app.post("/api/alias", dependencies=[Depends(require_api_key)])
 def post_alias(req: AliasRequest):
     """
     Confirm a merchant alias from the review queue.
@@ -573,7 +591,7 @@ def post_alias(req: AliasRequest):
 
 # ── /api/transaction/{hash}/category ──────────────────────────────────────────
 
-@app.patch("/api/transaction/{tx_hash}/category")
+@app.patch("/api/transaction/{tx_hash}/category", dependencies=[Depends(require_api_key)])
 def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
     """
     Manually override the category for a specific transaction.
@@ -680,7 +698,7 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
 
 # ── /api/sync ─────────────────────────────────────────────────────────────────
 
-@app.post("/api/sync")
+@app.post("/api/sync", dependencies=[Depends(require_api_key)])
 def post_sync():
     """Pull all data from Google Sheets into the local SQLite cache."""
     from finance.sync import sync as _sync
@@ -690,7 +708,7 @@ def post_sync():
 
 # ── /api/import ───────────────────────────────────────────────────────────────
 
-@app.post("/api/import")
+@app.post("/api/import", dependencies=[Depends(require_api_key)])
 def post_import(req: ImportRequest = ImportRequest()):
     """
     Trigger the Stage 1 → Sheets importer (finance.importer).
@@ -735,6 +753,577 @@ def post_import(req: ImportRequest = ImportRequest()):
         stats["sync"] = sync_stats
 
     return {"ok": True, **stats}
+
+
+# ── Stage 3: Wealth Management ───────────────────────────────────────────────
+
+# Maps asset_class values (used in holdings table) to the asset group label
+_ASSET_CLASS_GROUP: dict[str, str] = {
+    "savings":       "Cash & Liquid",
+    "checking":      "Cash & Liquid",
+    "money_market":  "Cash & Liquid",
+    "physical_cash": "Cash & Liquid",
+    "stock":         "Investments",
+    "mutual_fund":   "Investments",
+    "bond":          "Investments",
+    "retirement":    "Investments",
+    "crypto":        "Investments",
+    "real_estate":   "Real Estate",
+    "vehicle":       "Physical Assets",
+    "gold":          "Physical Assets",
+    "other":         "Physical Assets",
+}
+
+# Maps account_type → net_worth_snapshots column
+_ACCT_TYPE_COL: dict[str, str] = {
+    "savings":       "savings_idr",
+    "checking":      "checking_idr",
+    "money_market":  "money_market_idr",
+    "physical_cash": "physical_cash_idr",
+}
+
+# Maps asset_class → net_worth_snapshots column
+_HOLDING_CLASS_COL: dict[str, str] = {
+    "bond":        "bonds_idr",
+    "stock":       "stocks_idr",
+    "mutual_fund": "mutual_funds_idr",
+    "retirement":  "retirement_idr",
+    "crypto":      "crypto_idr",
+    "real_estate": "real_estate_idr",
+    "vehicle":     "vehicles_idr",
+    "gold":        "gold_idr",
+    "other":       "other_assets_idr",
+}
+
+# Maps liability_type → net_worth_snapshots column
+_LIAB_TYPE_COL: dict[str, str] = {
+    "mortgage":      "mortgages_idr",
+    "personal_loan": "personal_loans_idr",
+    "credit_card":   "credit_card_debt_idr",
+    "taxes_owed":    "taxes_owed_idr",
+    "other":         "other_liabilities_idr",
+}
+
+
+# ── Request models ─────────────────────────────────────────────────────────────
+
+class BalanceUpsertRequest(BaseModel):
+    snapshot_date: str
+    institution:   str
+    account:       str
+    account_type:  str   = "savings"
+    owner:         str   = ""
+    currency:      str   = "IDR"
+    balance:       float = 0.0
+    balance_idr:   float = 0.0
+    exchange_rate: float = 0.0
+    notes:         str   = ""
+
+
+class HoldingUpsertRequest(BaseModel):
+    snapshot_date:      str
+    asset_class:        str
+    asset_name:         str
+    isin_or_code:       str   = ""
+    institution:        str   = ""
+    account:            str   = ""
+    owner:              str   = ""
+    currency:           str   = "IDR"
+    quantity:           float = 0.0
+    unit_price:         float = 0.0
+    market_value:       float = 0.0
+    market_value_idr:   float = 0.0
+    cost_basis:         float = 0.0
+    cost_basis_idr:     float = 0.0
+    unrealised_pnl_idr: float = 0.0
+    exchange_rate:      float = 0.0
+    maturity_date:        str   = ""
+    coupon_rate:          float = 0.0
+    last_appraised_date:  str   = ""
+    notes:                str   = ""
+
+
+class LiabilityUpsertRequest(BaseModel):
+    snapshot_date:  str
+    liability_type: str
+    liability_name: str
+    institution:    str   = ""
+    account:        str   = ""
+    owner:          str   = ""
+    currency:       str   = "IDR"
+    balance:        float = 0.0
+    balance_idr:    float = 0.0
+    due_date:       str   = ""
+    notes:          str   = ""
+
+
+class SnapshotRequest(BaseModel):
+    snapshot_date: str
+    notes:         str = ""
+
+
+# ── /api/wealth/balances ──────────────────────────────────────────────────────
+
+@app.get("/api/wealth/balances")
+def get_balances(
+    snapshot_date: Optional[str] = Query(None),
+    account_type:  Optional[str] = Query(None),
+    owner:         Optional[str] = Query(None),
+):
+    conditions, params = [], []
+    if snapshot_date:
+        conditions.append("snapshot_date = ?"); params.append(snapshot_date)
+    if account_type:
+        conditions.append("account_type = ?"); params.append(account_type)
+    if owner and owner.lower() not in ("all", "both", ""):
+        conditions.append("owner = ?"); params.append(owner)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM account_balances{where} "
+            "ORDER BY snapshot_date DESC, institution, account",
+            params,
+        ).fetchall()
+    return [_row(r) for r in rows]
+
+
+@app.post("/api/wealth/balances", dependencies=[Depends(require_api_key)])
+def upsert_balance(req: BalanceUpsertRequest):
+    today = datetime.now().strftime("%Y-%m-%d")
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_balances
+                (snapshot_date, institution, account, account_type, asset_group,
+                 owner, currency, balance, balance_idr, exchange_rate, notes, import_date)
+            VALUES (?, ?, ?, ?, 'Cash & Liquid', ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_date, institution, account, owner)
+            DO UPDATE SET
+                account_type  = excluded.account_type,
+                balance       = excluded.balance,
+                balance_idr   = excluded.balance_idr,
+                exchange_rate = excluded.exchange_rate,
+                notes         = excluded.notes,
+                import_date   = excluded.import_date
+            """,
+            (req.snapshot_date, req.institution, req.account, req.account_type,
+             req.owner, req.currency, req.balance, req.balance_idr,
+             req.exchange_rate, req.notes, today),
+        )
+        row = conn.execute(
+            "SELECT * FROM account_balances "
+            "WHERE snapshot_date=? AND institution=? AND account=? AND owner=?",
+            (req.snapshot_date, req.institution, req.account, req.owner),
+        ).fetchone()
+    return {"ok": True, "balance": _row(row)}
+
+
+@app.delete("/api/wealth/balances/{balance_id}", dependencies=[Depends(require_api_key)])
+def delete_balance(balance_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM account_balances WHERE id = ?", (balance_id,))
+    return {"ok": True}
+
+
+# ── /api/wealth/holdings ──────────────────────────────────────────────────────
+
+@app.get("/api/wealth/holdings")
+def get_holdings(
+    snapshot_date: Optional[str] = Query(None),
+    asset_class:   Optional[str] = Query(None),
+    asset_group:   Optional[str] = Query(None),
+    owner:         Optional[str] = Query(None),
+):
+    conditions, params = [], []
+    if snapshot_date:
+        conditions.append("snapshot_date = ?"); params.append(snapshot_date)
+    if asset_class:
+        conditions.append("asset_class = ?"); params.append(asset_class)
+    if asset_group:
+        conditions.append("asset_group = ?"); params.append(asset_group)
+    if owner and owner.lower() not in ("all", "both", ""):
+        conditions.append("owner = ?"); params.append(owner)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM holdings{where} "
+            "ORDER BY snapshot_date DESC, asset_group, asset_class, asset_name",
+            params,
+        ).fetchall()
+    return [_row(r) for r in rows]
+
+
+@app.post("/api/wealth/holdings", dependencies=[Depends(require_api_key)])
+def upsert_holding(req: HoldingUpsertRequest):
+    today       = datetime.now().strftime("%Y-%m-%d")
+    asset_group = _ASSET_CLASS_GROUP.get(req.asset_class, "Investments")
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO holdings
+                (snapshot_date, asset_class, asset_group, asset_name, isin_or_code,
+                 institution, account, owner, currency, quantity, unit_price,
+                 market_value, market_value_idr, cost_basis, cost_basis_idr,
+                 unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
+                 last_appraised_date, notes, import_date)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(snapshot_date, asset_class, asset_name, owner)
+            DO UPDATE SET
+                asset_group          = excluded.asset_group,
+                isin_or_code         = excluded.isin_or_code,
+                institution          = excluded.institution,
+                account              = excluded.account,
+                currency             = excluded.currency,
+                quantity             = excluded.quantity,
+                unit_price           = excluded.unit_price,
+                market_value         = excluded.market_value,
+                market_value_idr     = excluded.market_value_idr,
+                cost_basis           = excluded.cost_basis,
+                cost_basis_idr       = excluded.cost_basis_idr,
+                unrealised_pnl_idr   = excluded.unrealised_pnl_idr,
+                exchange_rate        = excluded.exchange_rate,
+                maturity_date        = excluded.maturity_date,
+                coupon_rate          = excluded.coupon_rate,
+                last_appraised_date  = excluded.last_appraised_date,
+                notes                = excluded.notes,
+                import_date          = excluded.import_date
+            """,
+            (req.snapshot_date, req.asset_class, asset_group, req.asset_name,
+             req.isin_or_code, req.institution, req.account, req.owner,
+             req.currency, req.quantity, req.unit_price, req.market_value,
+             req.market_value_idr, req.cost_basis, req.cost_basis_idr,
+             req.unrealised_pnl_idr, req.exchange_rate, req.maturity_date,
+             req.coupon_rate, req.last_appraised_date, req.notes, today),
+        )
+        row = conn.execute(
+            "SELECT * FROM holdings "
+            "WHERE snapshot_date=? AND asset_class=? AND asset_name=? AND owner=?",
+            (req.snapshot_date, req.asset_class, req.asset_name, req.owner),
+        ).fetchone()
+    _sync_holdings_to_sheets()
+    return {"ok": True, "holding": _row(row)}
+
+
+@app.delete("/api/wealth/holdings/{holding_id}", dependencies=[Depends(require_api_key)])
+def delete_holding(holding_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
+    _sync_holdings_to_sheets()
+    return {"ok": True}
+
+
+def _sync_holdings_to_sheets():
+    """Write all holdings to the Holdings Google Sheet tab (best-effort)."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT snapshot_date, asset_class, asset_group, asset_name, institution, "
+                "owner, currency, market_value_idr, cost_basis_idr, unrealised_pnl_idr, "
+                "last_appraised_date, notes, import_date FROM holdings "
+                "ORDER BY snapshot_date DESC, asset_group, asset_class, asset_name"
+            ).fetchall()
+        sheet_rows = [list(r) for r in rows]
+        _sheets.write_holdings(sheet_rows)
+    except Exception as exc:
+        log.warning("Holdings Sheets sync failed (non-fatal): %s", exc)
+
+
+# ── /api/wealth/liabilities ───────────────────────────────────────────────────
+
+@app.get("/api/wealth/liabilities")
+def get_liabilities(
+    snapshot_date:  Optional[str] = Query(None),
+    liability_type: Optional[str] = Query(None),
+    owner:          Optional[str] = Query(None),
+):
+    conditions, params = [], []
+    if snapshot_date:
+        conditions.append("snapshot_date = ?"); params.append(snapshot_date)
+    if liability_type:
+        conditions.append("liability_type = ?"); params.append(liability_type)
+    if owner and owner.lower() not in ("all", "both", ""):
+        conditions.append("owner = ?"); params.append(owner)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM liabilities{where} "
+            "ORDER BY snapshot_date DESC, liability_type, liability_name",
+            params,
+        ).fetchall()
+    return [_row(r) for r in rows]
+
+
+@app.post("/api/wealth/liabilities", dependencies=[Depends(require_api_key)])
+def upsert_liability(req: LiabilityUpsertRequest):
+    today = datetime.now().strftime("%Y-%m-%d")
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO liabilities
+                (snapshot_date, liability_type, liability_name, institution, account,
+                 owner, currency, balance, balance_idr, due_date, notes, import_date)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(snapshot_date, liability_type, liability_name, owner)
+            DO UPDATE SET
+                institution  = excluded.institution,
+                account      = excluded.account,
+                currency     = excluded.currency,
+                balance      = excluded.balance,
+                balance_idr  = excluded.balance_idr,
+                due_date     = excluded.due_date,
+                notes        = excluded.notes,
+                import_date  = excluded.import_date
+            """,
+            (req.snapshot_date, req.liability_type, req.liability_name,
+             req.institution, req.account, req.owner, req.currency,
+             req.balance, req.balance_idr, req.due_date, req.notes, today),
+        )
+        row = conn.execute(
+            "SELECT * FROM liabilities "
+            "WHERE snapshot_date=? AND liability_type=? AND liability_name=? AND owner=?",
+            (req.snapshot_date, req.liability_type, req.liability_name, req.owner),
+        ).fetchone()
+    return {"ok": True, "liability": _row(row)}
+
+
+@app.delete("/api/wealth/liabilities/{liability_id}", dependencies=[Depends(require_api_key)])
+def delete_liability(liability_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM liabilities WHERE id = ?", (liability_id,))
+    return {"ok": True}
+
+
+# ── /api/wealth/snapshot ──────────────────────────────────────────────────────
+
+@app.get("/api/wealth/snapshot/dates")
+def get_snapshot_dates():
+    """
+    All month-end dates that have any wealth data — snapshots OR raw entries in
+    account_balances / holdings / liabilities — most recent first.
+    This lets the PWA show date chips for months that have been imported but
+    not yet snapshotted.
+    """
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT snapshot_date FROM (
+                SELECT snapshot_date FROM net_worth_snapshots
+                UNION
+                SELECT snapshot_date FROM account_balances
+                UNION
+                SELECT snapshot_date FROM holdings
+                UNION
+                SELECT snapshot_date FROM liabilities
+            ) ORDER BY snapshot_date DESC
+        """).fetchall()
+    return [r[0] for r in rows]
+
+
+@app.post("/api/wealth/snapshot", dependencies=[Depends(require_api_key)])
+def create_snapshot(req: SnapshotRequest):
+    """
+    Aggregate account_balances + holdings + liabilities for the given date
+    into a net_worth_snapshots row (upsert).  Returns the saved snapshot.
+    """
+    sd = req.snapshot_date
+    with _db() as conn:
+        # ── Account balances → liquid sub-totals ──────────────────────────────
+        bal_rows = conn.execute(
+            "SELECT account_type, SUM(balance_idr) AS total "
+            "FROM account_balances WHERE snapshot_date=? GROUP BY account_type",
+            (sd,),
+        ).fetchall()
+        bal = {r["account_type"]: r["total"] or 0.0 for r in bal_rows}
+
+        # ── Holdings → investment / tangible sub-totals ───────────────────────
+        hold_rows = conn.execute(
+            "SELECT asset_class, SUM(market_value_idr) AS total "
+            "FROM holdings WHERE snapshot_date=? GROUP BY asset_class",
+            (sd,),
+        ).fetchall()
+        hold = {r["asset_class"]: r["total"] or 0.0 for r in hold_rows}
+
+        # ── Liabilities → sub-totals ──────────────────────────────────────────
+        liab_rows = conn.execute(
+            "SELECT liability_type, SUM(balance_idr) AS total "
+            "FROM liabilities WHERE snapshot_date=? GROUP BY liability_type",
+            (sd,),
+        ).fetchall()
+        liab = {r["liability_type"]: r["total"] or 0.0 for r in liab_rows}
+
+        # ── Build totals ──────────────────────────────────────────────────────
+        sv   = bal.get("savings", 0.0)
+        chk  = bal.get("checking", 0.0)
+        mm   = bal.get("money_market", 0.0)
+        cash = bal.get("physical_cash", 0.0)
+
+        bonds   = hold.get("bond", 0.0)
+        stocks  = hold.get("stock", 0.0)
+        mf      = hold.get("mutual_fund", 0.0)
+        retire  = hold.get("retirement", 0.0)
+        crypto  = hold.get("crypto", 0.0)
+        realty  = hold.get("real_estate", 0.0)
+        veh     = hold.get("vehicle", 0.0)
+        gold    = hold.get("gold", 0.0)
+        other_a = hold.get("other", 0.0)
+
+        total_assets = sv + chk + mm + cash + bonds + stocks + mf + retire + crypto + realty + veh + gold + other_a
+
+        mort     = liab.get("mortgage", 0.0)
+        loans    = liab.get("personal_loan", 0.0)
+        cc       = liab.get("credit_card", 0.0)
+        tax      = liab.get("taxes_owed", 0.0)
+        other_l  = liab.get("other", 0.0)
+        total_liabilities = mort + loans + cc + tax + other_l
+
+        net_worth = total_assets - total_liabilities
+
+        # MoM: previous snapshot
+        prev = conn.execute(
+            "SELECT net_worth_idr FROM net_worth_snapshots "
+            "WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
+            (sd,),
+        ).fetchone()
+        mom = net_worth - (prev["net_worth_idr"] if prev else 0.0)
+
+        conn.execute(
+            """
+            INSERT INTO net_worth_snapshots
+                (snapshot_date,
+                 savings_idr, checking_idr, money_market_idr, physical_cash_idr,
+                 bonds_idr, stocks_idr, mutual_funds_idr, retirement_idr, crypto_idr,
+                 real_estate_idr, vehicles_idr, gold_idr, other_assets_idr,
+                 total_assets_idr,
+                 mortgages_idr, personal_loans_idr, credit_card_debt_idr,
+                 taxes_owed_idr, other_liabilities_idr, total_liabilities_idr,
+                 net_worth_idr, mom_change_idr, notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(snapshot_date) DO UPDATE SET
+                savings_idr           = excluded.savings_idr,
+                checking_idr          = excluded.checking_idr,
+                money_market_idr      = excluded.money_market_idr,
+                physical_cash_idr     = excluded.physical_cash_idr,
+                bonds_idr             = excluded.bonds_idr,
+                stocks_idr            = excluded.stocks_idr,
+                mutual_funds_idr      = excluded.mutual_funds_idr,
+                retirement_idr        = excluded.retirement_idr,
+                crypto_idr            = excluded.crypto_idr,
+                real_estate_idr       = excluded.real_estate_idr,
+                vehicles_idr          = excluded.vehicles_idr,
+                gold_idr              = excluded.gold_idr,
+                other_assets_idr      = excluded.other_assets_idr,
+                total_assets_idr      = excluded.total_assets_idr,
+                mortgages_idr         = excluded.mortgages_idr,
+                personal_loans_idr    = excluded.personal_loans_idr,
+                credit_card_debt_idr  = excluded.credit_card_debt_idr,
+                taxes_owed_idr        = excluded.taxes_owed_idr,
+                other_liabilities_idr = excluded.other_liabilities_idr,
+                total_liabilities_idr = excluded.total_liabilities_idr,
+                net_worth_idr         = excluded.net_worth_idr,
+                mom_change_idr        = excluded.mom_change_idr,
+                notes                 = excluded.notes
+            """,
+            (sd, sv, chk, mm, cash,
+             bonds, stocks, mf, retire, crypto,
+             realty, veh, gold, other_a, total_assets,
+             mort, loans, cc, tax, other_l, total_liabilities,
+             net_worth, mom, req.notes),
+        )
+        snap = conn.execute(
+            "SELECT * FROM net_worth_snapshots WHERE snapshot_date=?", (sd,)
+        ).fetchone()
+
+    return {"ok": True, "snapshot": _row(snap)}
+
+
+# ── /api/wealth/history ───────────────────────────────────────────────────────
+
+@app.get("/api/wealth/history")
+def get_wealth_history(limit: int = Query(24, ge=1, le=60)):
+    """Net worth snapshots oldest-first for trend chart (latest `limit` entries)."""
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM (
+                SELECT * FROM net_worth_snapshots
+                ORDER BY snapshot_date DESC LIMIT ?
+            ) ORDER BY snapshot_date ASC
+            """,
+            (limit,),
+        ).fetchall()
+    return [_row(r) for r in rows]
+
+
+# ── /api/wealth/summary ───────────────────────────────────────────────────────
+
+@app.get("/api/wealth/summary")
+def get_wealth_summary(
+    snapshot_date: Optional[str] = Query(None),
+    owner:         Optional[str] = Query(None),
+):
+    """
+    Full wealth summary for a given snapshot date (defaults to most recent).
+
+    Returns the snapshot row plus all balances, holdings, and liabilities
+    for that date so the PWA can render the dashboard in a single call.
+    """
+    with _db() as conn:
+        if snapshot_date:
+            snap = conn.execute(
+                "SELECT * FROM net_worth_snapshots WHERE snapshot_date=?",
+                (snapshot_date,),
+            ).fetchone()
+        else:
+            snap = conn.execute(
+                "SELECT * FROM net_worth_snapshots ORDER BY snapshot_date DESC LIMIT 1"
+            ).fetchone()
+
+        sd = snapshot_date or (snap["snapshot_date"] if snap else None)
+
+        owner_cond = ""
+        owner_params: list = []
+        if owner and owner.lower() not in ("all", "both", ""):
+            owner_cond = " AND owner=?"
+            owner_params = [owner]
+
+        if sd:
+            balances = conn.execute(
+                f"SELECT * FROM account_balances WHERE snapshot_date=?{owner_cond} "
+                "ORDER BY institution, account",
+                [sd] + owner_params,
+            ).fetchall()
+            holdings_rows = conn.execute(
+                f"SELECT * FROM holdings WHERE snapshot_date=?{owner_cond} "
+                "ORDER BY asset_group, asset_class, asset_name",
+                [sd] + owner_params,
+            ).fetchall()
+            liab_rows = conn.execute(
+                f"SELECT * FROM liabilities WHERE snapshot_date=?{owner_cond} "
+                "ORDER BY liability_type, liability_name",
+                [sd] + owner_params,
+            ).fetchall()
+        else:
+            balances, holdings_rows, liab_rows = [], [], []
+
+        dates = conn.execute("""
+            SELECT DISTINCT snapshot_date FROM (
+                SELECT snapshot_date FROM net_worth_snapshots
+                UNION
+                SELECT snapshot_date FROM account_balances
+                UNION
+                SELECT snapshot_date FROM holdings
+                UNION
+                SELECT snapshot_date FROM liabilities
+            ) ORDER BY snapshot_date DESC LIMIT 24
+        """).fetchall()
+
+    return {
+        "snapshot":      _row(snap) if snap else None,
+        "snapshot_date": sd,
+        "balances":      [_row(r) for r in balances],
+        "holdings":      [_row(r) for r in holdings_rows],
+        "liabilities":   [_row(r) for r in liab_rows],
+        "dates":         [r[0] for r in dates],
+    }
 
 
 # ── PWA static files (must be last — mounted after all /api/* routes) ─────────

@@ -59,6 +59,11 @@ class AgentState:
             CREATE INDEX IF NOT EXISTS idx_processed_message_id
                 ON processed_messages(message_id);
 
+            CREATE TABLE IF NOT EXISTS command_log (
+                command_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
+
             -- Uniqueness constraint: prevent true duplicates
             -- by Message-ID header (excludes synthetic rowid- IDs)
             CREATE UNIQUE INDEX IF NOT EXISTS

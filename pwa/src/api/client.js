@@ -1,4 +1,7 @@
 const BASE = '/api'
+const API_KEY = import.meta.env.VITE_FINANCE_API_KEY || ''
+
+const AUTH_HEADERS = API_KEY ? { 'X-Api-Key': API_KEY } : {}
 
 async function get(path, params = {}) {
   const url = new URL(BASE + path, location.origin)
@@ -18,9 +21,18 @@ async function get(path, params = {}) {
 async function post(path, body = {}) {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
     body: JSON.stringify(body),
   })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`${res.status}: ${text || res.statusText}`)
+  }
+  return res.json()
+}
+
+async function del(path) {
+  const res = await fetch(BASE + path, { method: 'DELETE', headers: AUTH_HEADERS })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`${res.status}: ${text || res.statusText}`)
@@ -31,7 +43,7 @@ async function post(path, body = {}) {
 async function patch(path, body = {}) {
   const res = await fetch(BASE + path, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -55,4 +67,22 @@ export const api = {
   sync:                ()         => post('/sync'),
   importData:          (body={})  => post('/import', body),
   patchCategory:       (hash, body) => patch(`/transaction/${hash}/category`, body),
+
+  // ── Stage 3: Wealth Management ─────────────────────────────────────────────
+  wealthSummary:       (p = {})   => get('/wealth/summary', p),
+  wealthHistory:       (limit=24) => get('/wealth/history', { limit }),
+  wealthSnapshotDates: ()         => get('/wealth/snapshot/dates'),
+  createSnapshot:      (body)     => post('/wealth/snapshot', body),
+
+  getBalances:         (p = {})   => get('/wealth/balances', p),
+  upsertBalance:       (body)     => post('/wealth/balances', body),
+  deleteBalance:       (id)       => del(`/wealth/balances/${id}`),
+
+  getHoldings:         (p = {})   => get('/wealth/holdings', p),
+  upsertHolding:       (body)     => post('/wealth/holdings', body),
+  deleteHolding:       (id)       => del(`/wealth/holdings/${id}`),
+
+  getLiabilities:      (p = {})   => get('/wealth/liabilities', p),
+  upsertLiability:     (body)     => post('/wealth/liabilities', body),
+  deleteLiability:     (id)       => del(`/wealth/liabilities/${id}`),
 }

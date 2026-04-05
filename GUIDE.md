@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 2.8.1 · Stage 1 complete · Stage 2 fully built · Stage 3 planned
+**Version:** 3.2.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-04-03
+**Last validated against:** checked-in codebase 2026-04-05
 
 ---
 
@@ -46,7 +46,7 @@
 31. [Stage 2 Setup Checklist](#31-stage-2-setup-checklist)
 32. [Stage 2 Operations Reference](#32-stage-2-operations-reference)
 
-### Stage 3 — Wealth Management (planned 🗓️)
+### Stage 3 — Wealth Management (fully built ✅)
 
 33. [Stage 3 Overview & Goals](#33-stage-3-overview--goals)
 34. [Stage 3 Architecture](#34-stage-3-architecture)
@@ -208,7 +208,16 @@ The system alerts on:
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month, reviewCount badge
   - `pwa/src/api/client.js` — thin `fetch` wrapper for all 12 API endpoints
   - `pwa/vite.config.js` — @vitejs/plugin-vue + vite-plugin-pwa (Workbox NetworkFirst cache) + `/api` proxy to `:8090`
-  - Build output: `pwa/dist/` — 346 KB JS (121 KB gzipped), service worker + workbox generated
+  - Build output: `pwa/dist/` — 391 KB JS (132 KB gzipped), service worker + workbox generated
+- Stage 3 Wealth Management backend (`finance/`) — see §33–39
+  - `finance/db.py` — extended with 4 new tables: `account_balances`, `holdings`, `liabilities`, `net_worth_snapshots` (24-column breakdown); 8 new indexes
+  - `finance/api.py` — extended with 13 new `/api/wealth/*` endpoints: balances CRUD, holdings CRUD, liabilities CRUD, snapshot generation, history, summary
+- Stage 3 Vue 3 PWA additions (`pwa/`) — see §37
+  - `pwa/src/views/Wealth.vue` — net worth dashboard: snapshot date chips, hero net-worth card with MoM change, asset-group breakdown bars with sub-category chips, Chart.js 12-month trend, "Refresh Snapshot" button, FAB to Assets
+  - `pwa/src/views/Holdings.vue` — asset manager: group filter tabs (All/Cash/Investments/Real Estate/Physical/Liabilities), snapshot date picker, per-item delete, FAB → bottom-sheet modal with 3-mode entry form (Balance / Holding / Liability), "Save Snapshot" button
+  - `pwa/src/api/client.js` — extended with 13 new wealth API calls + `del()` helper
+  - `pwa/src/router/index.js` — 2 new routes: `/wealth`, `/holdings`
+  - `pwa/src/App.vue` — nav expanded to 6 tabs: Flows · 💰 Wealth · 🗂️ Assets · Txns · Review · More
 
 ### Present but NOT integrated
 
@@ -383,26 +392,28 @@ agentic-ai/
 │   ├── categorizer.py            # 4-layer engine: exact → regex → Ollama → review queue
 │   ├── importer.py               # CLI: ALL_TRANSACTIONS.xlsx → Google Sheets
 │   ├── setup_sheets.py           # One-time: create tabs, headers, seed reference data
-│   ├── db.py                     # SQLite schema + open_db() + WAL mode (finance.db)
+│   ├── db.py                     # SQLite schema + open_db() + WAL mode; 9 tables (5 Stage 2 + 4 Stage 3)
 │   ├── sync.py                   # Sheets → SQLite sync engine + CLI (--status)
-│   ├── api.py                    # FastAPI: 12 REST endpoints + PWA static file mount
+│   ├── api.py                    # FastAPI: 25 REST endpoints (12 Stage 2 + 13 Stage 3) + PWA static file mount
 │   ├── server.py                 # uvicorn entry point (python3 -m finance.server)
 │   ├── Dockerfile                # python:3.12-slim; copies finance/ + pwa/dist/
 │   └── requirements.txt          # google-auth, google-auth-oauthlib, google-api-python-client, rapidfuzz, fastapi, uvicorn
-├── pwa/                          # Stage 2 — Vue 3 PWA (mobile-first finance dashboard)
+├── pwa/                          # Stage 2 + 3 — Vue 3 PWA (mobile-first wealth dashboard)
 │   ├── package.json              # Vue 3, Chart.js, Pinia, vue-router, vite-plugin-pwa
 │   ├── vite.config.js            # Vite + PWA plugin + /api proxy to :8090
 │   ├── index.html
 │   ├── dist/                     # Production build output (gitignored) — served by FastAPI
 │   └── src/
 │       ├── main.js
-│       ├── App.vue               # Shell: top bar + bottom nav + review badge
+│       ├── App.vue               # Shell: top bar + 6-tab bottom nav (Flows/Wealth/Assets/Txns/Review/More)
 │       ├── style.css             # CSS variables, cards, buttons, forms, toast
-│       ├── router/index.js       # 7 routes: /, /transactions, /review, /foreign, /settings, /group-drilldown, /category-drilldown
-│       ├── api/client.js         # fetch wrapper for all 12 /api/* endpoints
+│       ├── router/index.js       # 9 routes: /, /wealth, /holdings, /transactions, /review, /foreign, /settings, /group-drilldown, /category-drilldown
+│       ├── api/client.js         # fetch wrapper for all 25 /api/* endpoints + del() helper
 │       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month, reviewCount
 │       └── views/
 │           ├── Dashboard.vue         # Month nav, summary cards, spending-by-group, Chart.js trend, owner table
+│           ├── Wealth.vue            # Net worth dashboard: date chips, hero card, breakdown bars, trend chart, snapshot button
+│           ├── Holdings.vue          # Asset manager: group tabs, snapshot date, FAB → 3-mode entry form (Balance/Holding/Liability)
 │           ├── GroupDrilldown.vue    # Level 1 drill-down: group → categories (amounts, tx count, mini bars)
 │           ├── CategoryDrilldown.vue # Level 2 drill-down: category → transactions + inline edit + breadcrumb
 │           ├── Transactions.vue      # Filters + paginated list + expandable detail rows
@@ -2038,6 +2049,115 @@ docker compose up -d
 
 ---
 
+### v3.2.0 (2026-04-05)
+
+#### Security & Bug Fixes (audit remediation)
+
+**Critical — confirmed runtime breakages**
+
+- **Fixed: `OperationalError` on all wealth writes** — `finance/db.py` schema was missing `exchange_rate` on both `account_balances` and `holdings`. Every `POST /api/wealth/balances` and `POST /api/wealth/holdings` call (including the PDF pipeline's `_upsert_closing_balance()` and `_upsert_bond_holdings()`) raised `OperationalError: table … has no column named exchange_rate`. Added `exchange_rate REAL DEFAULT 1.0` to both `CREATE TABLE IF NOT EXISTS` statements.
+
+- **Fixed: all PDF bridge endpoints returning 500** — `bridge/server.py` was calling `json.loads(body)` on the return values of every PDF handler (`handle_upload`, `handle_process`, `handle_status`, `handle_jobs`, `handle_attachments`). All handlers already return Python dicts, so `json.loads()` raised `TypeError` before a single response was sent. Removed the wrapping; handlers are now passed directly to `self._json()`.
+
+- **Fixed: XSS via `innerHTML` + bearer token in `localStorage`** — `bridge/static/pdf_ui.html` set `innerHTML` with server-controlled strings in `flash()`, `loadJobs()`, `loadAttachments()`, and `renderFileList()`, allowing a server-injected payload to steal the bridge token. All four functions rewritten to use `createElement` / `textContent` / `replaceChildren`. The `TOKEN` variable and `localStorage.setItem("bridge_token", …)` call removed; the token is now held in a plain `let token` scoped to the script and never written to storage.
+
+- **Added: API key authentication to finance API** — `finance/api.py` now requires an `X-Api-Key` header (HMAC-compared against `FINANCE_API_KEY` env var) on all 11 write endpoints: `POST /api/alias`, `PATCH /api/transaction/{hash}/category`, `POST /api/sync`, `POST /api/import`, and all six `POST`/`DELETE /api/wealth/*` routes. Read endpoints remain unauthenticated. If `FINANCE_API_KEY` is not set the server returns 500 on all protected routes rather than silently accepting any key.
+
+**Warning — broken behaviour and security weaknesses**
+
+- **Fixed: upload size limit bypass** — `/pdf/upload` in `bridge/server.py` read the full multipart body before applying any size check, bypassing the existing `MAX_REQUEST_BODY = 65536` guard used for JSON. Added `MAX_UPLOAD_BODY = 50 MB`; the handler now returns 413 immediately if `Content-Length` exceeds the limit or is absent.
+
+- **Fixed: attachment queue broken + host file paths leaked to browser** — `GET /pdf/attachments` was returning `file_path` (absolute macOS paths) to the browser, and the UI was POSTing them back as `source_path` — a field `handle_process` never read, so queuing always silently failed. Fixed end-to-end: `handle_attachments()` now generates a UUID `attachment_id` per result and stores a server-side `attachment_id → file_path` map; `handle_process()` resolves `attachment_id` on the server; no file path is ever sent to the browser. The scan map is rebuilt on every `GET /pdf/attachments` call so stale IDs expire naturally.
+
+- **Fixed: Google Sheets write failures silently swallowed** — `SheetsClient.append_alias()` and `update_alias_category()` caught `HttpError` and logged it, then returned `None`, causing the finance API to respond 200 while the authoritative sheet was never updated. The next sync could then overwrite the local SQLite edit with stale Sheets data. Both methods now `raise RuntimeError(…) from e`, propagating a 500 to the caller.
+
+- **Fixed: `command_log` table never created** — `AgentState.count_commands_last_hour()` and `record_command_processed()` queried/inserted into `command_log`, but `_init_db()` never created it. Wired in the `CREATE TABLE IF NOT EXISTS command_log` DDL alongside the other agent tables.
+
+**Optimisation**
+
+- **Replaced global shutdown flag with `threading.Event`** — `agent/app/main.py` used a mutable module-level `running = True` bool with `global` declarations in both `main()` and the signal handler. Replaced with `shutdown_event = Event()`; signal handlers call `shutdown_event.set()`; main loop tests `not shutdown_event.is_set()`. Eliminates the fragile global state and is safe for multi-threaded embedding.
+
+#### Configuration
+
+- **`docker-compose.yml`** — added `FINANCE_API_KEY: ${FINANCE_API_KEY}` to the `finance-api` environment block. The variable is read from `.env` at compose startup.
+- **`pwa/src/api/client.js`** — added `AUTH_HEADERS = { 'X-Api-Key': VITE_FINANCE_API_KEY }` (read from `import.meta.env` at build time); spread into `headers` of all `post()`, `patch()`, and `del()` calls.
+- **`.env`** — added `FINANCE_API_KEY=` placeholder alongside the existing API key entries.
+- **`pwa/.env.local`** — created with `VITE_FINANCE_API_KEY=` placeholder and generation instructions. Set this to the same value as `FINANCE_API_KEY` before running `npm run build`.
+
+#### Deployment
+
+```bash
+# Generate a key (run once; store the output)
+python3 -c "import secrets; print(secrets.token_hex(32))"
+
+# Fill in .env  → FINANCE_API_KEY=<key>
+# Fill in pwa/.env.local → VITE_FINANCE_API_KEY=<same key>
+
+cd pwa && npm run build
+cd ..
+docker compose up -d --build finance-api
+```
+
+#### Post-fix: Cleanup
+
+- **Deleted corrupt 2026-04-04 zero snapshot** — During schema migration (April 4), a net_worth_snapshot with all-zero values was created before the `exchange_rate` column fix. This phantom snapshot appeared in the wealth history API and could cause duplicate "April" entries in UI navigation despite correct JS deduplication. Deleted via: `sqlite3 data/finance.db "DELETE FROM net_worth_snapshots WHERE snapshot_date = '2026-04-04' AND net_worth_idr = 0.0;"`. The wealth pages now show a single April 2026 entry (`2026-04-30`) with real data.
+
+---
+
+### v3.1.0 (2026-04-05)
+
+#### Features
+
+- **Added: Automatic IDR conversion for foreign-currency bank accounts** — non-IDR savings accounts (e.g. Permata Tabungan USD) now auto-convert to IDR using a 3-tier priority chain: (1) bank's own "Saldo Rupiah" from the PDF Ringkasan Rekening table, (2) historical FX rate from `fawazahmed0/currency-api`, (3) 0 (signals manual update needed). The implied exchange rate is stored in `account_balances.exchange_rate` and displayed in Holdings.vue as `USD 67,672.74 · 16,779/USD`.
+
+- **Added: `bridge/fx_rate.py`** — fetches historical exchange rates from the free `fawazahmed0/currency-api` (no API key). Primary URL: jsdelivr CDN; fallback: Cloudflare Pages. Module-level cache keyed by `(from, to, date)`. `get_rate_safe()` returns `0.0` on any network error.
+
+- **Added: Permata Bond Investment parser** — `parsers/permata_savings.py` now parses the "Rekening Investasi Obligasi" table from Permata consolidated PDF statements. Extracted fields: product name, currency, face value (quantity), market price, market value, IDR equivalent, unrealised P&L (amount + %), and implied FX rate (`market_value_idr / market_value` for USD bonds). Results are stored in the `holdings` table with `asset_class='bond'` via `bridge/pdf_handler.py:_upsert_bond_holdings()`.
+
+- **Added: `BondHolding` dataclass** (`parsers/base.py`) — 9-field structure: `product_name`, `currency`, `face_value`, `market_price`, `market_value`, `market_value_idr`, `unrealised_pl`, `unrealised_pl_pct`, `statement_fx_rate`. `StatementResult` carries a `bonds: list[BondHolding]` field.
+
+- **Added: `closing_balance_idr` field to `AccountSummary`** — carries the bank's own IDR equivalent through the parsing pipeline so PDF exchange rates take priority over the external API.
+
+- **Added: Government Bonds sub-group in Holdings.vue** — bond positions parsed from Permata PDFs are displayed under a "🏛 Government Bonds" sub-header within the Investments group. Each bond row shows a `.premium` (green) or `.discount` (red) badge with the market price, face value, IDR value, unrealised P&L, and FX rate for USD bonds.
+
+- **Changed: Month navigation on Wealth and Assets pages** — replaced horizontal scrollable chip-bar with `‹ Month Year ›` arrow navigation (matching the Dashboard/Flows page style). Left/right buttons disabled at oldest/newest boundary. Holdings page retains a `+` button in the centre to open an inline `<input type="month">` picker for jumping to any month.
+
+#### Fixed
+
+- **Permata ME Saver iB (account 4123968773) wrongly tagged as USD** — the parser read "Mata Uang: USD" from the PDF header, but the balance amounts (437 M, 563 M IDR) were in Indonesian notation. Fixed by: (1) auto-correction in `_parse_idr_summary()` — if `saldo_idr == closing_balance` the currency is forced to `IDR`; (2) one-time DB correction to `currency='IDR', balance_idr=balance, exchange_rate=1.0`.
+
+- **Bond snapshot dates showing 1st of following month** — Permata's "Tanggal Laporan" (print date) is the statement generation date (1st of the following month), not the period end. Fixed by using `accounts[0].period_end` as the bond snapshot date instead of `print_date`.
+
+#### Changed
+
+- **`bridge/pdf_handler.py`** — `_upsert_closing_balance()` implements the FX priority chain; new `_upsert_bond_holdings()` step wired into `_run_job()` as step 2.6.
+- **`parsers/permata_savings.py`** — imports `BondHolding`; adds `_parse_idr_summary()`, `_SUMMARY_ROW` regex, `_BOND_ROW` regex, `_parse_bond_section()`; wires bond results into `StatementResult`; auto-corrects false-USD currency tags.
+- **`parsers/base.py`** — `AccountSummary` gains `closing_balance_idr: float = 0.0`; `StatementResult` gains `bonds: list[BondHolding] = field(default_factory=list)`.
+- **`finance/api.py`** — `BalanceUpsertRequest` and `HoldingUpsertRequest` carry `exchange_rate: float = 0.0`; both upsert SQLs include the `exchange_rate` column.
+- **`pwa/src/views/Wealth.vue`** — chip-bar replaced with `.month-nav` arrow nav; `currentDateIndex`, `isNewestDate`, `isOldestDate`, `prevMonth()`, `nextMonth()` added to script; scoped chip-bar CSS removed (global `.month-nav` used).
+- **`pwa/src/views/Holdings.vue`** — chip-bar replaced with arrow nav + `+` / inline month picker; `filteredBonds` and `filteredOtherInvestments` computed refs for Government Bonds split; `.sub-header`, `.price-badge.premium`, `.price-badge.discount` styles added; `.asset-fx` span for non-IDR balance display.
+
+---
+
+### v3.0.0 (2026-04-04)
+
+#### Stage 3 — Wealth Management (fully built)
+
+- **Added: `account_balances` SQLite table** — tracks Cash & Liquid assets (savings, checking, money market, physical cash) per snapshot date, institution, owner, and currency. Unique constraint on `(snapshot_date, institution, account, owner)`. Indexed by date and owner.
+- **Added: `holdings` SQLite table** — tracks Investment Portfolio, Real Estate, and Physical Assets. Fields include `asset_class`, `asset_group` (auto-derived), `isin_or_code`, `quantity`, `unit_price`, `market_value_idr`, `cost_basis_idr`, `unrealised_pnl_idr`, `maturity_date`, `coupon_rate`. Unique on `(snapshot_date, asset_class, asset_name, owner)`.
+- **Added: `liabilities` SQLite table** — tracks all debts (mortgage, personal loan, credit card, taxes owed). Unique on `(snapshot_date, liability_type, liability_name, owner)`.
+- **Added: `net_worth_snapshots` SQLite table** — 24-column monthly rollup generated by aggregating the three asset/liability tables. Columns cover every asset sub-class individually plus totals and MoM delta. Generated on demand via `POST /api/wealth/snapshot`.
+- **Added: 13 new `/api/wealth/*` REST endpoints** — full CRUD (GET/POST/DELETE) for balances, holdings, and liabilities; `POST /api/wealth/snapshot` aggregates and upserts the rollup row; `GET /api/wealth/history` returns snapshots oldest-first for chart rendering; `GET /api/wealth/summary` returns the snapshot + all items for a date in a single call.
+- **Added: `Wealth.vue`** — net worth dashboard at `/wealth`. Horizontal snapshot date chip row; hero card (net worth + MoM change with ▲/▼ and %); Total Assets / Total Liabilities summary grid; tappable asset group breakdown rows (bar + %, sub-type chips, navigates to `/holdings?group=…`); liabilities row; Chart.js 12-month trend (values in IDR millions); "Refresh Snapshot" button.
+- **Added: `Holdings.vue`** — asset manager at `/holdings`. Six group filter tabs (All / Cash / Investments / Real Estate / Physical / Liabilities); snapshot date picker; grouped item rows showing name, type, institution, IDR value, owner badge, unrealised P&L (investments), delete button; "Save Snapshot" button with inline feedback; FAB → bottom-sheet modal with 3-tab type selector (Balance / Holding / Liability) and context-aware forms (bond fields: maturity date + coupon rate; liability fields: due date).
+- **Updated: `pwa/src/api/client.js`** — added `del()` HTTP helper and 13 new wealth API methods: `wealthSummary`, `wealthHistory`, `wealthSnapshotDates`, `createSnapshot`, `getBalances`, `upsertBalance`, `deleteBalance`, `getHoldings`, `upsertHolding`, `deleteHolding`, `getLiabilities`, `upsertLiability`, `deleteLiability`.
+- **Updated: `pwa/src/router/index.js`** — 2 new routes: `/wealth` → `Wealth.vue`, `/holdings` → `Holdings.vue`.
+- **Updated: `pwa/src/App.vue`** — bottom nav expanded from 5 to 6 tabs (Flows · 💰 Wealth · 🗂️ Assets · Txns · Review · More); app title changed to "Wealth".
+- **Updated: `finance/db.py`** — schema extended from 5 to 9 tables (4 new Stage 3 tables + 8 new indexes).
+- **Updated: `finance/api.py`** — endpoint count raised from 12 to 25; Stage 3 constants (`_ASSET_CLASS_GROUP`, `_ACCT_TYPE_COL`, `_HOLDING_CLASS_COL`, `_LIAB_TYPE_COL`) map taxonomy values to SQLite column names for snapshot aggregation.
+- **Built & deployed:** `npm run build` in `pwa/` (391 KB JS, 132 KB gzip); `docker compose build finance-api && docker compose up -d --no-deps finance-api` to deploy the new image.
+
+
 ### v2.8.1 (2026-04-03)
 
 #### Fixed
@@ -3463,225 +3583,233 @@ curl -s http://localhost:8090/api/health
 
 ## 33. Stage 3 Overview & Goals
 
-Stage 3 extends the PWA into a **Wealth Management dashboard** showing total net worth across all asset classes: savings accounts, bonds/obligations, stocks, mutual funds, and properties.
+Stage 3 extends the system into a full **Wealth Management dashboard** that tracks net worth across every major asset class and liability type — shifting the system from tracking *Flows* (income/spending) to tracking *Balances* (assets/liabilities).
 
-**Goals:**
+**Implemented asset taxonomy:**
 
-- Track holdings across multiple asset classes and institutions
-- Show total net worth and its composition over time
-- Parse bond/investment holdings from Permata Bank consolidated statements (the same PDFs that Stage 2's `permata_savings.py` already processes — line 376 deliberately skips investment data)
-- Support manual entry for assets that lack machine-readable statements (properties, overseas accounts)
-- Generate monthly net worth snapshots for trend tracking
+| Group | Types | Update method |
+|---|---|---|
+| Cash & Liquid | savings, checking, money_market, physical_cash | Bank statement sync / manual |
+| Investments | bond, stock, mutual_fund, retirement, crypto | Brokerage/bank statement sync / manual |
+| Real Estate | real_estate (primary, investment property, land) | Manual (annual) |
+| Physical Assets | vehicle, gold, other | Manual (annual) |
+| Liabilities | mortgage, personal_loan, credit_card, taxes_owed | CC statement sync / manual |
 
-**Non-goals (for now):**
+**What was built:**
 
-- Real-time stock/fund price feeds (prices are entered manually or at import time)
+- 4 new SQLite tables (`account_balances`, `holdings`, `liabilities`, `net_worth_snapshots`)
+- 13 new REST API endpoints (`/api/wealth/*`)
+- 2 new PWA views (`Wealth.vue`, `Holdings.vue`) + nav expanded to 6 tabs
+- Monthly snapshot generation: aggregates all 3 data tables into a single net-worth row with full class breakdown and MoM delta
+
+**Deferred to a future phase:**
+
+- Real-time price feeds for stocks/crypto
 - Tax reporting or capital gains calculations
-- Multi-currency net worth (all values normalised to IDR at import time)
+- Google Sheets sync for the 3 new wealth tables (holdings, balances, liabilities)
 
 ---
 
 ## 34. Stage 3 Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Google Sheets   │     │  PDF Parsers     │     │  Manual Entry   │
-│  (3 new tabs)    │     │  (portfolio)     │     │  (PWA forms)    │
-└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
+┌──────────────────────────────┐   ┌──────────────────────────────┐
+│  PWA Holdings.vue            │   │  (Future) PDF Parsers         │
+│  Balance / Holding /         │   │  Brokerage / bank reports     │
+│  Liability entry modals      │   │  → auto-populate holdings     │
+└──────────────┬───────────────┘   └───────────────┬──────────────┘
+               │                                   │
+               ▼                                   ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     finance/sync.py (extended)                    │
-│  Reads Holdings, Account Balances, Net Worth Snapshots tabs      │
-│  Writes to 3 new SQLite tables                                   │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
+│                   FastAPI  finance/api.py                         │
+│  POST /api/wealth/balances    → account_balances  (upsert)        │
+│  POST /api/wealth/holdings    → holdings          (upsert)        │
+│  POST /api/wealth/liabilities → liabilities       (upsert)        │
+│  POST /api/wealth/snapshot    → net_worth_snapshots (aggregate)   │
+│  GET  /api/wealth/summary     → all 4 tables in one call          │
+│  GET  /api/wealth/history     → snapshots oldest-first (chart)    │
+└────────────────────────────────────┬─────────────────────────────┘
+                                     │
+                                     ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     SQLite (finance.db)                           │
-│  + holdings · account_balances · net_worth_snapshots              │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
+│                   SQLite  data/finance.db                         │
+│   account_balances   holdings   liabilities   net_worth_snapshots │
+└────────────────────────────────────┬─────────────────────────────┘
+                                     │
+                                     ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     FastAPI (finance/api.py)                      │
-│  + GET/POST holdings · account-balances · net-worth               │
-│  + POST import-portfolio                                          │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     Vue 3 PWA                                     │
-│  + Wealth.vue (net worth dashboard + charts)                      │
-│  + Holdings.vue (holdings list + manual entry forms)              │
+│                   Vue 3 PWA                                       │
+│   /wealth    Wealth.vue   — net worth hero card, breakdown, chart │
+│   /holdings  Holdings.vue — asset list, group tabs, entry modal   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Data flow:** Sheets → sync → SQLite → API → PWA (same pattern as Stage 2).
+**Data flow:** PWA entry form → POST API → SQLite upsert → GET summary → PWA render.
+Manual entry is the primary input method. Automated PDF ingestion (brokerage reports) is planned for a future phase.
 
 ---
 
 ## 35. Stage 3 Data Schemas
 
-### Google Sheets — 3 new tabs
+### SQLite — 4 new tables (added to `finance/db.py`)
 
-#### Holdings tab (18 columns)
+#### `account_balances` — Cash & Liquid assets
 
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| snapshot_date | date | When this holding was recorded (YYYY-MM-DD) |
-| asset_class | text | `bond`, `stock`, `mutual_fund`, `deposit`, `property`, `other` |
-| asset_name | text | e.g. "ORI029T6", "BBCA", "Rumah Menteng" |
-| isin_or_code | text | ISIN for bonds, ticker for stocks, empty for property |
-| institution | text | e.g. "Permata", "BCA Sekuritas" |
-| account | text | Account number or name |
-| owner | text | "Gandrik" or "Helen" |
-| currency | text | Original currency code (IDR, USD, etc.) |
-| quantity | number | Units/lots held (1 for property) |
-| unit_price | number | Price per unit in original currency |
-| market_value | number | quantity × unit_price in original currency |
-| market_value_idr | number | Market value converted to IDR |
-| cost_basis | number | Total purchase cost in original currency |
-| cost_basis_idr | number | Cost basis in IDR |
-| unrealised_pnl_idr | number | market_value_idr − cost_basis_idr |
-| maturity_date | date | For bonds/deposits; empty for stocks/property |
-| coupon_rate | number | For bonds; empty for others |
-| import_date | date | When this row was imported |
+| snapshot_date | TEXT | YYYY-MM-DD |
+| institution | TEXT | e.g. Permata, Maybank, BCA, CIMB Niaga |
+| account | TEXT | Account number or label |
+| account_type | TEXT | `savings` \| `checking` \| `money_market` \| `physical_cash` |
+| asset_group | TEXT | Always `Cash & Liquid` |
+| owner | TEXT | Gandrik or Helen |
+| currency | TEXT | ISO code (default `IDR`) |
+| balance | REAL | In original currency |
+| balance_idr | REAL | In IDR |
+| exchange_rate | REAL | IDR per 1 unit of `currency` (1.0 for IDR accounts) |
+| notes | TEXT | Optional |
+| import_date | TEXT | YYYY-MM-DD |
+| UNIQUE | — | `(snapshot_date, institution, account, owner)` |
 
-#### Account Balances tab (9 columns)
+#### `holdings` — Investments, Real Estate & Physical Assets
 
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| snapshot_date | date | Balance date (YYYY-MM-DD) |
-| institution | text | Bank name |
-| account | text | Account number or name |
-| account_type | text | `savings`, `checking`, `deposit` |
-| owner | text | "Gandrik" or "Helen" |
-| currency | text | Currency code |
-| balance | number | Balance in original currency |
-| balance_idr | number | Balance converted to IDR |
-| import_date | date | When this row was imported |
+| snapshot_date | TEXT | YYYY-MM-DD |
+| asset_class | TEXT | `bond` \| `stock` \| `mutual_fund` \| `retirement` \| `crypto` \| `real_estate` \| `vehicle` \| `gold` \| `other` |
+| asset_group | TEXT | `Investments` \| `Real Estate` \| `Physical Assets` |
+| asset_name | TEXT | e.g. FR0097, BMRI, Rumah Menteng |
+| isin_or_code | TEXT | ISIN or ticker (optional) |
+| institution | TEXT | e.g. Permata Sekuritas |
+| owner | TEXT | |
+| currency | TEXT | |
+| quantity / unit_price / market_value | REAL | Original currency |
+| market_value_idr | REAL | In IDR |
+| exchange_rate | REAL | IDR per 1 unit of `currency` (from bank statement or FX API) |
+| cost_basis / cost_basis_idr | REAL | Purchase cost |
+| unrealised_pnl_idr | REAL | `market_value_idr − cost_basis_idr` |
+| maturity_date | TEXT | YYYY-MM-DD (bonds only) |
+| coupon_rate | REAL | % (bonds only) |
+| notes | TEXT | |
+| UNIQUE | — | `(snapshot_date, asset_class, asset_name, owner)` |
 
-#### Net Worth Snapshots tab (13 columns)
+#### `liabilities` — All debts
 
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| snapshot_date | date | Month-end date (YYYY-MM-DD) |
-| savings_idr | number | Total savings account balances |
-| deposits_idr | number | Total time/fixed deposits |
-| bonds_idr | number | Total bond market values |
-| stocks_idr | number | Total stock market values |
-| mutual_funds_idr | number | Total mutual fund values |
-| properties_idr | number | Total property values |
-| other_idr | number | Other assets |
-| total_assets_idr | number | Sum of all above |
-| total_liabilities_idr | number | Credit card balances, loans, etc. |
-| net_worth_idr | number | total_assets − total_liabilities |
-| mom_change_idr | number | Month-over-month net worth change |
-| notes | text | Optional notes |
+| snapshot_date | TEXT | YYYY-MM-DD |
+| liability_type | TEXT | `mortgage` \| `personal_loan` \| `credit_card` \| `taxes_owed` \| `other` |
+| liability_name | TEXT | e.g. BCA Credit Card, KPR Mandiri |
+| institution | TEXT | |
+| owner | TEXT | |
+| balance / balance_idr | REAL | Outstanding amount |
+| due_date | TEXT | YYYY-MM-DD (optional) |
+| notes | TEXT | |
+| UNIQUE | — | `(snapshot_date, liability_type, liability_name, owner)` |
 
-### SQLite — 3 new tables
+#### `net_worth_snapshots` — Monthly rollups (24 columns)
 
-```sql
-CREATE TABLE IF NOT EXISTS holdings (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_date   TEXT    NOT NULL,
-    asset_class     TEXT    NOT NULL,
-    asset_name      TEXT    NOT NULL,
-    isin_or_code    TEXT    DEFAULT '',
-    institution     TEXT    DEFAULT '',
-    account         TEXT    DEFAULT '',
-    owner           TEXT    DEFAULT '',
-    currency        TEXT    DEFAULT 'IDR',
-    quantity        REAL    DEFAULT 0,
-    unit_price      REAL    DEFAULT 0,
-    market_value    REAL    DEFAULT 0,
-    market_value_idr REAL   DEFAULT 0,
-    cost_basis      REAL    DEFAULT 0,
-    cost_basis_idr  REAL    DEFAULT 0,
-    unrealised_pnl_idr REAL DEFAULT 0,
-    maturity_date   TEXT    DEFAULT '',
-    coupon_rate     REAL    DEFAULT 0,
-    import_date     TEXT    DEFAULT '',
-    UNIQUE(snapshot_date, asset_class, asset_name, owner)
-);
-CREATE INDEX IF NOT EXISTS idx_holdings_date ON holdings(snapshot_date);
-CREATE INDEX IF NOT EXISTS idx_holdings_class ON holdings(asset_class);
+Generated by `POST /api/wealth/snapshot`. One row per snapshot date.
 
-CREATE TABLE IF NOT EXISTS account_balances (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_date   TEXT    NOT NULL,
-    institution     TEXT    NOT NULL,
-    account         TEXT    NOT NULL,
-    account_type    TEXT    DEFAULT 'savings',
-    owner           TEXT    DEFAULT '',
-    currency        TEXT    DEFAULT 'IDR',
-    balance         REAL    DEFAULT 0,
-    balance_idr     REAL    DEFAULT 0,
-    import_date     TEXT    DEFAULT '',
-    UNIQUE(snapshot_date, institution, account, owner)
-);
-CREATE INDEX IF NOT EXISTS idx_balances_date ON account_balances(snapshot_date);
-
-CREATE TABLE IF NOT EXISTS net_worth_snapshots (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_date        TEXT    NOT NULL UNIQUE,
-    savings_idr          REAL    DEFAULT 0,
-    deposits_idr         REAL    DEFAULT 0,
-    bonds_idr            REAL    DEFAULT 0,
-    stocks_idr           REAL    DEFAULT 0,
-    mutual_funds_idr     REAL    DEFAULT 0,
-    properties_idr       REAL    DEFAULT 0,
-    other_idr            REAL    DEFAULT 0,
-    total_assets_idr     REAL    DEFAULT 0,
-    total_liabilities_idr REAL   DEFAULT 0,
-    net_worth_idr        REAL    DEFAULT 0,
-    mom_change_idr       REAL    DEFAULT 0,
-    notes                TEXT    DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_nw_date ON net_worth_snapshots(snapshot_date);
-```
+| Column group | Columns |
+|---|---|
+| Cash & Liquid | `savings_idr`, `checking_idr`, `money_market_idr`, `physical_cash_idr` |
+| Investments | `bonds_idr`, `stocks_idr`, `mutual_funds_idr`, `retirement_idr`, `crypto_idr` |
+| Real Estate | `real_estate_idr` |
+| Physical Assets | `vehicles_idr`, `gold_idr`, `other_assets_idr` |
+| Totals | `total_assets_idr` |
+| Liabilities | `mortgages_idr`, `personal_loans_idr`, `credit_card_debt_idr`, `taxes_owed_idr`, `other_liabilities_idr`, `total_liabilities_idr` |
+| Net Worth | `net_worth_idr`, `mom_change_idr`, `notes` |
 
 ---
 
 ## 36. Stage 3 API Endpoints
 
+All endpoints are under `/api/wealth/` and follow Stage 2 conventions (JSON, SQLite-backed, upsert-on-conflict).
+
+### Account Balances (Cash & Liquid)
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/holdings` | List holdings. Params: `snapshot_date`, `asset_class`, `owner`, `institution` |
-| `POST` | `/api/holdings` | Add/update a single holding (upserts by unique key) |
-| `GET` | `/api/holdings/summary` | Aggregated totals by asset class for a given snapshot date |
-| `GET` | `/api/account-balances` | List account balances. Params: `snapshot_date`, `owner` |
-| `POST` | `/api/account-balances` | Add/update a single account balance |
-| `GET` | `/api/net-worth` | Net worth snapshots over time. Params: `from_date`, `to_date` |
-| `POST` | `/api/net-worth/snapshot` | Generate a net worth snapshot for a given date (aggregates from holdings + balances) |
-| `POST` | `/api/import-portfolio` | Import holdings from a parsed Permata portfolio PDF |
+| `GET` | `/api/wealth/balances` | List balances. Params: `snapshot_date`, `account_type`, `owner` |
+| `POST` | `/api/wealth/balances` | Upsert a balance entry |
+| `DELETE` | `/api/wealth/balances/{id}` | Delete by row ID |
 
-All endpoints follow the existing Stage 2 patterns: JSON request/response, standard error responses, SQLite-backed.
+### Holdings (Investments, Real Estate, Physical Assets)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/wealth/holdings` | List holdings. Params: `snapshot_date`, `asset_class`, `asset_group`, `owner` |
+| `POST` | `/api/wealth/holdings` | Upsert a holding (`asset_group` auto-derived from `asset_class`) |
+| `DELETE` | `/api/wealth/holdings/{id}` | Delete by row ID |
+
+### Liabilities
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/wealth/liabilities` | List liabilities. Params: `snapshot_date`, `liability_type`, `owner` |
+| `POST` | `/api/wealth/liabilities` | Upsert a liability |
+| `DELETE` | `/api/wealth/liabilities/{id}` | Delete by row ID |
+
+### Net Worth Snapshots
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/wealth/snapshot/dates` | Available snapshot dates, newest first |
+| `POST` | `/api/wealth/snapshot` | Aggregate all 3 tables for `snapshot_date` → upsert `net_worth_snapshots` row |
+| `GET` | `/api/wealth/history` | Snapshots oldest-first (for trend chart). Param: `limit` (default 24) |
+| `GET` | `/api/wealth/summary` | Full snapshot + all items for a date in one call. Params: `snapshot_date`, `owner` |
+
+### `asset_class` → `asset_group` mapping (auto-applied on POST)
+
+| `asset_class` values | `asset_group` |
+|---|---|
+| `savings`, `checking`, `money_market`, `physical_cash` | `Cash & Liquid` |
+| `bond`, `stock`, `mutual_fund`, `retirement`, `crypto` | `Investments` |
+| `real_estate` | `Real Estate` |
+| `vehicle`, `gold`, `other` | `Physical Assets` |
 
 ---
 
 ## 37. Stage 3 PWA Views
 
-### Wealth.vue — Net Worth Dashboard
+### `Wealth.vue` — Net Worth Dashboard (`/wealth`)
 
-- **Top cards:** Total Net Worth (IDR), Month-over-Month change (absolute + percentage), Total Assets vs Total Liabilities
-- **Composition donut chart:** Breakdown by asset class (savings, bonds, stocks, properties, etc.) with percentages
-- **Trend line chart:** Net worth over the last 12 months
-- **Asset class breakdown table:** Each class with current value, percentage of total, and MoM change
-- **By-owner split:** Side-by-side net worth for each owner
+- **Month navigation** — `‹ Month Year ›` arrow buttons (same style as Dashboard/Flows). Left arrow disabled when on the oldest snapshot; right arrow disabled when on the newest.
+- **Hero card** — large Net Worth figure on dark gradient; MoM change with ▲/▼ indicator + percentage
+- **Assets / Liabilities cards** — side-by-side summary grid
+- **Asset group breakdown** — tappable rows per group (Cash & Liquid, Investments, Real Estate, Physical Assets) with bar, % of total, and sub-type chips; tapping navigates to `/holdings?group=…`
+- **Liabilities row** — shown when liabilities > 0; sub-chips list mortgage/CC/loans/taxes
+- **12-month trend chart** — Chart.js line chart of net worth in IDR millions, oldest-to-newest
+- **Refresh Snapshot button** — calls `POST /api/wealth/snapshot` for the selected date and reloads
+- **FAB (+)** — links to `/holdings` to add data
 
-### Holdings.vue — Holdings List & Entry
+### `Holdings.vue` — Asset Manager (`/holdings`)
 
-- **Filter bar:** Asset class, owner, institution, snapshot date
-- **Holdings table:** Sortable columns — asset name, class, institution, market value IDR, unrealised P&L, maturity date
-- **Expanded detail panel** (same pattern as Transactions.vue): Full holding details including cost basis, coupon rate, ISIN
-- **Manual entry form:** Add/edit holdings for assets without PDF import (properties, overseas accounts, manual stock positions)
-- **Import button:** Upload Permata consolidated PDF to auto-extract bond/investment holdings
+- **Month navigation** — `‹ Month Year ›` arrow buttons. Centre area also shows a `+` button to open an inline `<input type="month">` for jumping directly to any month.
+- **Group filter tabs** — All · 🏦 Cash · 📈 Investments · 🏠 Real Estate · 🚗 Physical · 🔴 Liabilities
+- **Per-section item rows** — institution/name, sub-label (type · institution · maturity), IDR value, owner badge, ✕ delete button
+- **Non-IDR balance display** — USD (and other foreign currency) accounts show original amount + implied FX rate (e.g. `USD 67,672.74 · 16,779/USD`) beneath the IDR balance
+- **Government Bonds sub-group** — inside Investments, bonds parsed from Permata PDF are listed under a "🏛 Government Bonds" sub-header. Each row shows a green `.premium` or red `.discount` badge with the market price (e.g. `104.734` above par / `96.651` below par).
+- **Unrealised P&L** — shown on investment rows (green/red)
+- **Save Snapshot button** — calls `POST /api/wealth/snapshot` and shows success/error message inline
+- **FAB (+)** — opens bottom-sheet modal with 3-tab type selector:
+  - **Balance tab** — institution, account, account type (savings/checking/money market/physical cash), owner, balance IDR, notes
+  - **Holding tab** — asset class dropdown (grouped by Investments/Real Estate/Physical Assets), name, ticker/ISIN, institution, owner, market value IDR, quantity, unit price, cost basis; bond-specific: maturity date + coupon rate
+  - **Liability tab** — type (mortgage/personal loan/credit card/taxes owed/other), name, institution, owner, balance IDR, due date, notes
 
-### Navigation update
+### Navigation
 
-- Add "💰 Wealth" tab to the bottom navigation bar (between Dashboard and Transactions, or as a new 4th tab)
+Bottom nav expanded from 5 to **6 tabs**:
+
+| Tab | Icon | Route |
+|---|---|---|
+| Flows | 📊 | `/` (Dashboard — spending/income) |
+| Wealth | 💰 | `/wealth` (net worth dashboard) |
+| Assets | 🗂️ | `/holdings` (asset manager) |
+| Txns | 🧾 | `/transactions` |
+| Review | 🔎 | `/review` |
+| More | ⚙︎ | `/settings` |
 
 ---
 
@@ -3690,60 +3818,63 @@ All endpoints follow the existing Stage 2 patterns: JSON request/response, stand
 ```
 Monthly wealth management cycle (1st–5th of each month):
 
-1. Download bank statements (PDFs) as usual for Stage 2
-   └── Permata consolidated statement includes both savings AND investment data
+1. Run Stage 2 workflow as usual (PDF → XLS → import → sync)
 
-2. Run Stage 2 import (transactions)
-   └── python3 -m finance.importer  →  python3 -m finance.sync
+2. Open PWA → Assets tab → set snapshot date to month-end (e.g. 2026-03-31)
 
-3. Import portfolio holdings from Permata statement
-   └── POST /api/import-portfolio  (or CLI: python3 -m finance.portfolio)
-   └── Parser extracts bond holdings (name, face value, market value, coupon, maturity)
-   └── Writes to Holdings tab in Sheets + syncs to SQLite
+3. Update Cash & Liquid balances
+   └── Add/edit Balance entries for each bank account
+   └── Sources: bank statement closing balances, physical cash count
 
-4. Update manual holdings (if needed)
-   └── PWA → Holdings → add/edit property values, overseas accounts, stock positions
+4. Update Investment holdings
+   └── Add/edit Holding entries for bonds, stocks, mutual funds
+   └── Sources: brokerage monthly report, bank statement (e-Rekening)
+   └── Bond-specific: enter maturity date and coupon rate
 
-5. Update account balances
-   └── Auto-extracted from bank statement parsers (savings balances)
-   └── Manual entry for accounts without PDF statements
+5. Update Tangible Assets (if changed since last month)
+   └── Real estate: annual revaluation (update market_value_idr)
+   └── Vehicles: annual depreciation update
+   └── Gold: current spot price × quantity
 
-6. Generate net worth snapshot
-   └── POST /api/net-worth/snapshot?date=2026-03-31
-   └── Aggregates all holdings + account balances by asset class
-   └── Writes one row to Net Worth Snapshots tab
+6. Update Liabilities
+   └── Credit card: outstanding balance from CC statement
+   └── Taxes owed: estimated current liability
 
-7. Review dashboard
-   └── PWA → Wealth → see total net worth, composition, trends
+7. Tap "Save Snapshot for YYYY-MM-DD"
+   └── POST /api/wealth/snapshot aggregates all entries into net_worth_snapshots
+   └── Success message shows saved net worth figure
+
+8. Switch to Wealth tab → review net worth, composition, and MoM trend
 ```
 
 ---
 
 ## 39. Stage 3 Setup Checklist
 
-- [ ] Create 3 new Google Sheets tabs (Holdings, Account Balances, Net Worth Snapshots) with headers
-- [ ] Add tab names to `config/settings.toml` under `[google_sheets]`
-- [ ] Add tab fields to `SheetsConfig` dataclass in `finance/config.py`
-- [ ] Add Sheets read/write methods to `finance/sheets.py`
-- [ ] Create SQLite tables in `finance/sync.py` (or a migration script)
-- [ ] Build `finance/parsers/permata_portfolio.py` — extract bond holdings from Permata consolidated PDF
-- [ ] Extend `finance/sync.py` to sync holdings, account balances, and net worth snapshots
-- [ ] Add ~8 new API endpoints to `finance/api.py`
-- [ ] Build `Wealth.vue` — net worth dashboard with composition donut + trend line
-- [ ] Build `Holdings.vue` — holdings list with filters, detail panel, manual entry form
-- [ ] Add Wealth tab to PWA navigation
-- [ ] Test end-to-end: PDF → parser → Sheets → sync → API → PWA
-- [ ] Update GUIDE.md with implementation details and bump version
+### Completed ✅
 
-### Implementation phases
+- [x] 4 new SQLite tables in `finance/db.py` (`account_balances`, `holdings`, `liabilities`, `net_worth_snapshots`)
+- [x] 13 new API endpoints in `finance/api.py` (full CRUD for all 3 asset tables + snapshot generation + history + summary)
+- [x] `pwa/src/views/Wealth.vue` — net worth dashboard with `‹ Month Year ›` arrow navigation, hero card, asset breakdown, Chart.js trend, snapshot button
+- [x] `pwa/src/views/Holdings.vue` — asset manager with arrow navigation, group tabs, non-IDR FX display, Government Bonds sub-group, per-item delete, FAB → 3-mode modal form
+- [x] `pwa/src/api/client.js` — 13 new wealth API calls + `del()` helper
+- [x] `pwa/src/router/index.js` — `/wealth` and `/holdings` routes
+- [x] `pwa/src/App.vue` — 6-tab bottom nav; app title changed to "Wealth"
+- [x] `bridge/fx_rate.py` — automatic historical FX rate fetching via `fawazahmed0/currency-api` (jsdelivr CDN primary, Cloudflare Pages fallback); module-level cache; returns 0.0 on failure
+- [x] `bridge/pdf_handler.py` — FX priority chain (bank PDF rate → FX API → 0); `_upsert_bond_holdings()` maps bond fields to `holdings` table using `period_end` as snapshot date
+- [x] `parsers/permata_savings.py` — `BondHolding` dataclass; `_parse_idr_summary()` reads Saldo Rupiah from Ringkasan Rekening table; `_parse_bond_section()` parses Rekening Investasi Obligasi; auto-corrects false-USD currency tags; `StatementResult` carries `bonds` list
+- [x] `finance/api.py` — `BalanceUpsertRequest` and `HoldingUpsertRequest` carry `exchange_rate` field; INSERT/UPDATE SQL includes the column
+- [x] `account_balances` schema — `exchange_rate REAL DEFAULT 0` column added via `ALTER TABLE`
+- [x] `holdings` schema — `exchange_rate REAL DEFAULT 0` column added via `ALTER TABLE`
+- [x] PWA rebuilt (`npm run build`) and Docker container rebuilt + restarted
 
-| Phase | Scope | Depends on |
-|---|---|---|
-| **Phase 1: Backend foundation** | SQLite tables, Sheets tabs, config, sync | — |
-| **Phase 2: Permata portfolio parser** | `parsers/permata_portfolio.py`, Sheets writer | Phase 1 |
-| **Phase 3: API endpoints** | ~8 new endpoints, upsert logic | Phase 1 |
-| **Phase 4: PWA views** | Wealth.vue, Holdings.vue, navigation | Phase 3 |
-| **Phase 5: Workflow & polish** | Monthly snapshot generation, import CLI, docs | Phase 2 + 4 |
+### Deferred to future phase
+
+- [ ] Google Sheets sync for the 3 new wealth tables (Holdings, Account Balances, Liabilities tabs)
+- [ ] `finance/config.py` — add `SheetsConfig` fields for the 3 new Sheets tabs
+- [ ] `finance/sync.py` — extend to sync holdings, balances, liabilities from Sheets → SQLite
+- [ ] Real-time price feeds (stocks, crypto) or scheduled price update CLI
+- [ ] Multi-owner net worth split (currently shown per-item via `owner` field; aggregated snapshot is household total)
 
 
-*Guide last updated 2026-03-29 · v2.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 planned*
+*Guide last updated 2026-04-04 · v3.0.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*

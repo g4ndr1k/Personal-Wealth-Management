@@ -29,6 +29,7 @@ SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.toml"
 DATA_DB = PROJECT_ROOT / "data" / "bridge.db"
 LOG_FILE = PROJECT_ROOT / "logs" / "bridge.log"
 MAX_REQUEST_BODY = 65536
+MAX_UPLOAD_BODY  = 50 * 1024 * 1024   # 50 MB — generous for PDF statements
 
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
@@ -76,6 +77,7 @@ class AppContext:
             "attachment_seen_db":       cfg["pdf"]["attachment_seen_db"],
             "attachment_lookback_days": cfg["pdf"]["attachment_lookback_days"],
             "owner_mappings":           dict(cfg["owners"]) if "owners" in cfg else {},
+            "finance_sqlite_db":        cfg.get("finance", {}).get("sqlite_db", ""),
         }
         init_pdf_handler(pdf_config, cfg["pdf"]["jobs_db"])
 
@@ -211,8 +213,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if path.startswith("/pdf/status/"):
                 job_id = path.split("/pdf/status/")[1]
-                status, body = handle_status(job_id)
-                self._json(status, json.loads(body))
+                status, payload = handle_status(job_id)
+                self._json(status, payload)
                 return
 
             if path.startswith("/pdf/download/"):
@@ -226,18 +228,18 @@ class Handler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(data)
                     return
-                self._json(status, json.loads(data))
+                self._json(status, {"error": data.decode()})
                 return
 
             if path == "/pdf/jobs":
                 limit = int(params.get("limit", ["50"])[0])
-                status, body = handle_jobs(limit)
-                self._json(status, json.loads(body))
+                status, payload = handle_jobs(limit)
+                self._json(status, payload)
                 return
 
             if path == "/pdf/attachments":
-                status, body = handle_attachments()
-                self._json(status, json.loads(body))
+                status, payload = handle_attachments()
+                self._json(status, payload)
                 return
 
             if path == "/pdf/ui":
@@ -266,10 +268,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/pdf/upload":
                 length = int(self.headers.get("Content-Length", "0"))
-                request_body = self.rfile.read(length) if length > 0 else b""
+                if length <= 0 or length > MAX_UPLOAD_BODY:
+                    self._json(413, {"error": "Upload too large or missing Content-Length"})
+                    return
+                request_body = self.rfile.read(length)
                 content_type = self.headers.get("Content-Type", "")
-                status, body = handle_upload(request_body, content_type)
-                self._json(status, json.loads(body))
+                status, payload = handle_upload(request_body, content_type)
+                self._json(status, payload)
                 return
 
             data = self._read_json()
@@ -277,8 +282,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/pdf/process":
-                status, body = handle_process(data)
-                self._json(status, json.loads(body))
+                status, payload = handle_process(data)
+                self._json(status, payload)
                 return
 
             if path == "/mail/ack":

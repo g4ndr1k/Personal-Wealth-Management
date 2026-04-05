@@ -2,6 +2,7 @@ import time
 import signal
 import logging
 from datetime import datetime, timezone
+from threading import Event
 
 from app.config import load_settings
 from app.bridge_client import BridgeClient
@@ -17,16 +18,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agent")
 
-running = True
-
 
 def main():
-    global running
+    shutdown_event = Event()
 
     def shutdown(signum, frame):
-        global running
         logger.info("Signal %s, shutting down", signum)
-        running = False
+        shutdown_event.set()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
@@ -95,7 +93,7 @@ def main():
         "Main loop (mail %ds, commands %ds)",
         poll_mail, poll_cmd)
 
-    while running:
+    while not shutdown_event.is_set():
         now = time.time()
         try:
             if (now - last_mail >= poll_mail

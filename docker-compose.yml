@@ -14,6 +14,7 @@ services:
       GOOGLE_CREDENTIALS_FILE:  /app/secrets/google_credentials.json
       GOOGLE_TOKEN_FILE:        /app/secrets/google_token.json
       ANTHROPIC_API_KEY:        ${ANTHROPIC_API_KEY:-}
+      FINANCE_API_KEY:          ${FINANCE_API_KEY}
       OLLAMA_FINANCE_HOST:      http://host.docker.internal:11434
     volumes:
       - ./config/settings.toml:/app/config/settings.toml:ro

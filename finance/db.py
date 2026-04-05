@@ -88,6 +88,106 @@ CREATE TABLE IF NOT EXISTS sync_log (
     duration_s          REAL,
     notes               TEXT    DEFAULT ''
 );
+
+-- ── Stage 3: Wealth Management ───────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS account_balances (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date   TEXT    NOT NULL,
+    institution     TEXT    NOT NULL,
+    account         TEXT    NOT NULL,
+    account_type    TEXT    DEFAULT 'savings',
+    asset_group     TEXT    DEFAULT 'Cash & Liquid',
+    owner           TEXT    DEFAULT '',
+    currency        TEXT    DEFAULT 'IDR',
+    balance         REAL    DEFAULT 0,
+    balance_idr     REAL    DEFAULT 0,
+    exchange_rate   REAL    DEFAULT 1.0,
+    notes           TEXT    DEFAULT '',
+    import_date     TEXT    DEFAULT '',
+    UNIQUE(snapshot_date, institution, account, owner)
+);
+CREATE INDEX IF NOT EXISTS idx_balances_date  ON account_balances(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_balances_owner ON account_balances(owner);
+
+CREATE TABLE IF NOT EXISTS holdings (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date        TEXT    NOT NULL,
+    asset_class          TEXT    NOT NULL,
+    asset_group          TEXT    DEFAULT 'Investments',
+    asset_name           TEXT    NOT NULL,
+    isin_or_code         TEXT    DEFAULT '',
+    institution          TEXT    DEFAULT '',
+    account              TEXT    DEFAULT '',
+    owner                TEXT    DEFAULT '',
+    currency             TEXT    DEFAULT 'IDR',
+    quantity             REAL    DEFAULT 0,
+    unit_price           REAL    DEFAULT 0,
+    market_value         REAL    DEFAULT 0,
+    market_value_idr     REAL    DEFAULT 0,
+    cost_basis           REAL    DEFAULT 0,
+    cost_basis_idr       REAL    DEFAULT 0,
+    unrealised_pnl_idr   REAL    DEFAULT 0,
+    exchange_rate        REAL    DEFAULT 1.0,
+    maturity_date        TEXT    DEFAULT '',
+    coupon_rate          REAL    DEFAULT 0,
+    last_appraised_date  TEXT    DEFAULT '',
+    notes                TEXT    DEFAULT '',
+    import_date          TEXT    DEFAULT '',
+    UNIQUE(snapshot_date, asset_class, asset_name, owner)
+);
+CREATE INDEX IF NOT EXISTS idx_holdings_date  ON holdings(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_holdings_class ON holdings(asset_class);
+CREATE INDEX IF NOT EXISTS idx_holdings_group ON holdings(asset_group);
+CREATE INDEX IF NOT EXISTS idx_holdings_owner ON holdings(owner);
+
+CREATE TABLE IF NOT EXISTS liabilities (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date        TEXT    NOT NULL,
+    liability_type       TEXT    NOT NULL,
+    liability_name       TEXT    NOT NULL,
+    institution          TEXT    DEFAULT '',
+    account              TEXT    DEFAULT '',
+    owner                TEXT    DEFAULT '',
+    currency             TEXT    DEFAULT 'IDR',
+    balance              REAL    DEFAULT 0,
+    balance_idr          REAL    DEFAULT 0,
+    due_date             TEXT    DEFAULT '',
+    notes                TEXT    DEFAULT '',
+    import_date          TEXT    DEFAULT '',
+    UNIQUE(snapshot_date, liability_type, liability_name, owner)
+);
+CREATE INDEX IF NOT EXISTS idx_liabilities_date  ON liabilities(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_liabilities_owner ON liabilities(owner);
+
+CREATE TABLE IF NOT EXISTS net_worth_snapshots (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date           TEXT    NOT NULL UNIQUE,
+    savings_idr             REAL    DEFAULT 0,
+    checking_idr            REAL    DEFAULT 0,
+    money_market_idr        REAL    DEFAULT 0,
+    physical_cash_idr       REAL    DEFAULT 0,
+    bonds_idr               REAL    DEFAULT 0,
+    stocks_idr              REAL    DEFAULT 0,
+    mutual_funds_idr        REAL    DEFAULT 0,
+    retirement_idr          REAL    DEFAULT 0,
+    crypto_idr              REAL    DEFAULT 0,
+    real_estate_idr         REAL    DEFAULT 0,
+    vehicles_idr            REAL    DEFAULT 0,
+    gold_idr                REAL    DEFAULT 0,
+    other_assets_idr        REAL    DEFAULT 0,
+    total_assets_idr        REAL    DEFAULT 0,
+    mortgages_idr           REAL    DEFAULT 0,
+    personal_loans_idr      REAL    DEFAULT 0,
+    credit_card_debt_idr    REAL    DEFAULT 0,
+    taxes_owed_idr          REAL    DEFAULT 0,
+    other_liabilities_idr   REAL    DEFAULT 0,
+    total_liabilities_idr   REAL    DEFAULT 0,
+    net_worth_idr           REAL    DEFAULT 0,
+    mom_change_idr          REAL    DEFAULT 0,
+    notes                   TEXT    DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_nw_date ON net_worth_snapshots(snapshot_date);
 """
 
 

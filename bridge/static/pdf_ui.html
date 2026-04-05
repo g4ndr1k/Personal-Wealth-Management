@@ -197,15 +197,14 @@
 const API = "";  // same origin — bridge serves this page
 
 // ── Auth token ───────────────────────────────────────────────────────────────
-// Token is read from a meta tag injected by the bridge, or from localStorage
-let TOKEN = document.querySelector('meta[name="bridge-token"]')?.content || localStorage.getItem("bridge_token") || "";
-if (!TOKEN) {
-  TOKEN = prompt("Enter bridge token:") || "";
-  if (TOKEN) localStorage.setItem("bridge_token", TOKEN);
+// Token is read from a meta tag injected by the bridge; never persisted to storage.
+let token = document.querySelector('meta[name="bridge-token"]')?.content || "";
+if (!token) {
+  token = prompt("Enter bridge token:") || "";
 }
 
 async function api(method, path, body, isFile) {
-  const headers = { "Authorization": `Bearer ${TOKEN}` };
+  const headers = { "Authorization": `Bearer ${token}` };
   if (!isFile && body) headers["Content-Type"] = "application/json";
   const opts = { method, headers };
   if (body) opts.body = isFile ? body : JSON.stringify(body);
@@ -221,8 +220,11 @@ async function api(method, path, body, isFile) {
 // ── Flash messages ────────────────────────────────────────────────────────────
 function flash(msg, type="info") {
   const div = document.getElementById("flash");
-  div.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
-  setTimeout(() => div.innerHTML = "", 5000);
+  const alert = document.createElement("div");
+  alert.className = `alert alert-${type}`;
+  alert.textContent = msg;
+  div.replaceChildren(alert);
+  setTimeout(() => div.replaceChildren(), 5000);
 }
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
@@ -262,22 +264,38 @@ function addFile(file) {
 function renderFileList() {
   const el = document.getElementById("file-list");
   const actions = document.getElementById("upload-actions");
-  if (pendingFiles.length === 0) { el.innerHTML = ""; actions.style.display = "none"; return; }
+  if (pendingFiles.length === 0) { el.replaceChildren(); actions.style.display = "none"; return; }
   actions.style.display = "block";
-  el.innerHTML = pendingFiles.map((pf, i) => `
-    <div class="file-item">
-      <span class="file-icon">📄</span>
-      <div class="file-info">
-        <div class="file-name">${pf.file.name}</div>
-        <div class="file-meta">${(pf.file.size/1024).toFixed(1)} KB</div>
-      </div>
-      <input type="password" class="file-pw" placeholder="PDF password (if needed)"
-             value="${pf.password}"
-             oninput="pendingFiles[${i}].password = this.value"
-             onkeydown="if(event.key==='Enter') document.getElementById('process-btn').click()">
-      <button class="remove-btn" onclick="pendingFiles.splice(${i},1); renderFileList()">✕</button>
-    </div>
-  `).join("");
+  const items = pendingFiles.map((pf, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "file-item";
+    const icon = document.createElement("span");
+    icon.className = "file-icon";
+    icon.textContent = "📄";
+    const info = document.createElement("div");
+    info.className = "file-info";
+    const nameDiv = document.createElement("div");
+    nameDiv.className = "file-name";
+    nameDiv.textContent = pf.file.name;
+    const metaDiv = document.createElement("div");
+    metaDiv.className = "file-meta";
+    metaDiv.textContent = `${(pf.file.size/1024).toFixed(1)} KB`;
+    info.append(nameDiv, metaDiv);
+    const pw = document.createElement("input");
+    pw.type = "password";
+    pw.className = "file-pw";
+    pw.placeholder = "PDF password (if needed)";
+    pw.value = pf.password;
+    pw.addEventListener("input", () => { pendingFiles[i].password = pw.value; });
+    pw.addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("process-btn").click(); });
+    const rm = document.createElement("button");
+    rm.className = "remove-btn";
+    rm.textContent = "✕";
+    rm.onclick = () => { pendingFiles.splice(i, 1); renderFileList(); };
+    wrap.append(icon, info, pw, rm);
+    return wrap;
+  });
+  el.replaceChildren(...items);
 }
 
 function clearFiles() {
@@ -345,34 +363,53 @@ async function pollJob(jobId, onStatus) {
 
 // ── Jobs list ─────────────────────────────────────────────────────────────────
 async function loadJobs() {
-  document.getElementById("jobs-container").innerHTML = '<div class="empty-state">Loading…</div>';
-  const res = await api("GET", "/pdf/jobs");
   const el = document.getElementById("jobs-container");
-  if (res.error || !res.jobs) { el.innerHTML = `<div class="alert alert-error">${res.error||"Failed"}</div>`; return; }
-  if (res.jobs.length === 0) { el.innerHTML = '<div class="empty-state">No jobs yet. Upload a PDF to get started.</div>'; return; }
+  setEmptyState(el, "Loading…");
+  const res = await api("GET", "/pdf/jobs");
+  if (res.error || !res.jobs) { setErrorState(el, res.error || "Failed"); return; }
+  if (res.jobs.length === 0) { setEmptyState(el, "No jobs yet. Upload a PDF to get started."); return; }
 
-  el.innerHTML = `
-    <table class="jobs-table">
-      <thead><tr>
-        <th>File</th><th>Bank</th><th>Type</th><th>Period</th>
-        <th>Status</th><th>Created</th><th></th>
-      </tr></thead>
-      <tbody>${res.jobs.map(j => `
-        <tr>
-          <td title="${j.filename}">${truncate(j.filename, 28)}</td>
-          <td>${j.bank}</td>
-          <td>${j.stmt_type}</td>
-          <td>${j.period || "—"}</td>
-          <td><span class="badge badge-${j.status}">${j.status}</span>
-              ${j.error ? `<br><small style="color:var(--error)">${truncate(j.error,40)}</small>` : ""}
-          </td>
-          <td style="white-space:nowrap;color:var(--muted);font-size:12px">${j.created_at.slice(0,16).replace("T"," ")}</td>
-          <td>
-            ${j.status === "done" ? `<button class="btn btn-secondary btn-sm" onclick="downloadJob('${j.job_id}','${j.filename}')">⬇ XLS</button>` : ""}
-          </td>
-        </tr>
-      `).join("")}</tbody>
-    </table>`;
+  const table = document.createElement("table");
+  table.className = "jobs-table";
+  const thead = table.createTHead();
+  const hr = thead.insertRow();
+  ["File","Bank","Type","Period","Status","Created",""].forEach(h => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  const tbody = table.createTBody();
+  res.jobs.forEach(j => {
+    const tr = tbody.insertRow();
+    const tdFile = tr.insertCell(); tdFile.title = j.filename; tdFile.textContent = truncate(j.filename, 28);
+    const tdBank = tr.insertCell(); tdBank.textContent = j.bank;
+    const tdType = tr.insertCell(); tdType.textContent = j.stmt_type;
+    const tdPeriod = tr.insertCell(); tdPeriod.textContent = j.period || "—";
+    const tdStatus = tr.insertCell();
+    const badge = document.createElement("span");
+    badge.className = `badge badge-${j.status}`;
+    badge.textContent = j.status;
+    tdStatus.appendChild(badge);
+    if (j.error) {
+      tdStatus.appendChild(document.createElement("br"));
+      const small = document.createElement("small");
+      small.style.color = "var(--error)";
+      small.textContent = truncate(j.error, 40);
+      tdStatus.appendChild(small);
+    }
+    const tdDate = tr.insertCell();
+    tdDate.style.cssText = "white-space:nowrap;color:var(--muted);font-size:12px";
+    tdDate.textContent = j.created_at.slice(0,16).replace("T"," ");
+    const tdAction = tr.insertCell();
+    if (j.status === "done") {
+      const btn = document.createElement("button");
+      btn.className = "btn btn-secondary btn-sm";
+      btn.textContent = "⬇ XLS";
+      btn.onclick = () => downloadJob(j.job_id, j.filename);
+      tdAction.appendChild(btn);
+    }
+  });
+  el.replaceChildren(table);
 }
 
 async function downloadJob(jobId, origName) {
@@ -387,43 +424,65 @@ async function downloadJob(jobId, origName) {
 
 // ── Attachments ───────────────────────────────────────────────────────────────
 async function loadAttachments() {
-  document.getElementById("attachments-container").innerHTML = '<div class="empty-state">Scanning…</div>';
-  const res = await api("GET", "/pdf/attachments");
   const el = document.getElementById("attachments-container");
-  if (res.error) { el.innerHTML = `<div class="alert alert-error">${res.error}</div>`; return; }
+  setEmptyState(el, "Scanning…");
+  const res = await api("GET", "/pdf/attachments");
+  if (res.error) { setErrorState(el, res.error); return; }
   if (!res.attachments || res.attachments.length === 0) {
-    el.innerHTML = '<div class="empty-state">No new bank PDFs found in Mail.app attachments.</div>'; return;
+    setEmptyState(el, "No new bank PDFs found in Mail.app attachments."); return;
   }
-  el.innerHTML = res.attachments.map(a => `
-    <div class="attach-item">
-      <span style="font-size:20px">📎</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${a.filename}</div>
-        <div style="font-size:12px;color:var(--muted)">${a.bank} · ${a.received || "unknown date"} · ${a.size_kb} KB</div>
-      </div>
-      <input type="password" id="pw-${btoa(a.file_path).slice(0,10)}"
-             placeholder="Password" style="width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
-      <button class="btn btn-secondary btn-sm"
-              onclick="queueAttachment('${escHtml(a.file_path)}', '${btoa(a.file_path).slice(0,10)}')">
-        Queue
-      </button>
-    </div>
-  `).join("");
+  const items = res.attachments.map(a => {
+    const wrap = document.createElement("div");
+    wrap.className = "attach-item";
+    const icon = document.createElement("span");
+    icon.style.fontSize = "20px";
+    icon.textContent = "📎";
+    const info = document.createElement("div");
+    info.style.cssText = "flex:1;min-width:0";
+    const name = document.createElement("div");
+    name.style.cssText = "font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+    name.textContent = a.filename;
+    const meta = document.createElement("div");
+    meta.style.cssText = "font-size:12px;color:var(--muted)";
+    meta.textContent = `${a.bank} · ${a.received || "unknown date"} · ${a.size_kb} KB`;
+    info.append(name, meta);
+    const pw = document.createElement("input");
+    pw.type = "password";
+    pw.placeholder = "Password";
+    pw.style.cssText = "width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px";
+    const btn = document.createElement("button");
+    btn.className = "btn btn-secondary btn-sm";
+    btn.textContent = "Queue";
+    btn.onclick = () => queueAttachment(a.attachment_id, pw.value);
+    wrap.append(icon, info, pw, btn);
+    return wrap;
+  });
+  el.replaceChildren(...items);
 }
 
-async function queueAttachment(filePath, pwId) {
-  const password = document.getElementById(`pw-${pwId}`)?.value || "";
-  const fd = new FormData();
-  // Read file from disk path via the bridge
-  const res = await api("POST", "/pdf/process", { source_path: filePath, password });
+async function queueAttachment(attachmentId, password) {
+  const res = await api("POST", "/pdf/process", { attachment_id: attachmentId, password });
   if (res.error) { flash(`Error: ${res.error}`, "error"); return; }
-  flash(`Queued: ${res.job_id}. <a href="#" onclick="switchTab('jobs');return false">View Jobs →</a>`, "success");
+  flash(`Queued: ${res.job_id}. Switch to Jobs tab to track progress.`, "success");
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const truncate = (s, n) => s && s.length > n ? s.slice(0, n) + "…" : (s || "");
-const escHtml = s => s.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+function setEmptyState(el, msg) {
+  const d = document.createElement("div");
+  d.className = "empty-state";
+  d.textContent = msg;
+  el.replaceChildren(d);
+}
+
+function setErrorState(el, msg) {
+  const d = document.createElement("div");
+  d.className = "alert alert-error";
+  d.textContent = msg;
+  el.replaceChildren(d);
+}
 
 // Load jobs on first visit to jobs tab
 window.addEventListener("load", () => {

@@ -47,6 +47,11 @@ OVERRIDES_HEADERS = ["hash", "category", "notes", "updated_at"]
 PDF_IMPORT_LOG_HEADERS = [
     "month", "label", "expected", "actual", "status", "files", "last_processed",
 ]
+HOLDINGS_HEADERS = [
+    "snapshot_date", "asset_class", "asset_group", "asset_name", "institution",
+    "owner", "currency", "market_value_idr", "cost_basis_idr",
+    "unrealised_pnl_idr", "last_appraised_date", "notes", "import_date",
+]
 
 
 class SheetsClient:
@@ -305,7 +310,7 @@ class SheetsClient:
                   owner_filter, account_filter]],
             )
         except HttpError as e:
-            log.error("Failed to append alias (%s → %s): %s", alias, merchant, e)
+            raise RuntimeError(f"Sheets alias write failed: {e}") from e
 
     def update_alias_category(self, alias: str, new_category: str):
         """Update the category column for an existing alias row (matched by alias column B)."""
@@ -324,7 +329,7 @@ class SheetsClient:
                     return
             log.warning("Alias not found for update: %s", alias[:40])
         except HttpError as e:
-            log.error("Failed to update alias category (%s): %s", alias[:40], e)
+            raise RuntimeError(f"Sheets alias category update failed: {e}") from e
 
     def write_pdf_import_log(self, rows: list[list]):
         """Rewrite all data rows in the PDF Import Log tab.
@@ -349,6 +354,57 @@ class SheetsClient:
                 log.info("PDF Import Log: wrote %d rows.", len(rows))
             except HttpError as e:
                 log.error("Failed to write PDF Import Log: %s", e)
+                raise
+
+    def write_holdings(self, rows: list[list]):
+        """Rewrite all data rows in the Holdings tab.
+
+        Clears existing data rows (keeping row 1 header) then writes the new rows.
+        Creates the tab with headers if it doesn't exist.  Safe to call repeatedly.
+        """
+        tab  = self.cfg.holdings_tab
+        qtab = f"'{tab}'"
+
+        # Ensure tab exists
+        try:
+            meta = self.service.spreadsheets().get(
+                spreadsheetId=self.cfg.spreadsheet_id,
+                fields="sheets.properties.title",
+            ).execute()
+            existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
+            if tab not in existing:
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=self.cfg.spreadsheet_id,
+                    body={"requests": [{"addSheet": {"properties": {"title": tab}}}]},
+                ).execute()
+                log.info("Created Holdings tab: %s", tab)
+        except HttpError as e:
+            log.warning("Could not check/create Holdings tab: %s", e)
+
+        # Write header row if empty
+        try:
+            hdr = self._get(f"{qtab}!A1:M1")
+            if not hdr or not hdr[0]:
+                self._update(f"{qtab}!A1:M1", [HOLDINGS_HEADERS])
+        except HttpError as e:
+            log.warning("Could not write Holdings headers: %s", e)
+
+        # Clear existing data rows
+        try:
+            self.service.spreadsheets().values().clear(
+                spreadsheetId=self.cfg.spreadsheet_id,
+                range=f"{qtab}!A2:M",
+                body={},
+            ).execute()
+        except HttpError as e:
+            log.warning("Could not clear Holdings rows: %s", e)
+
+        if rows:
+            try:
+                self._append(f"{qtab}!A:M", rows)
+                log.info("Holdings tab: wrote %d rows.", len(rows))
+            except HttpError as e:
+                log.error("Failed to write Holdings tab: %s", e)
                 raise
 
     def log_import(
