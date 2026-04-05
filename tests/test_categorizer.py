@@ -74,8 +74,8 @@ class CategorizerTests(unittest.TestCase):
         matched = match_internal_transfers([debit, credit])
 
         self.assertEqual(matched, 2)
-        self.assertEqual(debit.category, "Internal Transfer")
-        self.assertEqual(credit.category, "Internal Transfer")
+        self.assertEqual(debit.category, "Transfer")
+        self.assertEqual(credit.category, "Transfer")
 
     def test_same_amount_pair_is_not_forced_when_description_is_not_transfer_like(self):
         debit = DummyTxn(

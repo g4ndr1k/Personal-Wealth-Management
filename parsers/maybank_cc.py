@@ -25,8 +25,12 @@ Parsing strategy:
   Layer 3 (Ollama): Rows where regex couldn't extract a valid amount
 """
 import re
-import pdfplumber
 from typing import Optional
+
+try:
+    import pdfplumber
+except ModuleNotFoundError:  # pragma: no cover - optional for helper-only tests
+    pdfplumber = None
 from .base import (
     StatementResult, AccountSummary, Transaction,
     parse_idr_amount, parse_date_ddmmyyyy
@@ -67,6 +71,9 @@ def can_parse(text_page1: str) -> bool:
 
 
 def parse(pdf_path: str, ollama_client=None) -> StatementResult:
+    if pdfplumber is None:
+        raise RuntimeError("pdfplumber is required to parse Maybank credit-card PDFs")
+
     errors = []
     customer_name = ""
     period_start = period_end = report_date = ""
