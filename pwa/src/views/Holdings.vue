@@ -67,7 +67,6 @@
               {{ b.currency }} {{ fmtForeign(b.balance, b.currency) }}
               <template v-if="b.exchange_rate > 0"> · {{ fmtRate(b.exchange_rate) }}/{{ b.currency }}</template>
             </span>
-            <span v-if="b.owner" class="asset-owner">{{ b.owner }}</span>
           </div>
           <button class="asset-del" @click.stop="deleteItem('balance', b.id)" title="Delete">✕</button>
         </div>
@@ -117,7 +116,6 @@
                 style="font-size:12px">
                 {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
               </span>
-              <span v-if="h.owner" class="asset-owner">{{ h.owner }}</span>
             </div>
             <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
           </div>
@@ -147,7 +145,6 @@
               <span v-if="h.unrealised_pnl_idr !== 0" :class="h.unrealised_pnl_idr >= 0 ? 'text-income' : 'text-expense'" style="font-size:12px">
                 {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
               </span>
-              <span v-if="h.owner" class="asset-owner">{{ h.owner }}</span>
             </div>
             <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
           </div>
@@ -177,7 +174,6 @@
           </div>
           <div class="asset-right">
             <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
-            <span v-if="h.owner" class="asset-owner">{{ h.owner }}</span>
           </div>
           <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
         </div>
@@ -201,7 +197,6 @@
           </div>
           <div class="asset-right">
             <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
-            <span v-if="h.owner" class="asset-owner">{{ h.owner }}</span>
           </div>
           <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
         </div>
@@ -229,7 +224,6 @@
           </div>
           <div class="asset-right">
             <span class="asset-value text-expense">{{ fmt(l.balance_idr) }}</span>
-            <span v-if="l.owner" class="asset-owner">{{ l.owner }}</span>
           </div>
           <button class="asset-del" @click.stop="deleteItem('liability', l.id)" title="Delete">✕</button>
         </div>
