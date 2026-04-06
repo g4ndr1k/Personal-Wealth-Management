@@ -883,8 +883,6 @@ onMounted(async () => {
 .asset-right  { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0; }
 .asset-value  { font-size: 14px; font-weight: 700; color: var(--text); }
 .asset-fx     { font-size: 11px; color: var(--neutral); font-variant-numeric: tabular-nums; }
-.asset-owner  { font-size: 11px; color: var(--neutral); background: var(--bg); border-radius: 8px; padding: 1px 6px; }
-
 /* Bond sub-group ─────────────────────────────────────────────────────────── */
 .sub-header {
   display: flex; justify-content: space-between; align-items: center;

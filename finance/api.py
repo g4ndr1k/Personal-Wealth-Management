@@ -28,12 +28,12 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Optional
 
 import hmac
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -80,6 +80,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_no_store_for_api(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -164,7 +173,7 @@ def health():
         "transaction_count": tx_count,
         "needs_review":      needs_rev,
         "last_sync":         sync_row["synced_at"] if sync_row else None,
-        "timestamp":         datetime.now().isoformat(),
+        "timestamp":         datetime.now(timezone.utc).isoformat(),
     }
 
 

@@ -105,7 +105,7 @@ def get_ollama_finance_config(cfg: dict) -> OllamaFinanceConfig:
         # OLLAMA_FINANCE_HOST lets Docker containers point to host.docker.internal
         # while the settings.toml default (localhost) is used for host-side runs.
         host=os.environ.get("OLLAMA_FINANCE_HOST") or s.get("host", "http://localhost:11434"),
-        model=os.environ.get("OLLAMA_FINANCE_MODEL") or s.get("model", "qwen2.5:7b"),
+        model=os.environ.get("OLLAMA_FINANCE_MODEL") or s.get("model", "gemma4:e4b"),
         timeout_seconds=s.get("timeout_seconds", 60),
     )
 

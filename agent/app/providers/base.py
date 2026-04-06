@@ -8,3 +8,7 @@ class Provider(ABC):
     @abstractmethod
     def classify(self, message: dict) -> Classification:
         raise NotImplementedError
+
+    def close(self) -> None:
+        """Release any provider resources."""
+        return None

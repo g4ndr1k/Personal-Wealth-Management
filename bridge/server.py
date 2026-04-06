@@ -76,6 +76,11 @@ class AppContext:
             "bank_passwords_file":      cfg["pdf"]["bank_passwords_file"],
             "attachment_seen_db":       cfg["pdf"]["attachment_seen_db"],
             "attachment_lookback_days": cfg["pdf"]["attachment_lookback_days"],
+            "verify_enabled":           cfg["pdf"].get("verify_enabled", True),
+            "verify_mode":              cfg["pdf"].get("verify_mode", "warn"),
+            "verify_ollama_host":       cfg["pdf"].get("verify_ollama_host", "http://localhost:11434"),
+            "verify_timeout_seconds":   cfg["pdf"].get("verify_timeout_seconds", 120),
+            "verify_model":             cfg["pdf"].get("verify_model", cfg["pdf"].get("parser_llm_model", "gemma4:e4b")),
             "owner_mappings":           dict(cfg["owners"]) if "owners" in cfg else {},
             "finance_sqlite_db":        cfg.get("finance", {}).get("sqlite_db", ""),
         }
@@ -240,17 +245,6 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/pdf/attachments":
                 status, payload = handle_attachments()
                 self._json(status, payload)
-                return
-
-            if path == "/pdf/ui":
-                ui_path = os.path.join(os.path.dirname(__file__), "static", "pdf_ui.html")
-                with open(ui_path, "rb") as f:
-                    html = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(html)))
-                self.end_headers()
-                self.wfile.write(html)
                 return
 
             self._json(404, {"error": "Not found"})

@@ -141,6 +141,13 @@ class Classifier:
             provider=f"fallback_error:{last_error}",
         )
 
+    def close(self) -> None:
+        for provider in self.providers:
+            try:
+                provider.close()
+            except Exception as e:
+                logger.warning("Provider close failed for %s: %s", provider.name, e)
+
     def _domain_not_allowed(self, message: dict) -> bool:
         """Return True if the sender's domain is NOT in the allowlist.
 

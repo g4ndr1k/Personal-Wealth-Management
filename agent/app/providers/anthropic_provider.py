@@ -108,3 +108,6 @@ Body: {content}""".strip()
             requires_action=requires_action,
             provider=f"anthropic/{self.model}",
         )
+
+    def close(self) -> None:
+        self.http.close()

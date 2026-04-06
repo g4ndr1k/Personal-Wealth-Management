@@ -228,7 +228,7 @@ The system alerts on:
 
 ### Known gaps vs. config
 
-- `max_commands_per_hour` exists in `settings.toml` but the orchestrator does not enforce a rolling-hour command limit.
+- `max_commands_per_hour` in `settings.toml` is enforced by the agent command handler using the `command_log` rolling-hour count.
 
 ---
 
@@ -289,7 +289,7 @@ Verify:
 
 ```bash
 OLLAMA_HOST=0.0.0.0 ollama serve &   # or start via LaunchAgent (see §15)
-ollama pull llama3.2:3b
+ollama pull gemma4:e4b
 ollama list                            # confirm model present
 ```
 
@@ -510,7 +510,7 @@ If you skip this, Ollama is the only active provider. Set `cloud_fallback_enable
 # Start Ollama (expose to 0.0.0.0 so Docker can reach it)
 OLLAMA_HOST=0.0.0.0 ollama serve &
 sleep 3
-ollama pull llama3.2:3b
+ollama pull gemma4:e4b
 ```
 
 ### Step 6 — Grant Full Disk Access to Python
@@ -626,7 +626,7 @@ File: `config/settings.toml`
 | `authorized_senders` | — | **Required.** List of handles allowed to send commands |
 | `command_prefix` | `"agent:"` | Prefix that identifies iMessage commands |
 | `max_alerts_per_hour` | `60` | Rate limit for outgoing alerts |
-| `max_commands_per_hour` | `60` | Config exists; not currently enforced by code |
+| `max_commands_per_hour` | `60` | Rolling-hour rate limit for processed iMessage commands |
 | `startup_notifications` | `true` | Send iMessage on agent startup |
 | `shutdown_notifications` | `false` | Send iMessage on agent shutdown |
 | `allow_same_account_commands` | `true` | Accept commands from yourself |
@@ -644,7 +644,7 @@ File: `config/settings.toml`
 | Key | Default | Description |
 |---|---|---|
 | `host` | `"http://host.docker.internal:11434"` | Ollama address from inside Docker |
-| `model_primary` | `"llama3.2:3b"` | Ollama model name |
+| `model_primary` | `"gemma4:e4b"` | Ollama model name |
 | `timeout_seconds` | `60` | Request timeout |
 
 ### `[anthropic]`
@@ -687,7 +687,12 @@ alert_on_categories = [
 | `jobs_db` | `"data/pdf_jobs.db"` | Processing job queue |
 | `attachment_seen_db` | `"data/seen_attachments.db"` | Tracks scanned Mail attachments |
 | `attachment_lookback_days` | `60` | How far back to scan Mail attachments |
-| `parser_llm_model` | `"llama3.2:3b"` | Ollama model for Layer 3 parsing fallback |
+| `parser_llm_model` | `"gemma4:e4b"` | Ollama model for Layer 3 parsing fallback |
+| `verify_enabled` | `true` | Enable post-parse verification before WM/XLS writes |
+| `verify_mode` | `"warn"` | `warn` = log only, `block` = fail the job when verifier recommends blocking |
+| `verify_ollama_host` | `"http://localhost:11434"` | Ollama host used by the PDF verifier |
+| `verify_timeout_seconds` | `120` | Timeout for the PDF verifier Ollama call |
+| `verify_model` | `"gemma4:e4b"` | Ollama model used for parsed-PDF verification |
 
 ### `[owners]`
 
@@ -1642,7 +1647,34 @@ Each bank parser applies three layers in order:
 
 1. **pdfplumber tables** — extracts structured table data directly from PDF geometry. Handles all header blocks, asset summaries, and properly-formatted transaction tables.
 2. **Python regex** — applied to raw text for rows where pdfplumber merges cells (common in CC statement transaction lists). Handles multi-currency rows, merged currency codes (e.g. `COUSD`, `KOTID`), and credit indicators (`CR` suffix).
-3. **Ollama LLM fallback** (`llama3.2:3b`) — invoked only for individual rows that both Layer 1 and Layer 2 fail to parse. Returns structured JSON with injection defense in the prompt.
+3. **Ollama LLM fallback** (`gemma4:e4b`) — invoked only for individual rows that both Layer 1 and Layer 2 fail to parse. Returns structured JSON with injection defense in the prompt.
+
+### Post-parse verification
+
+After a parser returns `StatementResult`, the bridge runs a lightweight verification step before any Wealth Management side effects or XLS export:
+
+1. **Deterministic checks** — transaction count, period/date plausibility, tx-type validity, FX-field consistency, running-balance plausibility, and account-summary reconciliation where available.
+2. **Gemma verification** (`verify_model`, default `gemma4:e4b`) — receives:
+   - structured parser output (`StatementResult`)
+   - deterministic check results
+   - a compact raw-text excerpt from the first PDF pages
+
+The verifier returns structured JSON with `status`, `recommended_action`, `summary`, and `issues`.
+
+- In `verify_mode = "warn"` (default), verification never blocks writes; it only adds log lines such as `Verifier:` and `Verifier issue:`.
+- In `verify_mode = "block"`, the job fails only when the verifier explicitly recommends `block`.
+
+Recommended rollout: keep `warn` mode enabled until the verifier has been calibrated on a representative set of statements.
+
+### PDF upload reuse behavior
+
+`POST /pdf/upload` always stages the uploaded PDF into `pdf_inbox_dir` first.
+
+- If no file with that name exists, the upload is written normally.
+- If a file with the same name already exists **and its bytes are identical**, the bridge reuses the existing file and does **not** create a new copy.
+- If a file with the same name exists but the content differs, the bridge preserves both by appending a timestamp suffix to the new upload.
+
+This avoids duplicate timestamped PDFs when the same file is retried after a verifier timeout or other non-upload-related failure.
 
 ### PDF unlocking
 
@@ -1890,7 +1922,7 @@ chmod 600 ~/agentic-ai/secrets/banks.toml
 | Body text coverage | Some emails expose only summary/snippet text via Mail DB joins |
 | Single recipient | Bridge sends alerts to one `primary_recipient` only |
 | OpenAI / Gemini | Provider files exist but raise `NotImplementedError` — not active |
-| Command rate limit | `max_commands_per_hour` in config is not enforced by current orchestrator code |
+| Command rate limit | Enforced in `CommandHandler`; counts successful command processing events over the last rolling hour |
 | TCC / launch context | Bridge must run under launchd with FDA; does not inherit Terminal TCC grants |
 | System Python | macOS system Python 3.9 lacks `tomllib` and cannot run the bridge; use Homebrew `python@3.13` only |
 | Attachments (mail) | `attachments` field in mail items always returns an empty array — not implemented in mail agent |
@@ -2087,6 +2119,63 @@ docker compose up -d
 
 ---
 
+### v3.2.2 (2026-04-07)
+
+#### PDF Verification
+
+- **Added: post-parse PDF verification layer** — `bridge/pdf_verify.py` now runs after `detect_and_parse()` and before any WM side effects or XLS export. It combines deterministic checks (date-range, tx-type, FX-field, running-balance, and summary-reconciliation checks) with a structured Ollama review using `gemma4:e4b`.
+
+- **Added: warn/block verifier modes** — new `[pdf]` config keys control verifier behavior:
+  - `verify_enabled = true`
+  - `verify_mode = "warn"` by default
+  - `verify_ollama_host = "http://localhost:11434"`
+  - `verify_timeout_seconds = 120`
+  - `verify_model = "gemma4:e4b"`
+
+- **Changed: verifier now defaults to Gemma 4 E4B** — the local Ollama defaults for the mail agent, PDF parser fallback, finance categorizer, and PDF verifier now point to `gemma4:e4b`.
+
+#### PDF Upload Behavior
+
+- **Changed: duplicate PDF uploads now reuse identical files** — `POST /pdf/upload` no longer creates a timestamp-suffixed copy when the uploaded bytes are identical to an existing file in `pdf_inbox_dir`. A new copy is only created when the filename matches but the content differs.
+
+- **Changed: verifier timeout increased** — `verify_timeout_seconds` default raised from 45 → 120 seconds to better accommodate `gemma4:e4b` on larger statements.
+
+---
+
+### v3.2.1 (2026-04-06)
+
+#### Security & Hardening
+
+- **Fixed: tracked finance API key placeholders reset** — local `.env` and `pwa/.env.local` now ship with empty `FINANCE_API_KEY=` / `VITE_FINANCE_API_KEY=` placeholders instead of a populated sample value. If you previously used the old shared key, rotate it before redeploying.
+
+- **Fixed: command rate limit now enforced** — `agent/app/commands.py` now checks `max_commands_per_hour` before processing commands and records each processed command in `command_log`.
+
+- **Fixed: bridge token file permissions validated** — `bridge/auth.py` now refuses to start if the bridge token file grants any group/other permissions. Use `chmod 600 /path/to/bridge.token`.
+
+- **Fixed: PDF attachment map made thread-safe** — `bridge/pdf_handler.py` now protects the short-lived `attachment_id -> file_path` map with a lock so concurrent `/pdf/attachments` scans and `/pdf/process` requests cannot race on shared mutable state.
+
+- **Fixed: PDF downloads constrained to configured output directory** — `handle_download()` now resolves the job's `output_path` and rejects any file outside `pdf.xls_output_dir`.
+
+- **Fixed: authenticated API responses marked non-cacheable** — `finance/api.py` now adds `Cache-Control: no-store, no-cache, must-revalidate` and `Pragma: no-cache` to all `/api/*` responses so the PWA service worker and intermediaries do not cache sensitive finance data.
+
+- **Fixed: provider HTTP clients closed on shutdown** — `Classifier.close()` now closes the Ollama / Anthropic `httpx.Client` instances during agent shutdown.
+
+- **Changed: finance and PDF job timestamps now use timezone-aware UTC** — `finance/api.py`, `finance/sync.py`, and `bridge/pdf_handler.py` now emit ISO 8601 UTC timestamps instead of naive local/UTC datetimes.
+
+- **Changed: internal transfer pairs moved to config** — `finance.categorizer.match_internal_transfers()` now reads account-pair mappings from `[finance.internal_transfers]` in `config/settings.toml` instead of the old hardcoded `INTERNAL_ACCOUNT_PAIRS` constant.
+
+#### Configuration
+
+- **`config/settings.toml`** — added `[finance.internal_transfers]` with `pairs = [[["OwnerA","AccountA"],["OwnerB","AccountB"]], ...]` for cross-account transfer matching.
+
+#### Maintenance
+
+- **Removed: duplicate dead `/pdf/ui` route** — `bridge/server.py` no longer contains the second unreachable `/pdf/ui` branch after auth.
+
+- **Removed: runtime `sys.path.insert(...)` hacks from PDF handlers** — `bridge/pdf_handler.py` now relies on the project-root path setup performed once at bridge startup.
+
+---
+
 ### v3.2.0 (2026-04-05)
 
 #### Security & Bug Fixes (audit remediation)
@@ -2120,7 +2209,7 @@ docker compose up -d
 - **`docker-compose.yml`** — added `FINANCE_API_KEY: ${FINANCE_API_KEY}` to the `finance-api` environment block. The variable is read from `.env` at compose startup.
 - **`pwa/src/api/client.js`** — added `AUTH_HEADERS = { 'X-Api-Key': VITE_FINANCE_API_KEY }` (read from `import.meta.env` at build time); spread into `headers` of all `post()`, `patch()`, and `del()` calls.
 - **`.env`** — added `FINANCE_API_KEY=` placeholder alongside the existing API key entries.
-- **`pwa/.env.local`** — created with `VITE_FINANCE_API_KEY=` placeholder and generation instructions. Set this to the same value as `FINANCE_API_KEY` before running `npm run build`.
+- **`pwa/.env.local`** — created with `VITE_FINANCE_API_KEY=` placeholder and generation instructions. Keep this file local-only and set it to the same value as `FINANCE_API_KEY` before running `npm run build`.
 
 #### Deployment
 
@@ -2129,7 +2218,7 @@ docker compose up -d
 python3 -c "import secrets; print(secrets.token_hex(32))"
 
 # Fill in .env  → FINANCE_API_KEY=<key>
-# Fill in pwa/.env.local → VITE_FINANCE_API_KEY=<same key>
+# Fill in pwa/.env.local locally only → VITE_FINANCE_API_KEY=<same key>
 
 cd pwa && npm run build
 cd ..
@@ -2716,13 +2805,13 @@ The system manages two account holders: **Gandrik** (Emanuel) and **Helen** (Dia
 | Stage 1 XLSX input | `output/xls/ALL_TRANSACTIONS.xlsx` | Mac Mini |
 | Import module | Python + openpyxl → Sheets API v4 | Mac Mini |
 | Categorization engine | Python — alias + regex + Ollama + review queue | Mac Mini |
-| AI categorization (Layer 3) | Ollama `llama3.2:3b` — existing instance | Mac Mini |
+| AI categorization (Layer 3) | Ollama `gemma4:e4b` — existing instance | Mac Mini |
 | Source of truth | Google Sheets, personal account | Google Cloud (free) |
 | Read cache | SQLite `data/finance.db` | Mac Mini |
 | Sync engine | Python — hash-compare, upsert | Mac Mini |
 | Backend API | FastAPI — new `finance-api` Docker service | Mac Mini |
 | Frontend | TypeScript — Vue 3 + Vite PWA | Served by FastAPI |
-| AI narrative | Ollama `llama3.2:3b` — same instance | Mac Mini |
+| AI narrative | Ollama `gemma4:e4b` — same instance | Mac Mini |
 | Reverse proxy + SSL | Synology built-in nginx + Let's Encrypt | Synology NAS |
 | Backups | `finance.db` rsync + Sheets export | Synology NAS (scheduled) |
 
@@ -2874,8 +2963,8 @@ port         = 8090           # distinct from bridge :9100 and agent health :808
 cors_origins = ["http://localhost:5173"]
 
 [ollama_finance]
-host            = "http://host.docker.internal:11434"
-model           = "llama3.2:3b"
+host            = "http://localhost:11434"
+model           = "gemma4:e4b"
 timeout_seconds = 60
 ```
 
@@ -3108,7 +3197,7 @@ CREATE TABLE IF NOT EXISTS sync_log (
       ▼ Layer 2: regex match (match_type = "regex", with filters)
    Match? ──Yes──▶ auto-categorize → write to Sheet
       │ No
-      ▼ Layer 3: Ollama llama3.2:3b suggestion
+      ▼ Layer 3: Ollama gemma4:e4b suggestion
    Response? ──Yes──▶ pre-fill review queue (merchant + category)
       │ No / unavailable
       ▼ Layer 3b: Anthropic Claude fallback (when Ollama unavailable)
@@ -3153,7 +3242,7 @@ After individual transaction categorization, `match_internal_transfers()` runs t
 2. Only pair rows whose `raw_description` still looks transfer-like (e.g. `TRSF E-BANKING`, `TRF INCOMING`, `TRF BIFAST`, `TRF KE`, `PB DARI`, `PB KE`, `BI-FAST`). This avoids reclassifying unrelated same-day/same-amount rows.
 3. Both sides are re-categorised as **`Transfer`**.
 
-**Configured account pairs** (in `categorizer.py::INTERNAL_ACCOUNT_PAIRS`):
+**Configured account pairs** (in `config/settings.toml` under `[finance.internal_transfers]`):
 - Gandrik BCA (2171138631) ↔ Helen BCA (5500346622) — monthly household allowance
 - Helen Permata (4123968773) ↔ Helen BCA (2684118322) — savings ↔ spending
 - Helen Permata (4123968773) ↔ Gandrik Permata (4123968447) — cross-account
@@ -3188,7 +3277,7 @@ Same tab, rows where `match_type = "regex"`. Python regex with `re.IGNORECASE`. 
 
 ### Layer 3 — Ollama AI suggestion
 
-Prompt structure sent to `qwen2.5:7b` (Anthropic Claude as fallback):
+Prompt structure sent to `gemma4:e4b` (Anthropic Claude as fallback):
 
 ```
 You are a personal finance categorizer for an Indonesian household.
@@ -3382,7 +3471,7 @@ New Merchants:       3 (XYZ Corp, ABC Ltd, Coffee Place)
 Flagged:             $95 charge from 'XYZ Corp' — first occurrence
 ```
 
-AI narrative (via Ollama `llama3.2:3b`) runs after the deterministic summary and provides a conversational paragraph. It is always supplemental — the deterministic summary is the primary output.
+AI narrative (via Ollama `gemma4:e4b`) runs after the deterministic summary and provides a conversational paragraph. It is always supplemental — the deterministic summary is the primary output.
 
 ### Vue 3 PWA views (actual — 5 routes)
 

@@ -1,6 +1,15 @@
+import uuid
+
+from app.config import load_settings
+
+
 class CommandHandler:
     def __init__(self, state):
         self.state = state
+        settings = load_settings()
+        self.max_commands_per_hour = int(
+            settings.get("imessage", {}).get("max_commands_per_hour", 60)
+        )
         # Restore persisted flags
         self.paused = state.get_bool_flag("paused")
         self.quiet = state.get_bool_flag("quiet")
@@ -10,6 +19,11 @@ class CommandHandler:
         cmd = text.strip().lower()
         if cmd.startswith("agent:"):
             cmd = cmd[len("agent:"):].strip()
+
+        if self.state.count_commands_last_hour() >= self.max_commands_per_hour:
+            return "Command rate limit exceeded. Try again later."
+
+        self.state.record_command_processed(f"cmd-{uuid.uuid4().hex}")
 
         if cmd == "help":
             return (

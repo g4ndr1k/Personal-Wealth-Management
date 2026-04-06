@@ -19,8 +19,9 @@ import json
 import uuid
 import logging
 import sqlite3
+import threading
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ _db_path = ""
 # Short-lived map of opaque attachment_id → absolute file path.
 # Populated by handle_attachments(); consumed by handle_process().
 _attachment_paths: dict[str, str] = {}
+_attachment_paths_lock = threading.Lock()
 
 
 def init_pdf_handler(config: dict, db_path: str):
@@ -41,6 +43,84 @@ def init_pdf_handler(config: dict, db_path: str):
     _config = config
     _db_path = db_path
     _init_jobs_db()
+
+
+def _get_attachment_path(attachment_id: str) -> Optional[str]:
+    with _attachment_paths_lock:
+        return _attachment_paths.get(attachment_id)
+
+
+def _replace_attachment_paths(paths: dict[str, str]) -> None:
+    global _attachment_paths
+    with _attachment_paths_lock:
+        _attachment_paths = paths
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _resolve_upload_dest(inbox_dir: str, filename: str, file_bytes: bytes) -> tuple[str, bool]:
+    """Return (dest_path, should_write). Reuse identical existing files."""
+    safe_name = Path(filename).name
+    dest = os.path.join(inbox_dir, safe_name)
+    if not os.path.exists(dest):
+        return dest, True
+
+    try:
+        with open(dest, "rb") as existing:
+            if existing.read() == file_bytes:
+                return dest, False
+    except OSError:
+        pass
+
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    return os.path.join(inbox_dir, f"{Path(safe_name).stem}_{ts}.pdf"), True
+
+
+def _run_verification(pdf_path: str, result, logs: list[str]) -> None:
+    if not _config.get("verify_enabled", True):
+        return
+
+    from bridge.pdf_verify import verify_statement
+
+    verification = verify_statement(
+        pdf_path,
+        result,
+        ollama_host=_config.get("verify_ollama_host", "http://localhost:11434"),
+        model=_config.get("verify_model", _config.get("parser_llm_model", "gemma4:e4b")),
+        timeout_seconds=int(_config.get("verify_timeout_seconds", 45)),
+    )
+
+    deterministic = verification["deterministic_checks"]
+    llm = verification["llm"]
+    logs.append(
+        "Verifier: "
+        f"{llm.get('status', 'warn')} / {llm.get('recommended_action', 'proceed_with_review')} "
+        f"- {llm.get('summary', 'No summary')}"
+    )
+    if deterministic.get("has_issues"):
+        logs.append(
+            "Verifier deterministic checks flagged issues: "
+            f"date_out_of_period={deterministic.get('date_out_of_period_count', 0)}, "
+            f"missing_account={deterministic.get('missing_account_number_count', 0)}, "
+            f"invalid_tx_type={deterministic.get('invalid_tx_type_count', 0)}, "
+            f"missing_fx={deterministic.get('missing_exchange_rate_count', 0)}, "
+            f"running_balance={len(deterministic.get('running_balance_issues', []))}, "
+            f"summary_reconciliation={len(deterministic.get('summary_reconciliation_issues', []))}"
+        )
+
+    issues = llm.get("issues", [])[:3]
+    for issue in issues:
+        logs.append(
+            "Verifier issue: "
+            f"{issue.get('severity', 'low')} {issue.get('type', 'issue')} - "
+            f"{issue.get('message', '')}"
+        )
+
+    verify_mode = str(_config.get("verify_mode", "warn")).lower()
+    if verify_mode == "block" and llm.get("recommended_action") == "block":
+        raise ValueError(f"Verifier blocked statement: {llm.get('summary', 'unknown reason')}")
 
 
 # ── DB ────────────────────────────────────────────────────────────────────────
@@ -118,19 +198,14 @@ def handle_upload(request_body: bytes, content_type: str) -> tuple[int, dict]:
     inbox_dir = _config.get("pdf_inbox_dir", "data/pdf_inbox")
     os.makedirs(inbox_dir, exist_ok=True)
     safe_name = Path(filename).name  # strip any path components
-    dest = os.path.join(inbox_dir, safe_name)
-    # Avoid overwriting — append timestamp suffix if name conflicts
-    if os.path.exists(dest):
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        dest = os.path.join(inbox_dir, f"{Path(safe_name).stem}_{ts}.pdf")
-    with open(dest, "wb") as f:
-        f.write(file_bytes)
+    dest, should_write = _resolve_upload_dest(inbox_dir, safe_name, file_bytes)
+    if should_write:
+        with open(dest, "wb") as f:
+            f.write(file_bytes)
 
     # Auto-detect bank/type
     bank, stmt_type = "Unknown", "unknown"
     try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from parsers.router import detect_bank_and_type
         bank, stmt_type = detect_bank_and_type(dest)
     except Exception as e:
@@ -139,7 +214,7 @@ def handle_upload(request_body: bytes, content_type: str) -> tuple[int, dict]:
     job_id = str(uuid.uuid4())[:8]
     job = {
         "job_id": job_id,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": _utc_now_iso(),
         "status": "pending",
         "source_path": dest,
         "bank": bank,
@@ -175,13 +250,13 @@ def handle_process(body: dict) -> tuple[int, dict]:
 
     attachment_id = body.get("attachment_id", "")
     if attachment_id:
-        file_path = _attachment_paths.get(attachment_id)
+        file_path = _get_attachment_path(attachment_id)
         if not file_path:
             return 404, {"error": "attachment not found or scan expired; re-scan and try again"}
         job_id = str(uuid.uuid4())
         job = {
             "job_id": job_id,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": _utc_now_iso(),
             "status": "pending",
             "source_path": file_path,
             "bank": "", "stmt_type": "", "period": "",
@@ -245,7 +320,7 @@ def handle_process_file(body: dict) -> tuple[int, dict]:
     job_id = str(uuid.uuid4())[:8]
     job = {
         "job_id":      job_id,
-        "created_at":  datetime.utcnow().isoformat(),
+        "created_at":  _utc_now_iso(),
         "status":      "pending",
         "source_path": file_path,
         "bank":        bank,
@@ -285,7 +360,11 @@ def handle_download(job_id: str) -> tuple[int, bytes, str]:
         return 404, b'{"error":"not found"}', "application/json"
     if job["status"] != "done" or not job["output_path"]:
         return 400, b'{"error":"not ready"}', "application/json"
-    output_path = job["output_path"]
+    output_path = os.path.realpath(job["output_path"])
+    output_dir = _config.get("xls_output_dir", "output/xls")
+    allowed_dir = os.path.realpath(output_dir)
+    if output_path != allowed_dir and not output_path.startswith(allowed_dir + os.sep):
+        return 403, b'{"error":"access denied"}', "application/json"
     if not os.path.exists(output_path):
         return 404, b'{"error":"file missing"}', "application/json"
     with open(output_path, "rb") as f:
@@ -315,7 +394,6 @@ def handle_jobs(limit: int = 50) -> tuple[int, dict]:
 
 def handle_attachments() -> tuple[int, dict]:
     """GET /pdf/attachments — list auto-detected bank PDFs from Mail.app"""
-    global _attachment_paths
     try:
         from bridge.attachment_scanner import AttachmentScanner
         scanner = AttachmentScanner(
@@ -324,11 +402,11 @@ def handle_attachments() -> tuple[int, dict]:
         )
         pending = scanner.scan(lookback_days=_config.get("attachment_lookback_days", 60))
         # Rebuild the opaque-ID map on every scan so stale IDs expire naturally.
-        _attachment_paths = {}
+        attachment_paths: dict[str, str] = {}
         result = []
         for a in pending:
             aid = str(uuid.uuid4())
-            _attachment_paths[aid] = a.file_path
+            attachment_paths[aid] = a.file_path
             result.append({
                 "attachment_id": aid,
                 "filename": a.filename,
@@ -336,6 +414,7 @@ def handle_attachments() -> tuple[int, dict]:
                 "received": a.received_date,
                 "size_kb": round(a.size_bytes / 1024, 1),
             })
+        _replace_attachment_paths(attachment_paths)
         return 200, {"attachments": result}
     except Exception as e:
         return 500, {"error": str(e)}
@@ -370,8 +449,6 @@ def _run_job(job_id: str, password: str):
             logs.append("PDF not encrypted — no unlock needed")
 
         # ── Step 2: parse ─────────────────────────────────────────────────
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from parsers.router import detect_and_parse
         owner_mappings = _config.get("owner_mappings", {})
         result = detect_and_parse(unlocked_path, owner_mappings=owner_mappings)
@@ -380,6 +457,7 @@ def _run_job(job_id: str, password: str):
                     f"({len(result.transactions)} transactions)")
         if result.raw_errors:
             logs.append(f"Parser warnings: {result.raw_errors}")
+        _run_verification(unlocked_path, result, logs)
 
         # ── Step 2.5: auto-upsert closing balance → account_balances ─────
         #   For savings / consolidated statements, write each savings-type

@@ -26,6 +26,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+from finance.config import load_config
+
 log = logging.getLogger(__name__)
 
 # Fallback category list used when the Sheets Categories tab is empty
@@ -92,7 +94,7 @@ class Categorizer:
         aliases: list[dict],
         categories: list[str],
         ollama_host: str = "http://localhost:11434",
-        ollama_model: str = "llama3.2:3b",
+        ollama_model: str = "gemma4:e4b",
         ollama_timeout: int = 60,
         anthropic_api_key: str = "",
         anthropic_model: str = "claude-haiku-4-20250514",
@@ -454,16 +456,21 @@ class Categorizer:
 
 # ── Cross-account internal transfer matching ─────────────────────────────────
 
-# Known internal account pairs: (owner_a, account_a) ↔ (owner_b, account_b)
-# Transfers between these pairs should be categorised as "Transfer".
-INTERNAL_ACCOUNT_PAIRS: list[tuple[tuple[str, str], tuple[str, str]]] = [
-    # Gandrik BCA ↔ Helen BCA (monthly household allowance)
-    (("Gandrik", "2171138631"), ("Helen", "5500346622")),
-    # Helen Permata ↔ Helen BCA (savings ↔ spending)
-    (("Helen", "4123968773"), ("Helen", "2684118322")),
-    # Helen Permata ↔ Gandrik Permata
-    (("Helen", "4123968773"), ("Gandrik", "4123968447")),
-]
+def _load_internal_account_pairs() -> list[tuple[tuple[str, str], tuple[str, str]]]:
+    """Load configured internal transfer pairs from settings.toml."""
+    cfg = load_config()
+    raw_pairs = cfg.get("finance", {}).get("internal_transfers", {}).get("pairs", [])
+    pairs: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    for pair in raw_pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        left, right = pair
+        if not isinstance(left, (list, tuple)) or not isinstance(right, (list, tuple)):
+            continue
+        if len(left) != 2 or len(right) != 2:
+            continue
+        pairs.append(((str(left[0]), str(left[1])), (str(right[0]), str(right[1]))))
+    return pairs
 
 # ── Helen BCA cash withdrawal → Household ────────────────────────────────────
 # Cash withdrawals from Helen's BCA account are household expenses.
@@ -512,7 +519,7 @@ def match_internal_transfers(transactions: list) -> int:
     matched = 0
     seen = set()  # avoid double-counting
 
-    for (owner_a, acct_a), (owner_b, acct_b) in INTERNAL_ACCOUNT_PAIRS:
+    for (owner_a, acct_a), (owner_b, acct_b) in _load_internal_account_pairs():
         for txn in transactions:
             if id(txn) in seen:
                 continue

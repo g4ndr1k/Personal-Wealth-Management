@@ -129,3 +129,6 @@ Subject: {subject}
             requires_action=requires_action,
             provider=f"ollama/{self.model}",
         )
+
+    def close(self) -> None:
+        self.http.close()

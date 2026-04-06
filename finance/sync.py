@@ -26,7 +26,7 @@ import argparse
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from finance.config import load_config, get_finance_config, get_sheets_config
 from finance.db import open_db
@@ -56,7 +56,7 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
         }
     """
     t0  = time.time()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc).isoformat()
 
     log.info("Opening SQLite DB: %s", db_path)
     conn = open_db(db_path)

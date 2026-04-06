@@ -39,7 +39,7 @@ allowed_sender_domains = [
 
 [ollama]
 host = "http://host.docker.internal:11434"
-model_primary = "llama3.2:3b"
+model_primary = "gemma4:e4b"
 timeout_seconds = 60
 
 [anthropic]
@@ -97,7 +97,14 @@ attachment_seen_db = "/Users/g4ndr1k/agentic-ai/data/seen_attachments.db"
 attachment_lookback_days = 60
 
 # Ollama model for Layer 3 LLM fallback parsing (same as mail agent)
-parser_llm_model = "llama3.2:3b"
+parser_llm_model = "gemma4:e4b"
+
+# Parsed-PDF verification pass (warn-only by default)
+verify_enabled = true
+verify_mode = "warn"
+verify_ollama_host = "http://localhost:11434"
+verify_timeout_seconds = 120
+verify_model = "gemma4:e4b"
 
 # Owner name mapping — substring match, case-insensitive, first match wins
 # Maps customer names found in PDFs to canonical owner labels
@@ -115,6 +122,13 @@ parser_llm_model = "llama3.2:3b"
 xlsx_input = "/Users/g4ndr1k/agentic-ai/output/xls/ALL_TRANSACTIONS.xlsx"
 # Stage 2 SQLite read cache (throw away and rebuild anytime from Google Sheets)
 sqlite_db  = "/Users/g4ndr1k/agentic-ai/data/finance.db"
+
+[finance.internal_transfers]
+pairs = [
+  [["Gandrik", "2171138631"], ["Helen", "5500346622"]],
+  [["Helen", "4123968773"], ["Helen", "2684118322"]],
+  [["Helen", "4123968773"], ["Gandrik", "4123968447"]],
+]
 
 [google_sheets]
 # Download from Google Cloud Console → APIs & Services → Credentials
@@ -144,5 +158,5 @@ cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 # Use localhost when running on the Mac host directly.
 # Docker overrides this via OLLAMA_FINANCE_HOST env var (host.docker.internal).
 host            = "http://localhost:11434"
-model           = "qwen2.5:7b"
+model           = "gemma4:e4b"
 timeout_seconds = 60

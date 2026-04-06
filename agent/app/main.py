@@ -125,6 +125,10 @@ def main():
         bridge.client.close()
     except Exception:
         pass
+    try:
+        classifier.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
