@@ -23,6 +23,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
@@ -113,7 +114,7 @@ class Categorizer:
         # Layer 2: regex match  [(compiled_pattern, merchant, category, owner_filter, account_filter)]
         self._regex: list[tuple[re.Pattern, str, str, str, str]] = []
         # Few-shot examples for Layer 3 (up to 10, FIFO)
-        self._examples: list[tuple[str, str, str]] = []  # (desc, merchant, category)
+        self._examples: deque[tuple[str, str, str]] = deque(maxlen=10)  # (desc, merchant, category)
 
         self._load_aliases(aliases)
 
@@ -193,8 +194,6 @@ class Categorizer:
         for the Ollama prompt.  Oldest examples are evicted past 10.
         """
         self._examples.append((raw_description, merchant, category))
-        if len(self._examples) > 10:
-            self._examples = self._examples[-10:]
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -517,11 +516,15 @@ def match_internal_transfers(transactions: list) -> int:
         by_key[key].append(txn)
 
     matched = 0
-    seen = set()  # avoid double-counting
+    # Use value-based keys instead of id() to avoid CPython-specific behaviour
+    seen: set[tuple] = set()  # (owner, account, date, amount) tuples
+
+    def _txn_key(t) -> tuple:
+        return (t.owner, t.account, t.date, t.amount)
 
     for (owner_a, acct_a), (owner_b, acct_b) in _load_internal_account_pairs():
         for txn in transactions:
-            if id(txn) in seen:
+            if _txn_key(txn) in seen:
                 continue
             # Check if this txn is a debit from account A
             if (txn.owner == owner_a and txn.account == acct_a
@@ -530,15 +533,15 @@ def match_internal_transfers(transactions: list) -> int:
                 counterpart_key = (owner_b, acct_b, txn.date, abs(txn.amount))
                 counterparts = by_key.get(counterpart_key, [])
                 for cp in counterparts:
-                    if cp.amount > 0 and id(cp) not in seen and _looks_like_transfer(cp):
+                    if cp.amount > 0 and _txn_key(cp) not in seen and _looks_like_transfer(cp):
                         # Found a matching credit — mark both as Transfer
                         for t in (txn, cp):
                             if t.category != "Transfer":
                                 t.merchant = "Transfer"
                                 t.category = "Transfer"
                                 matched += 1
-                        seen.add(id(txn))
-                        seen.add(id(cp))
+                        seen.add(_txn_key(txn))
+                        seen.add(_txn_key(cp))
                         break
 
             # Check the reverse direction (debit from B, credit to A)
@@ -547,14 +550,14 @@ def match_internal_transfers(transactions: list) -> int:
                 counterpart_key = (owner_a, acct_a, txn.date, abs(txn.amount))
                 counterparts = by_key.get(counterpart_key, [])
                 for cp in counterparts:
-                    if cp.amount > 0 and id(cp) not in seen and _looks_like_transfer(cp):
+                    if cp.amount > 0 and _txn_key(cp) not in seen and _looks_like_transfer(cp):
                         for t in (txn, cp):
                             if t.category != "Transfer":
                                 t.merchant = "Transfer"
                                 t.category = "Transfer"
                                 matched += 1
-                        seen.add(id(txn))
-                        seen.add(id(cp))
+                        seen.add(_txn_key(txn))
+                        seen.add(_txn_key(cp))
                         break
 
     # ── Helen BCA cash withdrawals → Household ───────────────────────────────

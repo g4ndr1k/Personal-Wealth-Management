@@ -1,23 +1,27 @@
 import os
-import json
 import logging
+import typing
 import httpx
-from app.schemas import Classification
+from app.schemas import Classification, Category, Urgency
 from app.providers.base import Provider
+from app.utils import extract_json
 
 logger = logging.getLogger("agent.anthropic")
 
-ALLOWED_CATEGORIES = {
-    "transaction_alert",
-    "bill_statement",
-    "bank_clarification",
-    "payment_due",
-    "security_alert",
-    "financial_other",
-    "not_financial",
-}
+ALLOWED_CATEGORIES = set(typing.get_args(Category))
+ALLOWED_URGENCY = set(typing.get_args(Urgency))
 
-ALLOWED_URGENCY = {"low", "medium", "high"}
+
+class _SecretStr:
+    """Masks secrets from repr/log output."""
+    def __init__(self, value: str):
+        self._value = value
+    def __repr__(self) -> str:
+        return "****"
+    def __str__(self) -> str:
+        return self._value
+    def get(self) -> str:
+        return self._value
 
 
 class AnthropicProvider(Provider):
@@ -27,11 +31,11 @@ class AnthropicProvider(Provider):
         self.enabled = bool(settings["anthropic"]["enabled"])
         self.model = settings["anthropic"]["model"]
         env_name = settings["anthropic"]["api_key_env"]
-        self.api_key = os.environ.get(env_name, "")
+        self._api_key = _SecretStr(os.environ.get(env_name, ""))
         self.http = httpx.Client(timeout=90.0)
 
     def classify(self, message: dict) -> Classification:
-        if not self.enabled or not self.api_key:
+        if not self.enabled or not self._api_key.get():
             raise RuntimeError("Anthropic not enabled or API key missing")
 
         sender = message.get("sender", "")
@@ -64,7 +68,7 @@ Body: {content}""".strip()
         r = self.http.post(
             "https://api.anthropic.com/v1/messages",
             headers={
-                "x-api-key": self.api_key,
+                "x-api-key": self._api_key.get(),
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
@@ -81,13 +85,9 @@ Body: {content}""".strip()
         return self._parse(text)
 
     def _parse(self, text: str) -> Classification:
-        text = text.strip()
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start < 0 or end <= start:
+        payload = extract_json(text)
+        if payload is None:
             raise ValueError(f"No JSON found in Anthropic response: {text[:200]}")
-
-        payload = json.loads(text[start:end])
 
         category = payload.get("category", "financial_other")
         urgency = payload.get("urgency", "medium")

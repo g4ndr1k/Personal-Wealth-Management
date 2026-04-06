@@ -9,8 +9,15 @@ logger = logging.getLogger("agent.bridge_client")
 
 class BridgeClient:
     def __init__(self):
-        token_file = Path(os.environ["BRIDGE_TOKEN_FILE"])
+        token_path = os.environ.get("BRIDGE_TOKEN_FILE")
+        if not token_path:
+            raise RuntimeError("BRIDGE_TOKEN_FILE environment variable is not set")
+        token_file = Path(token_path)
+        if not token_file.exists():
+            raise FileNotFoundError(f"Bridge token file not found: {token_file}")
         token = token_file.read_text().strip()
+        if not token:
+            raise ValueError(f"Bridge token file is empty: {token_file}")
 
         self.client = httpx.Client(
             base_url=os.environ["BRIDGE_URL"],

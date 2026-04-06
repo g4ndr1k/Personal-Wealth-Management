@@ -29,7 +29,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Generator, Optional
+from typing import Generator, NamedTuple, Optional
 
 import hmac
 
@@ -61,8 +61,15 @@ _fastapi_cfg   = get_fastapi_config(_cfg)
 _ollama_cfg    = get_ollama_finance_config(_cfg)
 _anthropic_cfg = get_anthropic_finance_config(_cfg)
 
-_db_path: str        = _finance_cfg.sqlite_db
-_sheets: SheetsClient = SheetsClient(_sheets_cfg)   # lazy OAuth — no network call yet
+_db_path: str              = _finance_cfg.sqlite_db
+_sheets: SheetsClient | None = None  # lazy — created on first write request
+
+
+def _get_sheets() -> SheetsClient:
+    global _sheets
+    if _sheets is None:
+        _sheets = SheetsClient(_sheets_cfg)
+    return _sheets
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -158,7 +165,7 @@ class CategoryOverrideRequest(BaseModel):
 
 # ── /api/health ───────────────────────────────────────────────────────────────
 
-@app.get("/api/health")
+@app.get("/api/health", dependencies=[Depends(require_api_key)])
 def health():
     with _db() as conn:
         tx_count  = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
@@ -179,7 +186,7 @@ def health():
 
 # ── /api/owners ───────────────────────────────────────────────────────────────
 
-@app.get("/api/owners")
+@app.get("/api/owners", dependencies=[Depends(require_api_key)])
 def get_owners():
     with _db() as conn:
         rows = conn.execute(
@@ -191,7 +198,7 @@ def get_owners():
 
 # ── /api/categories ───────────────────────────────────────────────────────────
 
-@app.get("/api/categories")
+@app.get("/api/categories", dependencies=[Depends(require_api_key)])
 def get_categories():
     with _db() as conn:
         rows = conn.execute(
@@ -216,7 +223,7 @@ def get_categories():
 
 # ── /api/transactions ─────────────────────────────────────────────────────────
 
-@app.get("/api/transactions")
+@app.get("/api/transactions", dependencies=[Depends(require_api_key)])
 def get_transactions(
     year:     Optional[int] = Query(None, description="Filter by calendar year"),
     month:    Optional[int] = Query(None, ge=1, le=12, description="Filter by month (1–12)"),
@@ -226,12 +233,12 @@ def get_transactions(
     limit:    int           = Query(100, ge=1, le=1000),
     offset:   int           = Query(0, ge=0),
 ):
-    where, params = _tx_where(year, month, owner, category, q)
+    qp = _tx_where(year, month, owner, category, q)
     with _db() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM transactions{where}", params).fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM transactions{qp.clause}", qp.params).fetchone()[0]
         rows  = conn.execute(
-            f"SELECT * FROM transactions{where} ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
-            params + [limit, offset],
+            f"SELECT * FROM transactions{qp.clause} ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+            qp.params + [limit, offset],
         ).fetchall()
     return {
         "total":        total,
@@ -241,24 +248,29 @@ def get_transactions(
     }
 
 
-@app.get("/api/transactions/foreign")
+@app.get("/api/transactions/foreign", dependencies=[Depends(require_api_key)])
 def get_foreign_transactions(
     year:  Optional[int] = Query(None),
     month: Optional[int] = Query(None, ge=1, le=12),
     owner: Optional[str] = Query(None),
 ):
     """Transactions that were billed in a foreign currency."""
-    where, params = _tx_where(year, month, owner, category=None, q=None)
-    if where:
-        where += " AND original_currency IS NOT NULL"
+    qp = _tx_where(year, month, owner, category=None, q=None)
+    if qp.clause:
+        extra_clause = qp.clause + " AND original_currency IS NOT NULL"
     else:
-        where = " WHERE original_currency IS NOT NULL"
+        extra_clause = " WHERE original_currency IS NOT NULL"
     with _db() as conn:
         rows = conn.execute(
-            f"SELECT * FROM transactions{where} ORDER BY date DESC",
-            params,
+            f"SELECT * FROM transactions{extra_clause} ORDER BY date DESC",
+            qp.params,
         ).fetchall()
     return [_row(r) for r in rows]
+
+
+class _QueryParts(NamedTuple):
+    clause: str   # always "" or " WHERE ..."
+    params: list
 
 
 def _tx_where(
@@ -267,7 +279,7 @@ def _tx_where(
     owner:    Optional[str],
     category: Optional[str],
     q:        Optional[str],
-) -> tuple[str, list]:
+) -> _QueryParts:
     """Build a WHERE clause + params list for transaction queries."""
     conditions: list[str] = []
     params:     list      = []
@@ -285,16 +297,17 @@ def _tx_where(
         conditions.append("category = ?")
         params.append(category)
     if q:
-        conditions.append("(raw_description LIKE ? OR merchant LIKE ?)")
-        params += [f"%{q}%", f"%{q}%"]
+        escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conditions.append("(raw_description LIKE ? ESCAPE '\\' OR merchant LIKE ? ESCAPE '\\')")
+        params += [f"%{escaped_q}%", f"%{escaped_q}%"]
 
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    return where, params
+    clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    return _QueryParts(clause, params)
 
 
 # ── /api/summary ──────────────────────────────────────────────────────────────
 
-@app.get("/api/summary/years")
+@app.get("/api/summary/years", dependencies=[Depends(require_api_key)])
 def get_available_years():
     """Return a list of calendar years that have transaction data."""
     with _db() as conn:
@@ -305,7 +318,7 @@ def get_available_years():
     return [int(r[0]) for r in rows if r[0]]
 
 
-@app.get("/api/summary/year/{year}")
+@app.get("/api/summary/year/{year}", dependencies=[Depends(require_api_key)])
 def get_annual_summary(year: int):
     """Month-by-month income / expense breakdown for a full year."""
     with _db() as conn:
@@ -368,7 +381,7 @@ def get_annual_summary(year: int):
     }
 
 
-@app.get("/api/summary/{year}/{month}")
+@app.get("/api/summary/{year}/{month}", dependencies=[Depends(require_api_key)])
 def get_monthly_summary(year: int, month: int):
     """
     Full breakdown for one calendar month.
@@ -496,7 +509,7 @@ def get_monthly_summary(year: int, month: int):
 
 # ── /api/review-queue ─────────────────────────────────────────────────────────
 
-@app.get("/api/review-queue")
+@app.get("/api/review-queue", dependencies=[Depends(require_api_key)])
 def get_review_queue(limit: int = Query(50, ge=1, le=200)):
     """
     Return transactions that have no category assigned (Layer 4 — needs review).
@@ -540,7 +553,7 @@ def post_alias(req: AliasRequest):
     (the importer will use the new alias on future imports too).
     """
     # 1. Write to Google Sheets
-    _sheets.append_alias(
+    _get_sheets().append_alias(
         merchant=req.merchant,
         alias=req.alias,
         category=req.category,
@@ -625,7 +638,7 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
             raise HTTPException(404, f"Transaction not found: {tx_hash}")
 
     # Write override to Google Sheets (persistent, survives re-sync)
-    _sheets.write_override(tx_hash, req.category, req.notes)
+    _get_sheets().write_override(tx_hash, req.category, req.notes)
 
     # Update SQLite immediately so the dashboard reflects it now
     also_updated = 0
@@ -652,7 +665,7 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
             ).fetchone()
             if existing and existing["category"] != req.category:
                 # Update the existing alias in Sheets
-                _sheets.update_alias_category(raw_desc, req.category)
+                _get_sheets().update_alias_category(raw_desc, req.category)
                 conn.execute(
                     "UPDATE merchant_aliases SET category = ? WHERE alias = ?",
                     (req.category, raw_desc),
@@ -661,7 +674,7 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
             elif not existing:
                 # Create new alias
                 alias_merchant = merchant or raw_desc
-                _sheets.append_alias(
+                _get_sheets().append_alias(
                     merchant=alias_merchant,
                     alias=raw_desc,
                     category=req.category,
@@ -711,7 +724,7 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
 def post_sync():
     """Pull all data from Google Sheets into the local SQLite cache."""
     from finance.sync import sync as _sync
-    stats = _sync(_db_path, _sheets)
+    stats = _sync(_db_path, _get_sheets())
     return {"ok": True, **stats}
 
 
@@ -748,7 +761,7 @@ def post_import(req: ImportRequest = ImportRequest()):
 
     stats = _import_run(
         xlsx_path=xlsx_path,
-        sheets_client=_sheets,
+        sheets_client=_get_sheets(),
         categorizer=categorizer,
         overwrite=req.overwrite,
         dry_run=req.dry_run,
@@ -873,7 +886,7 @@ class SnapshotRequest(BaseModel):
 
 # ── /api/wealth/balances ──────────────────────────────────────────────────────
 
-@app.get("/api/wealth/balances")
+@app.get("/api/wealth/balances", dependencies=[Depends(require_api_key)])
 def get_balances(
     snapshot_date: Optional[str] = Query(None),
     account_type:  Optional[str] = Query(None),
@@ -898,7 +911,7 @@ def get_balances(
 
 @app.post("/api/wealth/balances", dependencies=[Depends(require_api_key)])
 def upsert_balance(req: BalanceUpsertRequest):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _db() as conn:
         conn.execute(
             """
@@ -936,7 +949,7 @@ def delete_balance(balance_id: int):
 
 # ── /api/wealth/holdings ──────────────────────────────────────────────────────
 
-@app.get("/api/wealth/holdings")
+@app.get("/api/wealth/holdings", dependencies=[Depends(require_api_key)])
 def get_holdings(
     snapshot_date: Optional[str] = Query(None),
     asset_class:   Optional[str] = Query(None),
@@ -1032,14 +1045,14 @@ def _sync_holdings_to_sheets():
                 "ORDER BY snapshot_date DESC, asset_group, asset_class, asset_name"
             ).fetchall()
         sheet_rows = [list(r) for r in rows]
-        _sheets.write_holdings(sheet_rows)
+        _get_sheets().write_holdings(sheet_rows)
     except Exception as exc:
         log.warning("Holdings Sheets sync failed (non-fatal): %s", exc)
 
 
 # ── /api/wealth/liabilities ───────────────────────────────────────────────────
 
-@app.get("/api/wealth/liabilities")
+@app.get("/api/wealth/liabilities", dependencies=[Depends(require_api_key)])
 def get_liabilities(
     snapshot_date:  Optional[str] = Query(None),
     liability_type: Optional[str] = Query(None),
@@ -1064,7 +1077,7 @@ def get_liabilities(
 
 @app.post("/api/wealth/liabilities", dependencies=[Depends(require_api_key)])
 def upsert_liability(req: LiabilityUpsertRequest):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _db() as conn:
         conn.execute(
             """
@@ -1104,7 +1117,7 @@ def delete_liability(liability_id: int):
 
 # ── /api/wealth/snapshot ──────────────────────────────────────────────────────
 
-@app.get("/api/wealth/snapshot/dates")
+@app.get("/api/wealth/snapshot/dates", dependencies=[Depends(require_api_key)])
 def get_snapshot_dates():
     """
     All month-end dates that have any wealth data — snapshots OR raw entries in
@@ -1246,7 +1259,7 @@ def create_snapshot(req: SnapshotRequest):
 
 # ── /api/wealth/history ───────────────────────────────────────────────────────
 
-@app.get("/api/wealth/history")
+@app.get("/api/wealth/history", dependencies=[Depends(require_api_key)])
 def get_wealth_history(limit: int = Query(24, ge=1, le=60)):
     """Net worth snapshots oldest-first for trend chart (latest `limit` entries)."""
     with _db() as conn:
@@ -1264,7 +1277,7 @@ def get_wealth_history(limit: int = Query(24, ge=1, le=60)):
 
 # ── /api/wealth/summary ───────────────────────────────────────────────────────
 
-@app.get("/api/wealth/summary")
+@app.get("/api/wealth/summary", dependencies=[Depends(require_api_key)])
 def get_wealth_summary(
     snapshot_date: Optional[str] = Query(None),
     owner:         Optional[str] = Query(None),

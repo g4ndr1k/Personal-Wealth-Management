@@ -123,7 +123,10 @@ def sync(db_path: str, sheets_client: SheetsClient) -> dict:
             log.info("Applied %d category override(s).", applied)
 
     log.info("Writing to SQLite …")
+    # BEGIN IMMEDIATE acquires a write lock upfront so no other writer can
+    # interleave between our DELETE and INSERT operations.
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM transactions")
         if tx_rows:
             conn.executemany(

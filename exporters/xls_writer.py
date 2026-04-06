@@ -30,7 +30,7 @@ Color coding (industry standard):
 """
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from openpyxl import Workbook, load_workbook
@@ -143,7 +143,7 @@ def _month_label(date_str: str) -> str:
     if m:
         _, month, year = m.groups()
         return f"{MONTHS_ID.get(month, month)} {year}"
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     return f"{MONTHS_ID[str(now.month).zfill(2)]} {now.year}"
 
 

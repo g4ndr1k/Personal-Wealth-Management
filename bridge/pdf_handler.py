@@ -61,21 +61,28 @@ def _utc_now_iso() -> str:
 
 
 def _resolve_upload_dest(inbox_dir: str, filename: str, file_bytes: bytes) -> tuple[str, bool]:
-    """Return (dest_path, should_write). Reuse identical existing files."""
+    """Return (dest_path, should_write). Reuse identical existing files. Atomic creation."""
+    from uuid import uuid4
     safe_name = Path(filename).name
     dest = os.path.join(inbox_dir, safe_name)
-    if not os.path.exists(dest):
-        return dest, True
 
     try:
-        with open(dest, "rb") as existing:
-            if existing.read() == file_bytes:
-                return dest, False
-    except OSError:
-        pass
-
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    return os.path.join(inbox_dir, f"{Path(safe_name).stem}_{ts}.pdf"), True
+        fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "wb") as f:
+            f.write(file_bytes)
+        return dest, True
+    except FileExistsError:
+        try:
+            with open(dest, "rb") as existing:
+                if existing.read() == file_bytes:
+                    return dest, False
+        except OSError:
+            pass
+        stem, ext = os.path.splitext(dest)
+        dest = f"{stem}_{uuid4().hex[:8]}{ext}"
+        with open(dest, "wb") as f:
+            f.write(file_bytes)
+        return dest, True
 
 
 def _run_verification(pdf_path: str, result, logs: list[str]) -> None:

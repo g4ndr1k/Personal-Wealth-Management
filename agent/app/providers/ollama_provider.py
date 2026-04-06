@@ -1,22 +1,14 @@
-import json
 import logging
+import typing
 import httpx
-from app.schemas import Classification
+from app.schemas import Classification, Category, Urgency
 from app.providers.base import Provider
+from app.utils import extract_json
 
 logger = logging.getLogger("agent.ollama")
 
-ALLOWED_CATEGORIES = {
-    "transaction_alert",
-    "bill_statement",
-    "bank_clarification",
-    "payment_due",
-    "security_alert",
-    "financial_other",
-    "not_financial",
-}
-
-ALLOWED_URGENCY = {"low", "medium", "high"}
+ALLOWED_CATEGORIES = set(typing.get_args(Category))
+ALLOWED_URGENCY = set(typing.get_args(Urgency))
 
 
 class OllamaProvider(Provider):
@@ -102,13 +94,9 @@ Subject: {subject}
 """.strip()
 
     def _parse(self, text: str) -> Classification:
-        text = text.strip()
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start < 0 or end <= start:
+        payload = extract_json(text)
+        if payload is None:
             raise ValueError(f"No JSON found in Ollama response: {text[:200]}")
-
-        payload = json.loads(text[start:end])
 
         category = payload.get("category", "financial_other")
         urgency = payload.get("urgency", "medium")

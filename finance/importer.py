@@ -349,7 +349,7 @@ def _float(val) -> Optional[float]:
         return None
     try:
         f = float(val)
-        return f if f != 0.0 else None
+        return f
     except (TypeError, ValueError):
         return None
 

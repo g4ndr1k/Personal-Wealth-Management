@@ -15,6 +15,7 @@ services:
       GOOGLE_TOKEN_FILE:        /app/secrets/google_token.json
       ANTHROPIC_API_KEY:        ${ANTHROPIC_API_KEY:-}
       FINANCE_API_KEY:          ${FINANCE_API_KEY}
+      GOOGLE_SPREADSHEET_ID:    ${GOOGLE_SPREADSHEET_ID:-}
       OLLAMA_FINANCE_HOST:      http://host.docker.internal:11434
     volumes:
       - ./config/settings.toml:/app/config/settings.toml:ro
@@ -29,7 +30,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health', timeout=5).read()\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request, os; req = urllib.request.Request('http://127.0.0.1:8090/api/health', headers={'X-Api-Key': os.environ.get('FINANCE_API_KEY', '')}); urllib.request.urlopen(req, timeout=5).read()\""]
       interval: 30s
       timeout: 10s
       retries: 3

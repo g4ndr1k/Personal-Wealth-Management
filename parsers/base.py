@@ -145,4 +145,4 @@ def parse_date_ddmmyyyy(s: str) -> Optional[str]:
     if m:
         d, mo, y = m.groups()
         return f"{d}/{mo}/{y}"
-    return s
+    return None

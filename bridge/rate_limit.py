@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -19,7 +19,7 @@ class RateLimiter:
 
     def count_recent(self, endpoint: str, minutes: int = 60) -> int:
         with self._connect() as conn:
-            cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
             row = conn.execute("""
                 SELECT COUNT(*)
                 FROM request_log

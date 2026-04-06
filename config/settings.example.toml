@@ -1,0 +1,105 @@
+# Copy this file to config/settings.toml and fill in your values.
+# config/settings.toml is gitignored — never commit real paths or IDs.
+
+[bridge]
+host = "127.0.0.1"
+port = 9100
+log_level = "INFO"
+
+[auth]
+token_file = "/path/to/agentic-ai/secrets/bridge.token"
+
+[mail]
+source = "mailapp"
+max_batch = 25
+max_body_text_bytes = 200000
+initial_lookback_days = 15
+
+[imessage]
+primary_recipient = "your-apple-id@icloud.com"
+authorized_senders = ["your-apple-id@icloud.com"]
+command_prefix = "agent:"
+max_alerts_per_hour = 60
+max_commands_per_hour = 60
+startup_notifications = true
+shutdown_notifications = false
+allow_same_account_commands = true
+
+[classifier]
+provider_order = ["ollama", "anthropic"]
+cloud_fallback_enabled = true
+generic_alert_on_total_failure = true
+allowed_sender_domains = [
+  "yourbank.com",
+]
+
+[ollama]
+host = "http://host.docker.internal:11434"
+model_primary = "gemma4:e4b"
+timeout_seconds = 60
+
+[anthropic]
+enabled = true
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[agent]
+poll_interval_seconds = 1800
+command_poll_interval_seconds = 30
+alert_on_categories = [
+  "transaction_alert",
+  "bill_statement",
+  "bank_clarification",
+  "payment_due",
+  "security_alert",
+  "financial_other"
+]
+
+[pdf]
+inbox_dir = "/path/to/agentic-ai/data/pdf_inbox"
+unlocked_dir = "/path/to/agentic-ai/data/pdf_unlocked"
+xls_output_dir = "/path/to/agentic-ai/output/xls"
+bank_passwords_file = "/path/to/agentic-ai/secrets/banks.toml"
+jobs_db = "/path/to/agentic-ai/data/pdf_jobs.db"
+attachment_seen_db = "/path/to/agentic-ai/data/seen_attachments.db"
+attachment_lookback_days = 60
+parser_llm_model = "gemma4:e4b"
+verify_enabled = true
+verify_mode = "warn"
+verify_ollama_host = "http://localhost:11434"
+verify_timeout_seconds = 120
+verify_model = "gemma4:e4b"
+
+[owners]
+"YourFirstName" = "Owner1"
+
+[finance]
+xlsx_input = "/path/to/agentic-ai/output/xls/ALL_TRANSACTIONS.xlsx"
+sqlite_db  = "/path/to/agentic-ai/data/finance.db"
+
+[finance.internal_transfers]
+pairs = []
+
+[google_sheets]
+credentials_file = "/path/to/agentic-ai/secrets/google_credentials.json"
+token_file       = "/path/to/agentic-ai/secrets/google_token.json"
+# Set GOOGLE_SPREADSHEET_ID env var to override at runtime (recommended)
+spreadsheet_id   = "YOUR_SPREADSHEET_ID_HERE"
+transactions_tab = "Transactions"
+aliases_tab      = "Merchant Aliases"
+categories_tab   = "Categories"
+currency_tab     = "Currency Codes"
+import_log_tab        = "Import Log"
+overrides_tab         = "Category Overrides"
+pdf_import_log_tab    = "PDF Import Log"
+holdings_tab          = "Holdings"
+
+[fastapi]
+host         = "0.0.0.0"
+port         = 8090
+cors_origins = ["http://localhost:5173"]
+
+[ollama_finance]
+host            = "http://localhost:11434"
+model           = "gemma4:e4b"
+timeout_seconds = 60

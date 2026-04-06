@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.3.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
+**Version:** 3.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-04-06
+**Last validated against:** checked-in codebase 2026-04-07
 
 ---
 
@@ -1894,17 +1894,19 @@ Use `parsers/base.py` dataclasses (`Transaction`, `AccountSummary`, `StatementRe
 ## 20. Security Notes
 
 1. **Bridge binds to `127.0.0.1` only** — not reachable from the network
-2. **All API endpoints** except `/healthz` require bearer auth checked with `hmac.compare_digest` (timing-safe)
+2. **All Finance API endpoints** (including all GET endpoints) require `X-Api-Key` header checked with `hmac.compare_digest` (timing-safe). The Docker healthcheck passes the key via env var.
 3. **Alert text sanitized** before AppleScript — control chars removed, newlines normalized, length capped
 4. **AppleScript receives text as argument**, not interpolated into the script string — prevents injection
-5. **Classifier prompts** explicitly instruct models to ignore instructions embedded inside email content
-6. **Provider output normalized** to a fixed category/urgency allowlist — no raw LLM text reaches alert logic
-7. **Agent container**: non-root user (`agentuser`), `no-new-privileges`, 2 GB memory cap
-8. **Ollama exposed on `0.0.0.0:11434`** for Docker reachability — consider firewall rules if on a shared network
-9. **Full Disk Access** granted to the Python binary allows all scripts run by that binary to access protected directories. For tighter security, wrap the bridge in a dedicated `.app` bundle and grant FDA to only that bundle
-10. **Bank passwords** stored in `secrets/banks.toml` (gitignored, `chmod 600`). Never stored in `settings.toml` or `.env`.
-11. **PDF unlock** passes passwords via temp file to AppleScript — never interpolated into script strings
-12. **Keep secrets restricted:**
+5. **PDF unlock AppleScript paths escaped** — `_escape_applescript_string()` escapes all three path vars before interpolation, preventing injection via filenames with `"` or `\`.
+6. **Classifier prompts** explicitly instruct models to ignore instructions embedded inside email content
+7. **Provider output normalized** to a fixed category/urgency allowlist — no raw LLM text reaches alert logic
+8. **API keys wrapped in `_SecretStr`** — `AnthropicProvider` stores keys in a wrapper that returns `"****"` from `repr()`, preventing accidental key leakage in logs or exception traces.
+9. **Agent container**: non-root user (`agentuser`), `no-new-privileges`, 2 GB memory cap
+10. **Ollama exposed on `0.0.0.0:11434`** for Docker reachability — consider firewall rules if on a shared network
+11. **Full Disk Access** granted to the Python binary allows all scripts run by that binary to access protected directories. For tighter security, wrap the bridge in a dedicated `.app` bundle and grant FDA to only that bundle
+12. **Bank passwords** stored in `secrets/banks.toml` (gitignored, `chmod 600`). Never stored in `settings.toml` or `.env`.
+13. **`settings.toml` is gitignored** — use `config/settings.example.toml` as a template. The live Sheets ID and absolute paths should never be committed.
+14. **Keep secrets restricted:**
 
 ```bash
 chmod 600 ~/agentic-ai/.env
@@ -2078,6 +2080,64 @@ docker compose up -d
 #### Fixed
 
 - `GroupDrilldown.vue` was reading `c.transaction_count` for the transaction count sub-label; the actual field name returned by `GET /api/summary/{year}/{month}` → `by_category` is `c.count`. Fixed to `c.count ?? 0`.
+
+---
+
+### v3.4.0 (2026-04-07)
+
+#### Security
+
+- **C1 — All GET endpoints now require auth** — `GET /api/health`, `/api/owners`, `/api/categories`, `/api/transactions`, `/api/transactions/foreign`, `/api/summary/*`, `/api/review-queue`, and all `/api/wealth/*` GET endpoints now carry `dependencies=[Depends(require_api_key)]`. The Docker healthcheck was updated to pass the `X-Api-Key` header. Previously, anyone with the server URL could read the full financial history.
+
+- **C2 — Rate limiter timezone fix** — `bridge/rate_limit.py` was computing the cutoff using naive `datetime.now()`, making rate limiting bypassable when comparing naive vs. UTC-aware timestamps. Fixed to `datetime.now(timezone.utc)`.
+
+- **C3 — GOOGLE_SPREADSHEET_ID now overridable via env var** — `finance/config.py` reads `os.environ.get("GOOGLE_SPREADSHEET_ID")` before falling back to `settings.toml`. `docker-compose.yml` passes `GOOGLE_SPREADSHEET_ID` from the `.env` file. `config/settings.toml` is now gitignored (use `config/settings.example.toml` as a template). The live Sheets ID is no longer committed to source control.
+
+- **C4 — SQL query builder now uses `_QueryParts` NamedTuple** — `_tx_where()` returns a typed `_QueryParts(clause, params)` instead of a plain tuple. The WHERE clause and params are always constructed together, making it impossible to accidentally pass unescaped input as a clause string.
+
+- **C5 — `.env.example` added** — template with all required env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `FINANCE_API_KEY`, `GOOGLE_SPREADSHEET_ID`). `.env` remains gitignored.
+
+- **C6 — API keys wrapped in `_SecretStr`** — `agent/app/providers/anthropic_provider.py` now stores `self._api_key = _SecretStr(...)`. The `_SecretStr` class returns `"****"` from `__repr__` and `__str__`, preventing accidental key leakage in logs or exception traces.
+
+- **C7 — AppleScript injection fixed** — `bridge/pdf_unlock.py` now calls `_escape_applescript_string()` on all three path variables (`pwd_file`, `src_path`, `dest_path`) before interpolating them into AppleScript strings. Prevents injection via filenames containing `"` or `\`.
+
+#### Bug Fixes
+
+- **W4 — `_float()` no longer discards `$0` transactions** — `finance/importer.py` previously returned `None` for zero-value transactions (`return f if f != 0.0 else None`). Fee waivers, zero-balance entries, and explicit zero amounts are now preserved.
+
+- **W6 — LIKE wildcards escaped** — `finance/api.py` `_tx_where()` now escapes `%` and `_` in search queries before passing them to SQLite `LIKE` clauses. Previously, a search for `100%` would match everything.
+
+- **W7 — Atomic PDF file creation** — `bridge/pdf_handler.py` `_resolve_upload_dest()` now uses `os.open(O_CREAT | O_EXCL)` to atomically create the destination file. Eliminates the TOCTOU race where two concurrent uploads of the same filename could overwrite each other.
+
+- **W9 — `parse_date_ddmmyyyy` returns `None` on no match** — `parsers/base.py` previously returned the raw input string when the date didn't match any known pattern, silently propagating invalid dates downstream. Now returns `None`.
+
+#### Changes
+
+- **W1/O3 — All `datetime.now()` calls are timezone-aware** — replaced all naive `datetime.now()` and `datetime.utcnow()` calls with `datetime.now(timezone.utc)` across `finance/models.py`, `finance/api.py`, `finance/sheets.py`, `bridge/attachment_scanner.py`, and `exporters/xls_writer.py`.
+
+- **W2 — `check_same_thread=False` removed from SQLite** — `finance/db.py` already uses WAL mode and per-request connections via `get_conn()`. Removing `check_same_thread=False` eliminates the risk of accidentally sharing a connection across threads.
+
+- **W3 — `_sheets` lazy-init** — `finance/api.py` `SheetsClient` is no longer instantiated at module import time. It is created on first use via `_get_sheets()`. This defers OAuth credential loading to the first write request.
+
+- **W5 — Transfer dedup no longer uses `id()`** — `finance/categorizer.py` `match_internal_transfers()` replaced `id(txn) in seen` with value-based tuple keys `(owner, account, date, amount)`. The previous approach relied on CPython object identity which is non-deterministic across GC cycles.
+
+- **W8 — `BridgeClient` fails with descriptive errors** — `agent/app/bridge_client.py` now raises `RuntimeError`, `FileNotFoundError`, or `ValueError` with clear messages when `BRIDGE_TOKEN_FILE` is unset, missing, or empty.
+
+- **O1 — Shared `extract_json()` utility** — `agent/app/utils.py` added with a three-strategy JSON extractor (direct parse → fenced block → brace extraction). `AnthropicProvider` and `OllamaProvider` now import and use it instead of duplicating the extraction logic.
+
+- **O2 — Provider constants derive from `schemas.py`** — `ALLOWED_CATEGORIES` and `ALLOWED_URGENCY` sets in both providers are now computed via `typing.get_args(Category)` / `typing.get_args(Urgency)` from `app/schemas.py`, eliminating the duplicate constant definitions.
+
+- **O6 — `_examples` uses `deque(maxlen=10)`** — `finance/categorizer.py` few-shot examples replaced `list` + manual slicing with `collections.deque(maxlen=10)`. Appending auto-evicts the oldest entry.
+
+- **O7 — Sync uses `BEGIN IMMEDIATE`** — `finance/sync.py` now executes `BEGIN IMMEDIATE` before the replace-all tables block to acquire an exclusive write lock upfront and prevent any interleaving with other writers during the sync window.
+
+- **O8 — `make_hash` extended to 128-bit** — `finance/models.py` hash fingerprint now uses `[:32]` (128 bits) instead of `[:16]` (64 bits), significantly reducing collision probability for large transaction sets. Existing rows keep their 16-char hashes; new rows use 32-char hashes.
+
+- **O10 — PWA dependencies updated** — `pwa/package.json` updated to latest patch versions within the current major line: `chart.js` ^4.4.9, `pinia` ^2.3.1, `vue` ^3.5.32, `vue-router` ^4.6.4, `@vitejs/plugin-vue` ^5.2.4, `vite` ^5.4.21. Major-version bumps (vite 8, pinia 3, vue-router 5) deferred pending testing.
+
+- **Settings example template** — `config/settings.example.toml` added as a redacted reference for new setups. Copy to `config/settings.toml` and fill in your paths and IDs. The live `settings.toml` is now gitignored.
+
+- **Docker image rebuilt** — `finance-api` image rebuilt with all above changes applied.
 
 ---
 

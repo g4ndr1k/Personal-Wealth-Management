@@ -80,6 +80,11 @@ def is_encrypted(pdf_path: str) -> bool:
         return "password" in str(e).lower() or "encrypt" in str(e).lower()
 
 
+def _escape_applescript_string(s: str) -> str:
+    """Escape a string for safe inclusion in an AppleScript double-quoted string."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _unlock_via_applescript(src_path: str, password: str, dest_path: str) -> str:
     """
     Open PDF in Preview with password, print to PDF (saves without password).
@@ -92,14 +97,14 @@ def _unlock_via_applescript(src_path: str, password: str, dest_path: str) -> str
 
     script = f'''
 tell application "Preview"
-    set pwdText to (read POSIX file "{pwd_file}" as text)
-    set srcPDF to POSIX file "{src_path}"
+    set pwdText to (read POSIX file "{_escape_applescript_string(pwd_file)}" as text)
+    set srcPDF to POSIX file "{_escape_applescript_string(src_path)}"
     open srcPDF
     -- Wait for document to load
     delay 1
     set frontDoc to front document
     -- Print to PDF (save as)
-    set destPDF to POSIX file "{dest_path}"
+    set destPDF to POSIX file "{_escape_applescript_string(dest_path)}"
     print frontDoc
     delay 0.5
     close frontDoc saving no
@@ -108,9 +113,9 @@ end tell
     # More reliable approach: use Quartz PDFDocument via Python subprocess
     # instead of Preview (Preview may prompt for password interactively)
     script2 = f'''
-set pwdPath to "{pwd_file}"
-set srcPath to "{src_path}"
-set destPath to "{dest_path}"
+set pwdPath to "{_escape_applescript_string(pwd_file)}"
+set srcPath to "{_escape_applescript_string(src_path)}"
+set destPath to "{_escape_applescript_string(dest_path)}"
 
 -- Use Quartz to unlock
 do shell script "python3 -c \\"

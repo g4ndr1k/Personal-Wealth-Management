@@ -16,7 +16,7 @@ import glob
 import sqlite3
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -75,7 +75,7 @@ class AttachmentScanner:
         Scan Mail.app attachment directories for new bank PDFs.
         Returns only files not already in the seen_attachments DB.
         """
-        cutoff = datetime.now() - timedelta(days=lookback_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
         results = []
 
         # Find all V* Mail directories
@@ -120,7 +120,7 @@ class AttachmentScanner:
         con = sqlite3.connect(self.seen_db_path)
         con.execute(
             "INSERT OR REPLACE INTO seen_attachments (file_path, queued_at, bank_name) VALUES (?,?,?)",
-            (file_path, datetime.utcnow().isoformat(), bank_name)
+            (file_path, datetime.now(timezone.utc).isoformat(), bank_name)
         )
         con.commit()
         con.close()

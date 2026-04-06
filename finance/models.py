@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -35,7 +35,7 @@ class FinanceTransaction:
                 self.institution, self.owner,
             )
         if not self.import_date:
-            self.import_date = datetime.now().strftime("%Y-%m-%d")
+            self.import_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     def to_sheet_row(self) -> list:
         """Return values in Transactions tab column order (A→O)."""
@@ -67,7 +67,7 @@ def make_hash(date: str, amount: float,
     Deterministic: same inputs always produce the same hash.
     """
     key = f"{date}|{amount:.2f}|{raw_description}|{institution}|{owner}"
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────

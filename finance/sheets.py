@@ -7,7 +7,7 @@ categories / hashes, and writing transactions / aliases / import log rows.
 from __future__ import annotations
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from google.auth.transport.requests import Request
@@ -247,7 +247,7 @@ class SheetsClient:
         Otherwise appends a new row.
         """
         qtab = f"'{self.cfg.overrides_tab}'"
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         new_row = [tx_hash, category, notes, now]
 
         # Check if hash already exists so we can overwrite instead of duplicating
@@ -306,7 +306,7 @@ class SheetsClient:
             self._append(
                 f"{self.cfg.aliases_tab}!A:G",
                 [[merchant, alias, category, match_type,
-                  datetime.now().strftime("%Y-%m-%d"),
+                  datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                   owner_filter, account_filter]],
             )
         except HttpError as e:
@@ -421,7 +421,7 @@ class SheetsClient:
             self._append(
                 f"{self.cfg.import_log_tab}!A:G",
                 [[
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     import_file,
                     rows_added,
                     rows_skipped,

@@ -78,7 +78,7 @@ def get_sheets_config(cfg: dict) -> SheetsConfig:
     return SheetsConfig(
         credentials_file=creds,
         token_file=token,
-        spreadsheet_id=s["spreadsheet_id"],
+        spreadsheet_id=os.environ.get("GOOGLE_SPREADSHEET_ID") or s["spreadsheet_id"],
         transactions_tab=s.get("transactions_tab", "Transactions"),
         aliases_tab=s.get("aliases_tab", "Merchant Aliases"),
         categories_tab=s.get("categories_tab", "Categories"),

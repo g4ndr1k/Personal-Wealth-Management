@@ -1,6 +1,11 @@
 # Secrets — never commit
 .env
+!.env.example
 secrets/
+
+# Live settings with absolute paths and real IDs — use settings.example.toml as template
+config/settings.toml
+!config/settings.example.toml
 
 # Live databases — contain personal mail/message data
 data/*.db
