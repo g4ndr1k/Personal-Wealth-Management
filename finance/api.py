@@ -796,6 +796,9 @@ _ASSET_CLASS_GROUP: dict[str, str] = {
     "other":         "Physical Assets",
 }
 
+# Asset classes whose values are stable and should auto-carry-forward month-to-month
+CARRY_FORWARD_CLASSES = {"retirement", "real_estate", "vehicle", "gold", "other"}
+
 # Maps account_type → net_worth_snapshots column
 _ACCT_TYPE_COL: dict[str, str] = {
     "savings":       "savings_idr",
@@ -1032,6 +1035,70 @@ def upsert_holding(req: HoldingUpsertRequest):
     _sync_holdings_to_sheets()
     _auto_snapshot(req.snapshot_date)
     return {"ok": True, "holding": _row(row)}
+
+
+class CarryForwardRequest(BaseModel):
+    snapshot_date: str
+
+
+@app.post("/api/wealth/holdings/carry-forward", dependencies=[Depends(require_api_key)])
+def carry_forward_holdings(req: CarryForwardRequest):
+    """
+    For carry-forward asset classes (retirement, real_estate, vehicle, gold, other),
+    copy holdings from the most recent prior snapshot_date to req.snapshot_date
+    — but only for classes that have ZERO entries on req.snapshot_date.
+    Safe to call multiple times (idempotent per class).
+    """
+    today   = datetime.now().strftime("%Y-%m-%d")
+    carried = 0
+    with _db() as conn:
+        for asset_class in CARRY_FORWARD_CLASSES:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM holdings WHERE snapshot_date=? AND asset_class=?",
+                (req.snapshot_date, asset_class),
+            ).fetchone()[0]
+            if existing > 0:
+                continue
+
+            prev_rows = conn.execute(
+                "SELECT * FROM holdings WHERE asset_class=? AND snapshot_date < ? "
+                "ORDER BY snapshot_date DESC",
+                (asset_class, req.snapshot_date),
+            ).fetchall()
+            if not prev_rows:
+                continue
+
+            seen: set = set()
+            for row in prev_rows:
+                key = (row["asset_name"], row["owner"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO holdings
+                        (snapshot_date, asset_class, asset_group, asset_name, isin_or_code,
+                         institution, account, owner, currency, quantity, unit_price,
+                         market_value, market_value_idr, cost_basis, cost_basis_idr,
+                         unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
+                         last_appraised_date, notes, import_date)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (req.snapshot_date, row["asset_class"], row["asset_group"],
+                     row["asset_name"], row["isin_or_code"], row["institution"],
+                     row["account"], row["owner"], row["currency"], row["quantity"],
+                     row["unit_price"], row["market_value"], row["market_value_idr"],
+                     row["cost_basis"], row["cost_basis_idr"], row["unrealised_pnl_idr"],
+                     row["exchange_rate"], row["maturity_date"], row["coupon_rate"],
+                     row["last_appraised_date"], row["notes"], today),
+                )
+                carried += conn.execute("SELECT changes()").fetchone()[0]
+
+    if carried > 0:
+        _sync_holdings_to_sheets()
+        _auto_snapshot(req.snapshot_date)
+
+    return {"ok": True, "carried": carried}
 
 
 @app.delete("/api/wealth/holdings/{holding_id}", dependencies=[Depends(require_api_key)])

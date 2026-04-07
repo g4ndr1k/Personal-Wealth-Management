@@ -95,6 +95,7 @@ export const api = {
   getHoldings:         (p = {})   => get('/wealth/holdings', p),
   upsertHolding:       (body)     => post('/wealth/holdings', body),
   deleteHolding:       (id)       => del(`/wealth/holdings/${id}`),
+  carryForwardHoldings:(body)     => post('/wealth/holdings/carry-forward', body),
 
   getLiabilities:      (p = {})   => get('/wealth/liabilities', p),
   upsertLiability:     (body)     => post('/wealth/liabilities', body),
