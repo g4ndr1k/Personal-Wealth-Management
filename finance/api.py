@@ -937,13 +937,20 @@ def upsert_balance(req: BalanceUpsertRequest):
             "WHERE snapshot_date=? AND institution=? AND account=? AND owner=?",
             (req.snapshot_date, req.institution, req.account, req.owner),
         ).fetchone()
+    _auto_snapshot(req.snapshot_date)
     return {"ok": True, "balance": _row(row)}
 
 
 @app.delete("/api/wealth/balances/{balance_id}", dependencies=[Depends(require_api_key)])
 def delete_balance(balance_id: int):
     with _db() as conn:
+        row = conn.execute(
+            "SELECT snapshot_date FROM account_balances WHERE id = ?", (balance_id,)
+        ).fetchone()
+        snap_date = row["snapshot_date"] if row else None
         conn.execute("DELETE FROM account_balances WHERE id = ?", (balance_id,))
+    if snap_date:
+        _auto_snapshot(snap_date)
     return {"ok": True}
 
 
@@ -1023,14 +1030,21 @@ def upsert_holding(req: HoldingUpsertRequest):
             (req.snapshot_date, req.asset_class, req.asset_name, req.owner),
         ).fetchone()
     _sync_holdings_to_sheets()
+    _auto_snapshot(req.snapshot_date)
     return {"ok": True, "holding": _row(row)}
 
 
 @app.delete("/api/wealth/holdings/{holding_id}", dependencies=[Depends(require_api_key)])
 def delete_holding(holding_id: int):
     with _db() as conn:
+        row = conn.execute(
+            "SELECT snapshot_date FROM holdings WHERE id = ?", (holding_id,)
+        ).fetchone()
+        snap_date = row["snapshot_date"] if row else None
         conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
     _sync_holdings_to_sheets()
+    if snap_date:
+        _auto_snapshot(snap_date)
     return {"ok": True}
 
 
@@ -1048,6 +1062,14 @@ def _sync_holdings_to_sheets():
         _get_sheets().write_holdings(sheet_rows)
     except Exception as exc:
         log.warning("Holdings Sheets sync failed (non-fatal): %s", exc)
+
+
+def _auto_snapshot(snapshot_date: str):
+    """Re-aggregate net_worth_snapshot for snapshot_date after any mutation (best-effort)."""
+    try:
+        create_snapshot(SnapshotRequest(snapshot_date=snapshot_date))
+    except Exception as exc:
+        log.warning("Auto-snapshot failed for %s (non-fatal): %s", snapshot_date, exc)
 
 
 # ── /api/wealth/liabilities ───────────────────────────────────────────────────
@@ -1105,13 +1127,20 @@ def upsert_liability(req: LiabilityUpsertRequest):
             "WHERE snapshot_date=? AND liability_type=? AND liability_name=? AND owner=?",
             (req.snapshot_date, req.liability_type, req.liability_name, req.owner),
         ).fetchone()
+    _auto_snapshot(req.snapshot_date)
     return {"ok": True, "liability": _row(row)}
 
 
 @app.delete("/api/wealth/liabilities/{liability_id}", dependencies=[Depends(require_api_key)])
 def delete_liability(liability_id: int):
     with _db() as conn:
+        row = conn.execute(
+            "SELECT snapshot_date FROM liabilities WHERE id = ?", (liability_id,)
+        ).fetchone()
+        snap_date = row["snapshot_date"] if row else None
         conn.execute("DELETE FROM liabilities WHERE id = ?", (liability_id,))
+    if snap_date:
+        _auto_snapshot(snap_date)
     return {"ok": True}
 
 
