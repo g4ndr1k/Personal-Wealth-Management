@@ -96,7 +96,7 @@ def _run_verification(pdf_path: str, result, logs: list[str]) -> None:
         result,
         ollama_host=_config.get("verify_ollama_host", "http://localhost:11434"),
         model=_config.get("verify_model", _config.get("parser_llm_model", "gemma4:e4b")),
-        timeout_seconds=int(_config.get("verify_timeout_seconds", 45)),
+        timeout_seconds=int(_config.get("verify_timeout_seconds", 120)),
     )
 
     deterministic = verification["deterministic_checks"]

@@ -1659,12 +1659,16 @@ After a parser returns `StatementResult`, the bridge runs a lightweight verifica
    - deterministic check results
    - a compact raw-text excerpt from the first PDF pages
 
-The verifier returns structured JSON with `status`, `recommended_action`, `summary`, and `issues`.
+The verifier returns structured JSON with `status`, `recommended_action`, `summary`, and `issues`. In the current implementation:
+
+- Gemma is used as a **soft reviewer**, not a source of truth.
+- The top-line `summary` written into the job log is generated from deterministic checks, not copied verbatim from model prose.
+- Unsupported model issues (for example invented dates or facts not present in the payload) are filtered before logging.
 
 - In `verify_mode = "warn"` (default), verification never blocks writes; it only adds log lines such as `Verifier:` and `Verifier issue:`.
 - In `verify_mode = "block"`, the job fails only when the verifier explicitly recommends `block`.
 
-Recommended rollout: keep `warn` mode enabled until the verifier has been calibrated on a representative set of statements.
+Recommended rollout: keep `warn` mode enabled until the verifier has been calibrated on a representative set of statements. As of the current code validation, the post-parse verifier has been exercised successfully on BCA savings, Maybank consolidated, and Permata savings statements; BCA tends to downgrade to a generic `warn` when model concerns are weak, while stronger deterministic mismatches can still surface as `fail` for review.
 
 ### PDF upload reuse behavior
 
@@ -1672,7 +1676,7 @@ Recommended rollout: keep `warn` mode enabled until the verifier has been calibr
 
 - If no file with that name exists, the upload is written normally.
 - If a file with the same name already exists **and its bytes are identical**, the bridge reuses the existing file and does **not** create a new copy.
-- If a file with the same name exists but the content differs, the bridge preserves both by appending a timestamp suffix to the new upload.
+- If a file with the same name exists but the content differs, the bridge preserves both by appending a unique suffix to the new upload.
 
 This avoids duplicate timestamped PDFs when the same file is retried after a verifier timeout or other non-upload-related failure.
 
@@ -2193,6 +2197,10 @@ docker compose up -d
   - `verify_model = "gemma4:e4b"`
 
 - **Changed: verifier now defaults to Gemma 4 E4B** — the local Ollama defaults for the mail agent, PDF parser fallback, finance categorizer, and PDF verifier now point to `gemma4:e4b`.
+
+- **Changed: verifier summaries are now deterministic-first** — job-log `Verifier:` headlines are generated from deterministic mismatches (for example running-balance or summary-reconciliation counts) instead of trusting raw model prose. Unsupported or invented model issues are filtered before they reach the log.
+
+- **Validated: live cross-parser verification runs** — the verifier path was exercised end-to-end against real BCA savings, Maybank consolidated, and Permata savings PDFs. BCA now degrades to a generic `warn` when model concerns are weak, while Maybank and Permata can still surface more specific review signals when deterministic checks are stronger.
 
 #### PDF Upload Behavior
 
@@ -4014,8 +4022,10 @@ Monthly wealth management cycle (1st–5th of each month):
    └── Sources: bank statement closing balances, physical cash count
 
 4. Update Investment holdings
-   └── Add/edit Holding entries for bonds, stocks, mutual funds
-   └── Sources: brokerage monthly report, bank statement (e-Rekening)
+   └── Add/edit Holding entries for bonds, stocks, mutual funds, retirement (Jamsostek)
+   └── Sources: brokerage monthly report, bank statement (e-Rekening), employer retirement statement
+   └── To edit existing: **tap the row** → modify market value → Save (works for all investment types)
+   └── Retirement-specific (Jamsostek): enter contribution updates from employer each month
    └── Bond-specific: enter maturity date and coupon rate
 
 5. Update Tangible Assets (if changed since last month)
@@ -4054,14 +4064,16 @@ Monthly wealth management cycle (1st–5th of each month):
 - [x] `account_balances` schema — `exchange_rate REAL DEFAULT 0` column added via `ALTER TABLE`
 - [x] `holdings` schema — `exchange_rate REAL DEFAULT 0` column added via `ALTER TABLE`
 - [x] PWA rebuilt (`npm run build`) and Docker container rebuilt + restarted
+- [x] Tap-to-edit for investment items (bonds, stocks, mutual funds, retirement) in Holdings.vue
+- [x] Jamsostek (retirement fund) support — asset_class `retirement` with "Retirement (Jamsostek)" label in dropdown
+- [x] Monthly Jamsostek balance updates via tap-to-edit in Holdings → Investments tab
+- [x] Automatic Google Sheets sync on every holding save via `_sync_holdings_to_sheets()`
 
 ### Deferred to future phase
 
-- [ ] Google Sheets sync for the 3 new wealth tables (Holdings, Account Balances, Liabilities tabs)
-- [ ] `finance/config.py` — add `SheetsConfig` fields for the 3 new Sheets tabs
-- [ ] `finance/sync.py` — extend to sync holdings, balances, liabilities from Sheets → SQLite
+- [ ] Google Sheets pull-back sync (Sheets → SQLite for holdings, balances, liabilities)
 - [ ] Real-time price feeds (stocks, crypto) or scheduled price update CLI
 - [ ] Multi-owner net worth split (currently shown per-item via `owner` field; aggregated snapshot is household total)
 
 
-*Guide last updated 2026-04-06 · v3.3.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*
+*Guide last updated 2026-04-07 · v3.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*

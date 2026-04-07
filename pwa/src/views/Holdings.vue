@@ -89,7 +89,8 @@
           <div
             v-for="h in filteredBonds"
             :key="`hld-${h.id}`"
-            class="asset-item"
+            class="asset-item asset-item-tappable"
+            @click="editItem('holding', h)"
           >
             <div class="asset-main">
               <div class="asset-name-row">
@@ -130,7 +131,8 @@
           <div
             v-for="h in filteredOtherInvestments"
             :key="`hld-${h.id}`"
-            class="asset-item"
+            class="asset-item asset-item-tappable"
+            @click="editItem('holding', h)"
           >
             <div class="asset-main">
               <span class="asset-name">{{ h.asset_name }}</span>

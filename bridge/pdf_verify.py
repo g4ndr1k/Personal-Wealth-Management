@@ -176,7 +176,7 @@ def _statement_payload(result: StatementResult) -> dict:
         accounts.append(account_dict)
 
     transactions = []
-    for tx in result.transactions[:200]:
+    for tx in result.transactions[:120]:
         transactions.append(asdict(tx))
 
     bonds = [asdict(bond) for bond in result.bonds[:50]]
@@ -203,31 +203,35 @@ def _verify_with_ollama(
     model: str,
     timeout_seconds: int,
 ) -> dict:
-    prompt = _build_prompt(payload)
-    body = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.0,
-            "num_predict": 300,
-        },
-    }).encode()
-
-    req = urllib.request.Request(
-        f"{ollama_host.rstrip('/')}/api/generate",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-            raw = json.loads(resp.read()).get("response", "")
-        parsed = _extract_json(raw)
-        parsed.setdefault("status", "warn")
-        parsed.setdefault("recommended_action", "proceed_with_review")
-        parsed.setdefault("summary", "No summary provided")
-        parsed.setdefault("issues", [])
-        return parsed
+        raw = _ollama_generate(
+            ollama_host=ollama_host,
+            model=model,
+            system=_build_system_prompt(),
+            prompt=_build_prompt(payload),
+            timeout_seconds=timeout_seconds,
+            response_format=_response_schema(),
+        )
+        try:
+            parsed = _parse_ollama_json(raw)
+        except ValueError:
+            repaired = _ollama_generate(
+                ollama_host=ollama_host,
+                model=model,
+                system=(
+                    "You convert an assistant response into valid JSON that matches the "
+                    "provided schema. Return JSON only."
+                ),
+                prompt=_build_repair_prompt(raw),
+                timeout_seconds=timeout_seconds,
+                response_format=_response_schema(),
+            )
+            parsed = _parse_ollama_json(repaired)
+        return _normalize_verifier_response(
+            parsed,
+            payload["deterministic_checks"],
+            payload["statement"],
+        )
     except urllib.error.URLError as e:
         return {
             "status": "warn",
@@ -245,24 +249,290 @@ def _verify_with_ollama(
         }
 
 
+def _ollama_generate(
+    *,
+    ollama_host: str,
+    model: str,
+    system: str,
+    prompt: str,
+    timeout_seconds: int,
+    response_format: dict,
+) -> str:
+    body = json.dumps({
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": False,
+        "format": response_format,
+        "think": False,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 320,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{ollama_host.rstrip('/')}/api/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        return json.loads(resp.read()).get("response", "")
+
+
+def _build_system_prompt() -> str:
+    return (
+        "You are a strict bank-statement parser verifier. "
+        "Return exactly one JSON object that matches the requested schema. "
+        "Do not include markdown, explanations, code fences, or extra text."
+    )
+
+
 def _build_prompt(payload: dict) -> str:
     return (
-        "You are a strict verification layer for bank-statement parser output.\n"
-        "Your task is NOT to re-parse the whole PDF and NOT to invent transactions.\n"
-        "Only assess whether the parsed structure looks plausible given the evidence.\n\n"
-        "Return ONLY valid JSON with this schema:\n"
-        '{"status":"pass|warn|fail","recommended_action":"proceed|proceed_with_review|block",'
-        '"summary":"short sentence","issues":[{"severity":"low|medium|high","type":"string",'
-        '"message":"string","evidence":"string"}],"checks":{"dates_within_period":true,'
-        '"sign_consistency":true,"running_balance_plausible":true,"summary_reconciles":true}}\n\n'
+        "Assess whether the parsed bank-statement structure is plausible given the evidence.\n"
+        "Do not re-parse the whole PDF and do not invent transactions.\n"
+        "Return only the JSON object.\n\n"
         "Rules:\n"
         "- Prefer pass when evidence is consistent.\n"
         "- Use warn for uncertainty, partial inconsistency, or missing evidence.\n"
         "- Use fail only for strong evidence of parser error.\n"
         "- Do not invent missing rows unless the evidence strongly suggests they are missing.\n"
-        "- Keep issues concise and evidence-based.\n\n"
+        "- Keep issues concise and evidence-based.\n"
+        "- Summary must be under 160 characters.\n"
+        "- Return at most 2 issues.\n"
+        "- Each issue message and evidence must be under 120 characters.\n"
+        "- If evidence is limited, use warn instead of fail.\n\n"
+        "- If deterministic checks show only isolated or mild issues, prefer warn over fail.\n"
+        "- Do not claim missing transactions, duplicate dates, or chronology problems unless directly supported by the payload evidence.\n"
+        "- Do not mention dates, accounts, or facts that are not present in the payload.\n\n"
         f"Verification payload:\n{json.dumps(payload, ensure_ascii=True)}"
     )
+
+
+def _build_repair_prompt(raw: str) -> str:
+    return (
+        "Convert the following response into a single JSON object matching the schema. "
+        "Preserve the meaning, do not add new claims, and return JSON only.\n\n"
+        f"Response to convert:\n{raw}"
+    )
+
+
+def _response_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["pass", "warn", "fail"],
+            },
+            "recommended_action": {
+                "type": "string",
+                "enum": ["proceed", "proceed_with_review", "block"],
+            },
+            "summary": {"type": "string", "maxLength": 160},
+            "issues": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"],
+                        },
+                        "type": {"type": "string"},
+                        "message": {"type": "string", "maxLength": 120},
+                        "evidence": {"type": "string", "maxLength": 120},
+                    },
+                    "required": ["severity", "type", "message", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "checks": {
+                "type": "object",
+                "properties": {
+                    "dates_within_period": {"type": "boolean"},
+                    "sign_consistency": {"type": "boolean"},
+                    "running_balance_plausible": {"type": "boolean"},
+                    "summary_reconciles": {"type": "boolean"},
+                },
+                "required": [
+                    "dates_within_period",
+                    "sign_consistency",
+                    "running_balance_plausible",
+                    "summary_reconciles",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "required": [
+            "status",
+            "recommended_action",
+            "summary",
+            "issues",
+            "checks",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def _normalize_verifier_response(parsed: dict, deterministic: dict, statement: dict) -> dict:
+    parsed.setdefault("status", "warn")
+    parsed.setdefault("recommended_action", "proceed_with_review")
+    parsed.setdefault("summary", "No summary provided")
+    parsed.setdefault("issues", [])
+    parsed.setdefault("checks", {})
+    issues = [
+        {
+            "severity": str(issue.get("severity", "low")),
+            "type": str(issue.get("type", "unknown")),
+            "message": str(issue.get("message", ""))[:120],
+            "evidence": str(issue.get("evidence", ""))[:120],
+        }
+        for issue in parsed["issues"][:2]
+        if isinstance(issue, dict)
+    ]
+    parsed["issues"] = _filter_supported_issues(issues, deterministic, statement)
+    if parsed["status"] == "fail" and not _has_strong_deterministic_signal(deterministic):
+        parsed["status"] = "warn"
+        if parsed.get("recommended_action") == "block":
+            parsed["recommended_action"] = "proceed_with_review"
+    parsed["summary"] = _build_summary(parsed, deterministic)
+    return parsed
+
+
+def _has_strong_deterministic_signal(deterministic: dict) -> bool:
+    strong_counts = [
+        deterministic.get("date_out_of_period_count", 0),
+        deterministic.get("missing_account_number_count", 0),
+        deterministic.get("invalid_tx_type_count", 0),
+        deterministic.get("missing_currency_count", 0),
+        deterministic.get("missing_exchange_rate_count", 0),
+        deterministic.get("nonpositive_foreign_amount_count", 0),
+    ]
+    if any(value and value > 0 for value in strong_counts):
+        return True
+    if len(deterministic.get("running_balance_issues", [])) >= 2:
+        return True
+    if len(deterministic.get("summary_reconciliation_issues", [])) >= 2:
+        return True
+    return False
+
+
+def _filter_supported_issues(issues: list[dict], deterministic: dict, statement: dict) -> list[dict]:
+    allowed_keywords: set[str] = set()
+    allowed_type_tokens: set[str] = set()
+    if deterministic.get("date_out_of_period_count", 0):
+        allowed_keywords.update({"date", "period", "out_of_period"})
+        allowed_type_tokens.update({"date", "period"})
+    if deterministic.get("missing_account_number_count", 0):
+        allowed_keywords.update({"account", "account_number", "missing_account"})
+        allowed_type_tokens.update({"account", "missing_account"})
+    if deterministic.get("invalid_tx_type_count", 0):
+        allowed_keywords.update({"tx_type", "transaction type", "debit", "credit", "sign"})
+        allowed_type_tokens.update({"tx_type", "sign", "debit", "credit"})
+    if deterministic.get("missing_currency_count", 0) or deterministic.get("missing_exchange_rate_count", 0):
+        allowed_keywords.update({"currency", "exchange", "fx", "foreign"})
+        allowed_type_tokens.update({"currency", "exchange", "fx", "foreign"})
+    if deterministic.get("nonpositive_foreign_amount_count", 0):
+        allowed_keywords.update({"foreign", "amount", "fx"})
+        allowed_type_tokens.update({"foreign", "fx", "amount"})
+    if deterministic.get("running_balance_issues"):
+        allowed_keywords.update({"balance", "running", "ledger"})
+        allowed_type_tokens.update({"balance", "running"})
+    if deterministic.get("summary_reconciliation_issues"):
+        allowed_keywords.update({"reconcile", "reconciliation", "summary", "total", "debit", "credit", "balance"})
+        allowed_type_tokens.update({"reconcile", "reconciliation", "summary", "total", "balance"})
+
+    if not allowed_keywords:
+        return []
+
+    filtered: list[dict] = []
+    for issue in issues:
+        if _issue_mentions_unsupported_fact(issue, statement):
+            continue
+        haystack = " ".join([
+            issue.get("type", ""),
+            issue.get("message", ""),
+            issue.get("evidence", ""),
+        ]).lower()
+        issue_type = issue.get("type", "").lower()
+        if allowed_type_tokens and not any(token in issue_type for token in allowed_type_tokens):
+            if not any(keyword in haystack for keyword in allowed_keywords):
+                continue
+        if any(keyword in haystack for keyword in allowed_keywords):
+            filtered.append(issue)
+    return filtered[:2]
+
+
+def _build_summary(parsed: dict, deterministic: dict) -> str:
+    parts: list[str] = []
+    if deterministic.get("date_out_of_period_count", 0):
+        parts.append(f"{deterministic['date_out_of_period_count']} out-of-period dates")
+    if deterministic.get("missing_account_number_count", 0):
+        parts.append(f"{deterministic['missing_account_number_count']} rows missing account numbers")
+    if deterministic.get("invalid_tx_type_count", 0):
+        parts.append(f"{deterministic['invalid_tx_type_count']} invalid tx types")
+    if deterministic.get("missing_exchange_rate_count", 0):
+        parts.append(f"{deterministic['missing_exchange_rate_count']} FX rows missing rates")
+    if deterministic.get("nonpositive_foreign_amount_count", 0):
+        parts.append(f"{deterministic['nonpositive_foreign_amount_count']} nonpositive foreign amounts")
+
+    running_balance_count = len(deterministic.get("running_balance_issues", []))
+    if running_balance_count:
+        parts.append(f"{running_balance_count} running-balance mismatches")
+
+    summary_recon_count = len(deterministic.get("summary_reconciliation_issues", []))
+    if summary_recon_count:
+        parts.append(f"{summary_recon_count} summary reconciliation mismatches")
+
+    status = parsed.get("status", "warn")
+    if status == "pass":
+        return "No material inconsistencies detected."
+
+    if not parts:
+        if parsed.get("issues"):
+            return "Model raised concerns, but deterministic checks were limited."
+        return "No strong deterministic issues detected."
+
+    prefix = "Review suggested:" if status == "warn" else "Review needed:"
+    return f"{prefix} " + "; ".join(parts[:3])
+
+
+def _issue_mentions_unsupported_fact(issue: dict, statement: dict) -> bool:
+    text = " ".join([
+        issue.get("type", ""),
+        issue.get("message", ""),
+        issue.get("evidence", ""),
+    ])
+    allowed_years = {
+        value[-4:]
+        for value in (
+            statement.get("period_start", ""),
+            statement.get("period_end", ""),
+            statement.get("print_date", ""),
+        )
+        if isinstance(value, str) and len(value) >= 4 and value[-4:].isdigit()
+    }
+    for token in text.replace("/", "-").split():
+        if len(token) >= 4:
+            for part in token.split("-"):
+                if len(part) == 4 and part.isdigit() and part not in allowed_years:
+                    return True
+    return False
+
+
+def _parse_ollama_json(raw: str) -> dict:
+    raw = raw.strip()
+    if not raw:
+        raise ValueError("Empty verifier response")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = _extract_json(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("Verifier response was not a JSON object")
+    return parsed
 
 
 def _extract_json(raw: str) -> dict:
