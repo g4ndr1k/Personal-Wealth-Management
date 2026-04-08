@@ -187,7 +187,7 @@ The system alerts on:
 - Stage 2 finance package (`finance/`) — see §24–32
   - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation, XLSX date parser
-  - `finance/sheets.py` — Google Sheets API v4 client: OAuth 2.0 token management (personal account), read/write transactions, aliases, categories, currency hints, import log
+  - `finance/sheets.py` — Google Sheets API v4 client: service-account auth (preferred) with personal OAuth fallback; read/write transactions, aliases, categories, currency hints, import log
   - `finance/categorizer.py` — account-aware categorization engine: exact alias → contains alias → regex → Ollama AI suggestion → review queue flag, plus cross-account internal transfer matching
   - `finance/importer.py` — CLI entry point: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, batch-appends to Google Sheets; `--dry-run`, `--overwrite`, `--file`, `-v`
   - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 22 default categories and 18 currency codes
@@ -388,7 +388,7 @@ agentic-ai/
 │   ├── __init__.py
 │   ├── config.py                 # Loads Stage 2 settings sections from settings.toml
 │   ├── models.py                 # FinanceTransaction dataclass + hash + date helpers
-│   ├── sheets.py                 # Google Sheets API v4 client (OAuth, read, write)
+│   ├── sheets.py                 # Google Sheets API v4 client (service account + OAuth fallback, read, write)
 │   ├── categorizer.py            # 4-layer engine: exact → regex → Ollama → review queue
 │   ├── importer.py               # CLI: ALL_TRANSACTIONS.xlsx → Google Sheets
 │   ├── setup_sheets.py           # One-time: create tabs, headers, seed reference data
@@ -448,8 +448,9 @@ agentic-ai/
 ├── secrets/                      # Auth tokens (gitignored)
 │   ├── bridge.token
 │   ├── banks.toml                # Bank PDF passwords
-│   ├── google_credentials.json   # Stage 2 — OAuth 2.0 Client ID (downloaded from Google Cloud Console)
-│   └── google_token.json         # Stage 2 — saved automatically after first OAuth consent
+│   ├── google_credentials.json   # Stage 2 fallback — OAuth 2.0 Desktop client JSON
+│   ├── google_service_account.json # Stage 2 preferred — service account key JSON
+│   └── google_token.json         # Stage 2 fallback — saved automatically after first OAuth consent
 ├── .env                          # API keys (gitignored)
 └── docker-compose.yml
 ```
@@ -2210,6 +2211,18 @@ docker compose up -d
 
 ---
 
+### v3.2.3 (2026-04-07)
+
+#### Finance Sheets Auth
+
+- **Added: Google service-account auth support for finance sync** — `finance/sheets.py` now prefers a service-account JSON key when `google_sheets.service_account_file` is configured, and falls back to the older personal OAuth token flow only when no service-account file is set.
+
+- **Changed: Docker finance-api now passes a service-account path override** — `docker-compose.yml` sets `GOOGLE_SERVICE_ACCOUNT_FILE=/app/secrets/google_service_account.json` so the container can use the mounted secret file instead of a host-only absolute path.
+
+- **Changed: documentation now recommends service-account auth** — Stage 2 Sheets setup now treats `secrets/google_service_account.json` as the preferred production credential. Personal OAuth remains available only as a fallback / recovery path.
+
+---
+
 ### v3.2.1 (2026-04-06)
 
 #### Security & Hardening
@@ -2599,8 +2612,8 @@ docker compose up -d --build finance-api
 - Changed: GUIDE.md §3, §5, §24, §25, §26.6, §29, §31 updated to reflect fully-built status
 - Fixed: Design doc `docker-compose.yml` snippet in §25 corrected to match actual configuration
 - Fixed: Design doc SQLite schema in §26.6 corrected to actual (no `sheet_row` column; sync_log columns match implementation)
-- Fixed: `finance/config.py` — `get_finance_config()` and `get_sheets_config()` now check env var overrides before `settings.toml` values (`FINANCE_SQLITE_DB`, `FINANCE_XLSX_INPUT`, `GOOGLE_CREDENTIALS_FILE`, `GOOGLE_TOKEN_FILE`); required because `settings.toml` stores host-absolute paths that are wrong inside Docker
-- Updated: `docker-compose.yml` `finance-api` environment block — four path-override env vars added; container now reads `finance.db` from `/app/data/finance.db` and OAuth secrets from `/app/secrets/`
+- Fixed: `finance/config.py` — `get_finance_config()` and `get_sheets_config()` now check env var overrides before `settings.toml` values (`FINANCE_SQLITE_DB`, `FINANCE_XLSX_INPUT`, `GOOGLE_CREDENTIALS_FILE`, `GOOGLE_TOKEN_FILE`, `GOOGLE_SERVICE_ACCOUNT_FILE`); required because `settings.toml` stores host-absolute paths that are wrong inside Docker
+- Updated: `docker-compose.yml` `finance-api` environment block — path-override env vars added; the container reads `finance.db` from `/app/data/finance.db` and Google Sheets secrets from `/app/secrets/`
 - Deployed: `finance-api` container running and healthy; `docker compose ps` shows both `finance-api` and `mail-agent` as `(healthy)`
 
 ### v2.0.0-design (2026-03-27) — superseded by v2.0.0
@@ -3018,6 +3031,8 @@ xlsx_input = "/Users/g4ndr1k/agentic-ai/output/xls/ALL_TRANSACTIONS.xlsx"
 
 [google_sheets]
 credentials_file  = "/Users/g4ndr1k/agentic-ai/secrets/google_credentials.json"
+token_file        = "/Users/g4ndr1k/agentic-ai/secrets/google_token.json"
+service_account_file = "/Users/g4ndr1k/agentic-ai/secrets/google_service_account.json"
 spreadsheet_id    = ""        # fill after creating the Google Sheet
 transactions_tab  = "Transactions"
 aliases_tab       = "Merchant Aliases"
@@ -3401,9 +3416,12 @@ Transactions that clear Layers 1–3 without a match surface in the PWA review q
 
 ### Authentication
 
-- **Type:** OAuth 2.0, personal Google account.
-- **Credentials file:** `secrets/google_credentials.json` (gitignored, never committed).
-- **Setup:** Download OAuth 2.0 Desktop client credentials from Google Cloud Console → APIs & Services → Credentials. First run triggers a browser consent flow that saves a token file. Subsequent runs are token-refreshed automatically.
+- **Preferred type:** Google service account.
+- **Preferred credentials file:** `secrets/google_service_account.json` (gitignored, never committed).
+- **Preferred setup:** Create a service account in Google Cloud Console, download its JSON key, save it locally, and share the target spreadsheet with the service-account email as `Editor`. This avoids personal refresh-token expiry/revocation problems and works cleanly inside Docker.
+- **Fallback type:** OAuth 2.0 Desktop client, personal Google account.
+- **Fallback credentials files:** `secrets/google_credentials.json` + `secrets/google_token.json`.
+- **Fallback setup:** Download OAuth 2.0 Desktop client credentials from Google Cloud Console → APIs & Services → Credentials. First run triggers a browser consent flow that saves a token file. This path remains supported but is no longer the recommended production setup.
 - **Scopes required:** `https://www.googleapis.com/auth/spreadsheets`
 
 ### Google Sheet structure
@@ -3613,13 +3631,15 @@ vite-plugin-pwa generates a Workbox service worker. API GET routes (except `/syn
   ```
 - [x] **Google Cloud project:** Created at console.cloud.google.com
 - [x] **Enable Sheets API:** APIs & Services → Library → Google Sheets API → Enabled
-- [x] **Create OAuth credentials:** APIs & Services → Credentials → OAuth 2.0 Client ID → Desktop app → Downloaded JSON → saved as `secrets/google_credentials.json`
-- [x] **Add test user:** OAuth consent screen → Test users → added `g4ndr1k@gmail.com` (required for unverified personal OAuth apps)
+- [x] **Create service account (preferred):** APIs & Services → Credentials / IAM & Admin → Service Accounts → created `finance-sync` → downloaded JSON key → saved as `secrets/google_service_account.json`
+- [x] **Share the spreadsheet with the service account:** add the service-account email as `Editor` on the target Google Sheet
+- [x] **Optional OAuth fallback:** Desktop OAuth client JSON still available as `secrets/google_credentials.json` for manual fallback / local recovery
 - [x] **Create Google Sheet:** Blank Sheet in personal Google account; Spreadsheet ID copied into `settings.toml` → `[google_sheets] spreadsheet_id`
 - [x] **Create Sheet structure:**
   ```bash
   python3 -m finance.setup_sheets
-  # Browser opened once for OAuth consent → token saved to secrets/google_token.json
+  # With service-account auth configured, no browser consent is required.
+  # If using OAuth fallback instead, browser consent saves secrets/google_token.json
   # Created: Transactions · Merchant Aliases · Categories · Currency Codes · Import Log · PDF Import Log
   # Seeded: 16 default categories, 18 currencies
   ```
@@ -3644,7 +3664,9 @@ python3 -m finance.importer --file /path/to/file.xlsx
 python3 -m finance.importer -v
 ```
 
-OAuth token (`secrets/google_token.json`) is refreshed automatically when it expires — no manual re-auth needed.
+When service-account auth is configured, finance sync does not depend on a personal refresh token. If you keep the OAuth fallback enabled, `secrets/google_token.json` may still be refreshed automatically when valid, but Google can also revoke it; service-account auth is the preferred long-term mode.
+
+Inside Docker, the `finance-api` service uses `GOOGLE_SERVICE_ACCOUNT_FILE=/app/secrets/google_service_account.json` so the mounted secret file resolves correctly in-container.
 
 ### Stage 2.1 — Built and working ✅
 

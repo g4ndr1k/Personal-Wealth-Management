@@ -12,6 +12,7 @@ from typing import Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -440,7 +441,20 @@ def _build_service(cfg: SheetsConfig):
     return build("sheets", "v4", credentials=_get_credentials(cfg))
 
 
-def _get_credentials(cfg: SheetsConfig) -> Credentials:
+def _get_credentials(cfg: SheetsConfig):
+    if cfg.service_account_file:
+        if not os.path.exists(cfg.service_account_file):
+            raise FileNotFoundError(
+                f"Google service account file not found: {cfg.service_account_file}\n"
+                "Create a service account key JSON in Google Cloud Console, save it locally, "
+                "then share the target spreadsheet with the service account email."
+            )
+        log.info("Using Google service account credentials: %s", cfg.service_account_file)
+        return ServiceAccountCredentials.from_service_account_file(
+            cfg.service_account_file,
+            scopes=SCOPES,
+        )
+
     creds: Optional[Credentials] = None
 
     if os.path.exists(cfg.token_file):

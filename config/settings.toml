@@ -136,6 +136,9 @@ pairs = [
 credentials_file = "/Users/g4ndr1k/agentic-ai/secrets/google_credentials.json"
 # Saved automatically after first OAuth consent; refreshed on expiry
 token_file       = "/Users/g4ndr1k/agentic-ai/secrets/google_token.json"
+# Optional: preferred long-term auth. If set, finance sync uses this service account
+# instead of the personal OAuth token above.
+service_account_file = "/Users/g4ndr1k/agentic-ai/secrets/google_service_account.json"
 # Copy the ID from the Google Sheet URL:
 # https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit
 spreadsheet_id   = "1vTtSFrXK4IoAmK1sTZkqiBD6qGEzSjsNEPPFiHZd-28"    # ← fill this in after creating the sheet
@@ -160,3 +163,4 @@ cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 host            = "http://localhost:11434"
 model           = "gemma4:e4b"
 timeout_seconds = 60
+

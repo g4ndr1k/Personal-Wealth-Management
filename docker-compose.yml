@@ -13,6 +13,7 @@ services:
       FINANCE_XLSX_INPUT:       /app/output/xls/ALL_TRANSACTIONS.xlsx
       GOOGLE_CREDENTIALS_FILE:  /app/secrets/google_credentials.json
       GOOGLE_TOKEN_FILE:        /app/secrets/google_token.json
+      GOOGLE_SERVICE_ACCOUNT_FILE: /app/secrets/google_service_account.json
       ANTHROPIC_API_KEY:        ${ANTHROPIC_API_KEY:-}
       FINANCE_API_KEY:          ${FINANCE_API_KEY}
       GOOGLE_SPREADSHEET_ID:    ${GOOGLE_SPREADSHEET_ID:-}

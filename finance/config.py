@@ -17,6 +17,7 @@ class FinanceConfig:
 class SheetsConfig:
     credentials_file: str
     token_file: str
+    service_account_file: str
     spreadsheet_id: str
     transactions_tab: str
     aliases_tab: str
@@ -75,9 +76,11 @@ def get_sheets_config(cfg: dict) -> SheetsConfig:
     # Default token file lives beside the credentials file
     default_token = os.path.join(os.path.dirname(creds), "google_token.json")
     token = os.environ.get("GOOGLE_TOKEN_FILE") or s.get("token_file", default_token)
+    service_account = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE") or s.get("service_account_file", "")
     return SheetsConfig(
         credentials_file=creds,
         token_file=token,
+        service_account_file=service_account,
         spreadsheet_id=os.environ.get("GOOGLE_SPREADSHEET_ID") or s["spreadsheet_id"],
         transactions_tab=s.get("transactions_tab", "Transactions"),
         aliases_tab=s.get("aliases_tab", "Merchant Aliases"),
