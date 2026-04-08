@@ -490,6 +490,21 @@ def _run_job(job_id: str, password: str):
         if result.statement_type in ("consol", "consolidated"):
             _upsert_fund_holdings(result, logs)
 
+        # ── Step 2.8: IPOT equity/fund holdings → holdings table ──────────
+        #   For IPOT portfolio statements, write each stock and mutual-fund
+        #   position into the Stage 3 holdings table.  Also gap-fills any
+        #   missing months between this snapshot and today using carry-forward
+        #   (INSERT OR IGNORE) so the Wealth dashboard shows continuity.
+        if getattr(result, "holdings", None):
+            _upsert_investment_holdings(result, logs)
+
+        # ── Step 2.9: IPOT RDN cash balance → account_balances ────────────
+        #   Portfolio and Statement PDFs both carry an AccountSummary with
+        #   account_number set (the client code), which bypasses the
+        #   _is_savings_account keyword filter inside _upsert_closing_balance.
+        if result.statement_type in ("portfolio", "statement") and result.accounts:
+            _upsert_closing_balance(result, logs)
+
         # ── Step 3: export XLS ────────────────────────────────────────────
         from exporters.xls_writer import export
         output_dir = _config.get("xls_output_dir", "output/xls")
@@ -960,6 +975,209 @@ def _upsert_fund_holdings(result, logs: list):
 
     except Exception as exc:
         logs.append(f"Fund-holdings upsert warning: {exc}")
+
+
+def _upsert_investment_holdings(result, logs: list):
+    """
+    Upsert IPOT equity and mutual-fund positions from a portfolio PDF into the
+    Stage 3 holdings table, then gap-fill any missing months up to today.
+
+    Gap-fill logic
+    ──────────────
+    When only a January PDF exists (no February PDF yet), we replicate the
+    January holdings into February so the Wealth dashboard shows a continuous
+    history.  The fill stops at the first month that already has IPOT holdings
+    (i.e. where a later PDF was already processed) and never overwrites existing
+    rows (INSERT OR IGNORE).  When the real February PDF is later processed it
+    overwrites the placeholder via ON CONFLICT DO UPDATE.
+
+    Field mapping
+    ─────────────
+      asset_class        = holding.asset_class  ("stock" or "mutual_fund")
+      asset_group        = "Investments"
+      asset_name         = holding.asset_name
+      isin_or_code       = holding.isin_or_code
+      institution        = "IPOT"
+      account            = client code (from result.accounts[0].account_number)
+      owner              = result.owner
+      currency           = "IDR"
+      quantity           = holding.quantity
+      unit_price         = holding.unit_price   (Close price or Last NAV)
+      market_value       = holding.market_value_idr
+      market_value_idr   = holding.market_value_idr
+      cost_basis         = holding.cost_basis_idr
+      cost_basis_idr     = holding.cost_basis_idr
+      unrealised_pnl_idr = holding.unrealised_pnl_idr
+      exchange_rate      = 1.0  (all IDR)
+    """
+    finance_db = _config.get("finance_sqlite_db", "")
+    if not finance_db:
+        logs.append("Investment-holdings upsert skipped: finance_sqlite_db not configured")
+        return
+
+    holdings = getattr(result, "holdings", None)
+    if not holdings:
+        return
+
+    try:
+        import re as _re
+        import sqlite3 as _sqlite3
+        from datetime import datetime as _dt, date as _date
+        from calendar import monthrange
+
+        today = _dt.now().strftime("%Y-%m-%d")
+
+        # Snapshot date: parse period_end DD/MM/YYYY → YYYY-MM-DD
+        raw_date = result.period_end or result.print_date or ""
+        dm = _re.match(r"(\d{2})/(\d{2})/(\d{4})", raw_date)
+        if not dm:
+            logs.append("Investment-holdings upsert skipped: could not determine snapshot date")
+            return
+        snapshot_date = f"{dm.group(3)}-{dm.group(2)}-{dm.group(1)}"
+
+        # Client code from the RDN AccountSummary
+        account_id = ""
+        if getattr(result, "accounts", None):
+            account_id = result.accounts[0].account_number or ""
+
+        con = _sqlite3.connect(finance_db)
+        upserted = 0
+
+        # ── Upsert the snapshot date's holdings ───────────────────────────────
+        for h in holdings:
+            note = (
+                f"Auto-imported from IPOT portfolio ({snapshot_date})"
+                f" | {h.asset_class.title()}: {h.isin_or_code}"
+                f" | qty={h.quantity:,.0f}  price={h.unit_price:,.2f}"
+                f"  cost={h.cost_basis_idr:,.0f}  mktval={h.market_value_idr:,.0f}"
+            )
+            con.execute("""
+                INSERT INTO holdings
+                    (snapshot_date, asset_class, asset_group, asset_name, isin_or_code,
+                     institution, account, owner, currency, quantity, unit_price,
+                     market_value, market_value_idr, cost_basis, cost_basis_idr,
+                     unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
+                     notes, import_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(snapshot_date, asset_class, asset_name, owner)
+                DO UPDATE SET
+                    isin_or_code       = excluded.isin_or_code,
+                    institution        = excluded.institution,
+                    account            = excluded.account,
+                    currency           = excluded.currency,
+                    quantity           = excluded.quantity,
+                    unit_price         = excluded.unit_price,
+                    market_value       = excluded.market_value,
+                    market_value_idr   = excluded.market_value_idr,
+                    cost_basis         = excluded.cost_basis,
+                    cost_basis_idr     = excluded.cost_basis_idr,
+                    unrealised_pnl_idr = excluded.unrealised_pnl_idr,
+                    exchange_rate      = excluded.exchange_rate,
+                    notes              = excluded.notes,
+                    import_date        = excluded.import_date
+            """, (
+                snapshot_date,
+                h.asset_class, "Investments",
+                h.asset_name, h.isin_or_code,
+                result.bank, account_id, result.owner or "",
+                "IDR",
+                h.quantity, h.unit_price,
+                h.market_value_idr, h.market_value_idr,
+                h.cost_basis_idr, h.cost_basis_idr,
+                h.unrealised_pnl_idr, 1.0,
+                "", 0.0,
+                note, today,
+            ))
+            upserted += 1
+            logs.append(
+                f"  {h.asset_class} {h.isin_or_code} ({h.asset_name[:30]})"
+                f"  qty={h.quantity:,.0f}  price={h.unit_price:,.2f}"
+                f"  mktval_idr={h.market_value_idr:,.0f}"
+                f"  P/L {h.unrealised_pnl_idr:+,.0f}"
+            )
+
+        con.commit()
+        if upserted:
+            logs.append(
+                f"Investments: upserted {upserted} position(s) for {result.bank} [{snapshot_date}]"
+            )
+
+        # ── Gap-fill: copy holdings forward into months with no IPOT data ─────
+        # Parse snapshot_date into year/month
+        snap_y, snap_m, snap_d = (int(x) for x in snapshot_date.split("-"))
+        today_dt = _dt.now().date()
+
+        # Advance one month at a time from the snapshot month
+        cur_y, cur_m = snap_y, snap_m
+        filled = 0
+
+        while True:
+            # Move to next calendar month
+            if cur_m == 12:
+                cur_y, cur_m = cur_y + 1, 1
+            else:
+                cur_m += 1
+
+            # Stop once we reach the current month (don't fill future months)
+            if _date(cur_y, cur_m, 1) > _date(today_dt.year, today_dt.month, 1):
+                break
+
+            # Month-end date for the candidate fill month
+            last_day = monthrange(cur_y, cur_m)[1]
+            fill_date = f"{cur_y}-{cur_m:02d}-{last_day:02d}"
+
+            # Check if any IPOT holdings already exist for this month-end
+            existing = con.execute(
+                "SELECT COUNT(*) FROM holdings WHERE snapshot_date=? AND institution='IPOT' AND owner=?",
+                (fill_date, result.owner or ""),
+            ).fetchone()[0]
+
+            if existing > 0:
+                # A later PDF was already processed — stop filling
+                logs.append(
+                    f"  Gap-fill: {fill_date} already has IPOT data — stopping carry-forward"
+                )
+                break
+
+            # Insert carry-forward copies (INSERT OR IGNORE so a concurrent
+            # real import always wins)
+            for h in holdings:
+                carry_note = (
+                    f"Carried forward from {snapshot_date} (no {fill_date[:7]} PDF yet)"
+                    f" | {h.asset_class.title()}: {h.isin_or_code}"
+                )
+                con.execute("""
+                    INSERT OR IGNORE INTO holdings
+                        (snapshot_date, asset_class, asset_group, asset_name, isin_or_code,
+                         institution, account, owner, currency, quantity, unit_price,
+                         market_value, market_value_idr, cost_basis, cost_basis_idr,
+                         unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
+                         notes, import_date)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    fill_date,
+                    h.asset_class, "Investments",
+                    h.asset_name, h.isin_or_code,
+                    result.bank, account_id, result.owner or "",
+                    "IDR",
+                    h.quantity, h.unit_price,
+                    h.market_value_idr, h.market_value_idr,
+                    h.cost_basis_idr, h.cost_basis_idr,
+                    h.unrealised_pnl_idr, 1.0,
+                    "", 0.0,
+                    carry_note, today,
+                ))
+            filled += 1
+            logs.append(f"  Gap-fill: carried {len(holdings)} holding(s) forward to {fill_date}")
+
+        if filled:
+            logs.append(f"Investments: gap-filled {filled} month(s) after {snapshot_date}")
+
+        con.commit()
+        con.close()
+
+    except Exception as exc:
+        logs.append(f"Investment-holdings upsert warning: {exc}")
 
 
 def _get_bank_password(bank_name: str) -> str:

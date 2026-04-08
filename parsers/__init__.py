@@ -1,4 +1,4 @@
-from .base import StatementResult, Transaction, AccountSummary
+from .base import StatementResult, Transaction, AccountSummary, InvestmentHolding
 
 
 def detect_and_parse(*args, **kwargs):

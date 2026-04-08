@@ -122,10 +122,84 @@
           </div>
         </template>
 
-        <!-- Other investments sub-group -->
+        <!-- Stocks sub-group -->
+        <template v-if="filteredStocks.length">
+          <div class="sub-header">
+            <span>📊 Stocks</span>
+            <span class="sub-total">{{ fmt(filteredStocks.reduce((s,h) => s + (h.market_value_idr||0), 0)) }}</span>
+          </div>
+          <div
+            v-for="h in filteredStocks"
+            :key="`hld-${h.id}`"
+            class="asset-item asset-item-tappable"
+            @click="editItem('holding', h)"
+          >
+            <div class="asset-main">
+              <div class="asset-name-row">
+                <span class="asset-name">{{ h.isin_or_code || h.asset_name }}</span>
+                <span v-if="h.unit_price > 0" class="price-badge stock-price">
+                  {{ fmtCompact(h.unit_price) }}
+                </span>
+              </div>
+              <span class="asset-sub">
+                <template v-if="h.isin_or_code && h.asset_name !== h.isin_or_code">{{ h.asset_name }} · </template>
+                {{ h.institution || 'Stock' }}
+                <template v-if="h.quantity > 0"> · {{ fmtQty(h.quantity) }} shares</template>
+              </span>
+            </div>
+            <div class="asset-right">
+              <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
+              <span v-if="h.unrealised_pnl_idr !== 0"
+                :class="h.unrealised_pnl_idr >= 0 ? 'text-income' : 'text-expense'"
+                style="font-size:12px">
+                {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
+              </span>
+            </div>
+            <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+          </div>
+        </template>
+
+        <!-- Mutual Funds sub-group -->
+        <template v-if="filteredMutualFunds.length">
+          <div class="sub-header">
+            <span>💹 Mutual Funds</span>
+            <span class="sub-total">{{ fmt(filteredMutualFunds.reduce((s,h) => s + (h.market_value_idr||0), 0)) }}</span>
+          </div>
+          <div
+            v-for="h in filteredMutualFunds"
+            :key="`hld-${h.id}`"
+            class="asset-item asset-item-tappable"
+            @click="editItem('holding', h)"
+          >
+            <div class="asset-main">
+              <div class="asset-name-row">
+                <span class="asset-name">{{ h.isin_or_code || h.asset_name }}</span>
+                <span v-if="h.unit_price > 0" class="price-badge nav-badge">
+                  NAV {{ h.unit_price.toFixed(4) }}
+                </span>
+              </div>
+              <span class="asset-sub">
+                <template v-if="h.isin_or_code && h.asset_name !== h.isin_or_code">{{ h.asset_name }} · </template>
+                {{ h.institution || 'Mutual Fund' }}
+                <template v-if="h.quantity > 0"> · {{ fmtQty(h.quantity) }} units</template>
+              </span>
+            </div>
+            <div class="asset-right">
+              <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
+              <span v-if="h.unrealised_pnl_idr !== 0"
+                :class="h.unrealised_pnl_idr >= 0 ? 'text-income' : 'text-expense'"
+                style="font-size:12px">
+                {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
+              </span>
+            </div>
+            <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+          </div>
+        </template>
+
+        <!-- Other investments sub-group (retirement, crypto, etc.) -->
         <template v-if="filteredOtherInvestments.length">
-          <div v-if="filteredBonds.length" class="sub-header">
-            <span>📊 Other Investments</span>
+          <div v-if="filteredBonds.length || filteredStocks.length || filteredMutualFunds.length" class="sub-header">
+            <span>🏦 Other Investments</span>
             <span class="sub-total">{{ fmt(filteredOtherInvestments.reduce((s,h) => s + (h.market_value_idr||0), 0)) }}</span>
           </div>
           <div
@@ -497,6 +571,21 @@ function fmtRate(rate) {
   }).format(rate)
 }
 
+// Format a stock/fund price badge, e.g. 4,820 or 6,349.54
+function fmtCompact(n) {
+  if (!n) return ''
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(n)
+}
+
+// Format a share/unit quantity, e.g. 80,000 or 200,991
+function fmtQty(n) {
+  if (!n) return ''
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(n)
+}
+
 function fmtDateChip(d) {
   if (!d) return ''
   const [y, m] = d.split('-')
@@ -589,7 +678,9 @@ function pickMonth(val) {
 const filteredBalances         = computed(() => balances.value)
 const filteredInvestments      = computed(() => holdings.value.filter(h => h.asset_group === 'Investments'))
 const filteredBonds            = computed(() => filteredInvestments.value.filter(h => h.asset_class === 'bond'))
-const filteredOtherInvestments = computed(() => filteredInvestments.value.filter(h => h.asset_class !== 'bond'))
+const filteredStocks           = computed(() => filteredInvestments.value.filter(h => h.asset_class === 'stock'))
+const filteredMutualFunds      = computed(() => filteredInvestments.value.filter(h => h.asset_class === 'mutual_fund'))
+const filteredOtherInvestments = computed(() => filteredInvestments.value.filter(h => !['bond','stock','mutual_fund'].includes(h.asset_class)))
 const filteredRealEstate       = computed(() => holdings.value.filter(h => h.asset_group === 'Real Estate'))
 const filteredPhysical         = computed(() => holdings.value.filter(h => h.asset_group === 'Physical Assets'))
 const filteredLiabilities      = computed(() => liabilities.value)
@@ -920,6 +1011,8 @@ onMounted(async () => {
 }
 .price-badge.premium  { background: #dcfce7; color: #16a34a; }
 .price-badge.discount { background: #fee2e2; color: #dc2626; }
+.price-badge.stock-price { background: #eff6ff; color: #2563eb; }
+.price-badge.nav-badge   { background: #f0fdf4; color: #15803d; }
 .asset-del {
   flex-shrink: 0;
   width: 28px; height: 28px;

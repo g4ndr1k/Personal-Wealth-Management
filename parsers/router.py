@@ -12,6 +12,8 @@ Detection priority:
                        statements "CIMB Niaga" appears in the Poin Xtra footer on page 2)
   7. CIMB Niaga Consol — "CIMB Niaga" + "COMBINE STATEMENT"  (page 1)
   8. Maybank Consol  — "Maybank" + "PORTFOLIO"  (page 1+2 combined)
+  9. IPOT Portfolio  — "PT INDO PREMIER SEKURITAS" + "Client Portofolio"  (page 1)
+ 10. IPOT Statement  — "PT INDO PREMIER SEKURITAS" + "Client Statement"  (page 1)
 """
 import pdfplumber
 from .base import StatementResult
@@ -20,6 +22,7 @@ from . import (
     bca_cc, bca_savings,
     permata_cc, permata_savings,
     cimb_niaga_cc, cimb_niaga_consol,
+    ipot_portfolio, ipot_statement,
 )
 
 
@@ -72,6 +75,14 @@ def detect_and_parse(pdf_path: str, ollama_client=None,
     if cimb_niaga_consol.can_parse(page1_text):
         return cimb_niaga_consol.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
 
+    # IPOT: portfolio before statement (both share "PT INDO PREMIER SEKURITAS";
+    # "Client Portofolio" vs "Client Statement" are mutually exclusive)
+    if ipot_portfolio.can_parse(page1_text):
+        return ipot_portfolio.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
+
+    if ipot_statement.can_parse(page1_text):
+        return ipot_statement.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
+
     raise UnknownStatementError(
         f"Could not identify statement type from PDF: {pdf_path}\n"
         f"First-page preview: {page1_text[:300]}"
@@ -101,5 +112,11 @@ def detect_bank_and_type(pdf_path: str) -> tuple[str, str]:
         return "CIMB Niaga", "cc"
     if cimb_niaga_consol.can_parse(page1_text):
         return "CIMB Niaga", "consol"
+
+    if ipot_portfolio.can_parse(page1_text):
+        return "IPOT", "portfolio"
+
+    if ipot_statement.can_parse(page1_text):
+        return "IPOT", "statement"
 
     return "Unknown", "unknown"

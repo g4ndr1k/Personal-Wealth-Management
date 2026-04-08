@@ -68,6 +68,31 @@ class BondHolding:
 
 
 @dataclass
+class InvestmentHolding:
+    """
+    A single equity or mutual-fund position from an IPOT portfolio PDF.
+
+    Column mapping from PDF:
+      asset_name        — full company/fund name e.g. "BANK MANDIRI (PERSERO) Tbk"
+      isin_or_code      — ticker e.g. "BMRI", "BNGA", "XRDN"
+      asset_class       — "stock" or "mutual_fund"
+      quantity          — shares (stock) or units (mutual fund)
+      unit_price        — Close price (stock) or Last NAV (fund) in IDR
+      market_value_idr  — Market Value column from PDF (IDR)
+      cost_basis_idr    — Stock Value / Avg Value column from PDF (IDR)
+      unrealised_pnl_idr — Unrealize column (IDR, negative = loss)
+    """
+    asset_name: str
+    isin_or_code: str
+    asset_class: str          # "stock" or "mutual_fund"
+    quantity: float
+    unit_price: float
+    market_value_idr: float
+    cost_basis_idr: float
+    unrealised_pnl_idr: float
+
+
+@dataclass
 class StatementResult:
     """Full parsed result from one PDF."""
     bank: str
@@ -83,6 +108,7 @@ class StatementResult:
     period_end: str = ""                # DD/MM/YYYY
     exchange_rates: dict = field(default_factory=dict)
     bonds: list[BondHolding] = field(default_factory=list)
+    holdings: list[InvestmentHolding] = field(default_factory=list)
     raw_errors: list[str] = field(default_factory=list)
 
 
@@ -120,6 +146,31 @@ def parse_idr_amount(s: str) -> Optional[float]:
     else:
         # Western or dot-only: comma=thousands, dot=decimal  e.g. 1,234,567.89 or 1.234.567
         s = s.replace(",", "")
+    try:
+        val = float(s)
+        return -val if negative else val
+    except ValueError:
+        return None
+
+
+def _parse_ipot_amount(s: str) -> Optional[float]:
+    """
+    Parse IPOT Western number format where commas are ALWAYS thousands separators.
+
+    Examples:
+      '2,084,355,000' → 2084355000.0
+      '6,349.54'      → 6349.54
+      '-122,363,304'  → -122363304.0
+
+    Note: parse_idr_amount() cannot be used here. For comma-only strings like
+    '2,084,355,000' it detects Indonesian format (last_comma > last_dot=-1) and
+    replaces commas with dots → float('2.084.355.000') raises ValueError.
+    """
+    if not s:
+        return None
+    s = str(s).strip().replace(" ", "")
+    negative = s.startswith("-")
+    s = s.lstrip("-").replace(",", "")
     try:
         val = float(s)
         return -val if negative else val
