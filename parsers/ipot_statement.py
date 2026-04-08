@@ -77,16 +77,17 @@ _RE_PRINT_DATE = re.compile(
 #
 # Groups: (seq)(trx_date)(due_date)(description)(amount)(debet)(credit)(balance)(xrdn)(total_bal)
 _RE_TX_ROW = re.compile(
-    r"^(\d+)\s+"
-    r"(\d{1,2}-[A-Za-z]{3}-\d{2})\s+"          # TrxDate
-    r"(\d{1,2}-[A-Za-z]{3}-\d{2})\s+"          # DueDate
-    r"(.+?)\s+"                                  # Description (non-greedy; absorbs Price col
+    r"^(\d+)[ \t]+"
+    r"(\d{1,2}-[A-Za-z]{3}-\d{2})[ \t]+"        # TrxDate
+    r"(\d{1,2}-[A-Za-z]{3}-\d{2})[ \t]+"        # DueDate
+    r"(.+?)[ \t]+"                               # Description (non-greedy; absorbs Price col
                                                  # when negative, e.g. "-20,182,552")
-    r"([\d,]+\.?\d*)\s+"                         # Amount  (first all-positive numeric token)
-    r"([\d,]+)\s+"                               # Debet
-    r"([\d,]+)\s+"                               # Credit
-    r"([\d,]+)\s+"                               # Balance (RDN running cash)
-    r"([\d,]*)\s*"                               # XRDN balance (zero or more digits)
+    r"([\d,]+\.?\d*)[ \t]+"                      # Amount  (first all-positive numeric token)
+    r"([\d,]+)[ \t]+"                            # Debet
+    r"(-?[\d,]+)[ \t]+"                          # Credit (may be negative when Amount was
+                                                 # absorbed into desc and Balance appears here)
+    r"(-?[\d,]+)[ \t]+"                          # Balance (RDN running cash, can be negative)
+    r"([\d,]*)[ \t]*"                            # XRDN balance (zero or more digits)
     r"([\d,]+)",                                 # Total Balance
     re.MULTILINE,
 )
@@ -245,9 +246,21 @@ def _parse_transactions(
         credit    = _parse_ipot_amount(m.group(7)) or 0.0
         balance   = _parse_ipot_amount(m.group(8))
 
-        # Determine tx_type: if credit column is non-zero it's a Credit
-        tx_type = "Credit" if credit > 0 else "Debit"
-        amount_idr = credit if credit > 0 else debet
+        # Determine tx_type and amount.
+        # When a negative Amount in the PDF is absorbed into the description,
+        # the columns shift left: g5=PDF-Debet, g6=PDF-Credit, g7=PDF-Balance
+        # (which can be negative, e.g. -9,963 after a stamp-duty deduction).
+        # In that case credit (g7) is negative → use g5 (PDF-Debet) as amount.
+        if credit > 0:
+            tx_type    = "Credit"
+            amount_idr = credit
+        elif debet > 0:
+            tx_type    = "Debit"
+            amount_idr = debet
+        else:
+            # credit <= 0 and debet == 0 — fall back to g5 (shifted Debet col)
+            tx_type    = "Debit" if amount > 0 else "Credit"
+            amount_idr = abs(amount)
 
         transactions.append(Transaction(
             date_transaction=trx_date or "",

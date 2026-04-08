@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
+**Version:** 3.5.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-04-07
+**Last validated against:** checked-in codebase 2026-04-08
 
 ---
 
@@ -178,12 +178,18 @@ The system alerts on:
   - Permata Savings (Rekening Koran) statement parser
   - CIMB Niaga Credit Card statement parser (inline foreign currency, multi-owner)
   - CIMB Niaga Consolidated Portfolio statement parser (savings transactions via table extraction)
+  - IPOT (Indo Premier) Portfolio statement parser — stocks + mutual funds → `holdings` table; RDN balance → `account_balances`; month-on-month gap-fill
+  - IPOT (Indo Premier) Client Statement parser — RDN cash ledger transactions + closing balance
+  - BNI Sekuritas portfolio statement parser — stocks, mutual funds, and RDN cash balance; multi-line fund names
+  - Stockbit Sekuritas "Statement of Account" parser — stocks with two-line company names and optional flag characters (`M`, `X`); parenthesised negative Ending Balance; cash ledger with optional Interest column
   - Owner detection module (`parsers/owner.py`) — maps customer name substrings to canonical owner labels (Gandrik / Helen)
-  - Auto-detection of bank/statement type from PDF content (bank-name-first detection strategy)
+  - Auto-detection of bank/statement type from PDF content (bank-name-first detection strategy, 11 detectors in priority order)
   - 3-layer parsing: pdfplumber tables → Python regex → Ollama LLM fallback
   - Multi-owner XLS export: `{Bank}_{Owner}.xlsx` per bank/owner pair + flat `ALL_TRANSACTIONS.xlsx` with Owner column
   - Mail.app attachment auto-scanner for bank PDFs
   - Web UI at `http://127.0.0.1:9100/pdf/ui`
+  - Auto-upsert pipeline in `bridge/pdf_handler.py` after every portfolio parse: savings/consol closing balance → `account_balances`; bond holdings → `holdings`; mutual-fund holdings → `holdings`; equity/fund holdings with month-end gap-fill → `holdings`; RDN cash balance → `account_balances`
+  - Gap-fill logic — carries the most recent brokerage holdings forward month-by-month (INSERT OR IGNORE) until either the current month or the first month that already has data for that institution, preventing dashboard gaps between monthly PDFs
 - Stage 2 finance package (`finance/`) — see §24–32
   - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation, XLSX date parser
@@ -210,11 +216,13 @@ The system alerts on:
   - `pwa/vite.config.js` — @vitejs/plugin-vue + vite-plugin-pwa (Workbox NetworkFirst cache) + `/api` proxy to `:8090`
   - Build output: `pwa/dist/` — 391 KB JS (132 KB gzipped), service worker + workbox generated
 - Stage 3 Wealth Management backend (`finance/`) — see §33–39
-  - `finance/db.py` — extended with 4 new tables: `account_balances`, `holdings`, `liabilities`, `net_worth_snapshots` (24-column breakdown); 8 new indexes
+  - `finance/db.py` — extended with 4 new tables: `account_balances`, `holdings`, `liabilities`, `net_worth_snapshots` (24-column breakdown); 8 new indexes; `holdings` UNIQUE key includes `institution` to support multiple brokerages holding the same ticker simultaneously
   - `finance/api.py` — extended with 13 new `/api/wealth/*` endpoints: balances CRUD, holdings CRUD, liabilities CRUD, snapshot generation, history, summary
+  - `bridge/gold_price.py` — fetches IDR price per gram of gold via the fawazahmed0 XAU/IDR API (same free no-key API as `bridge/fx_rate.py`; works for historical dates). Converts troy-ounce price to per-gram: `xau_idr / 31.1035`. Returns `None` on failure.
+  - `scripts/seed_gold_holdings.py` — one-time (and repeatable) seeder for 14 Antam Logam Mulia gold bars in three weight classes (100 gr × 5, 50 gr × 5, 25 gr × 4). Fetches end-of-month XAU/IDR spot prices for every month from 2026-01 to today, inserts 3 `holdings` rows per month (`asset_class="gold"`, `institution="Physical"`), stores certificate numbers in `notes`. Supports `--dry-run`, `--owner`, `--from YYYY-MM`, `--db` flags. Re-running refreshes prices (ON CONFLICT DO UPDATE).
 - Stage 3 Vue 3 PWA additions (`pwa/`) — see §37
   - `pwa/src/views/Wealth.vue` — net worth dashboard: snapshot date chips, hero net-worth card with MoM change, asset-group breakdown bars with sub-category chips, Chart.js 12-month trend, "Refresh Snapshot" button, FAB to Assets
-  - `pwa/src/views/Holdings.vue` — asset manager: group filter tabs (All/Cash/Investments/Real Estate/Physical/Liabilities), snapshot date picker, per-item delete, FAB → bottom-sheet modal with 3-mode entry form (Balance / Holding / Liability), "Save Snapshot" button
+  - `pwa/src/views/Holdings.vue` — asset manager: group filter tabs (All/Cash/Investments/Real Estate/Physical/Liabilities), snapshot date picker, per-item delete, FAB → bottom-sheet modal with 3-mode entry form (Balance / Holding / Liability), "Save Snapshot" button; ↺ inline refresh button in month-nav bar
   - `pwa/src/api/client.js` — extended with 13 new wealth API calls + `del()` helper
   - `pwa/src/router/index.js` — 2 new routes: `/wealth`, `/holdings`
   - `pwa/src/App.vue` — nav expanded to 6 tabs: Flows · 💰 Wealth · 🗂️ Assets · Txns · Review · More
@@ -363,8 +371,10 @@ agentic-ai/
 │   ├── rate_limit.py             # Sliding-window rate limiter
 │   ├── mail_source.py            # Mail.app SQLite adapter
 │   ├── messages_source.py        # Messages.app SQLite adapter + AppleScript sender
-│   ├── pdf_handler.py            # PDF processor endpoints (/pdf/*)
+│   ├── pdf_handler.py            # PDF processor endpoints (/pdf/*); auto-upsert pipeline for holdings/balances
 │   ├── pdf_unlock.py             # pikepdf unlock + AppleScript fallback
+│   ├── fx_rate.py                # Historical FX rates via fawazahmed0/currency-api (free, no key)
+│   ├── gold_price.py             # IDR/gram gold price via XAU/IDR from fx_rate (historical-capable)
 │   ├── attachment_scanner.py     # Mail.app attachment watcher
 │   └── static/
 │       └── pdf_ui.html           # Web UI for PDF upload/processing/download
@@ -380,7 +390,11 @@ agentic-ai/
 │   ├── permata_cc.py             # Permata credit card statement parser (multi-owner)
 │   ├── permata_savings.py        # Permata savings (Rekening Koran) statement parser
 │   ├── cimb_niaga_cc.py          # CIMB Niaga credit card statement parser
-│   └── cimb_niaga_consol.py      # CIMB Niaga consolidated portfolio statement parser
+│   ├── cimb_niaga_consol.py      # CIMB Niaga consolidated portfolio statement parser
+│   ├── ipot_portfolio.py         # IPOT Client Portfolio parser (stocks + mutual funds → holdings; gap-fill)
+│   ├── ipot_statement.py         # IPOT Client Statement parser (RDN cash ledger + closing balance)
+│   ├── bni_sekuritas.py          # BNI Sekuritas portfolio parser (stocks, mutual funds, RDN balance)
+│   └── stockbit_sekuritas.py     # Stockbit Sekuritas Statement of Account parser (stocks, cash ledger)
 ├── exporters/                    # XLS export
 │   ├── __init__.py
 │   └── xls_writer.py             # openpyxl writer — {Bank}_{Owner}.xlsx + ALL_TRANSACTIONS.xlsx
@@ -441,6 +455,7 @@ agentic-ai/
 │       └── ALL_TRANSACTIONS.xlsx # Flat table — all banks, all owners, Owner column
 ├── scripts/
 │   ├── batch_process.py          # Automatic, idempotent PDF→XLS batch processor
+│   ├── seed_gold_holdings.py     # Seeds Antam gold bar holdings (XAU/IDR spot price, end-of-month, Jan 2026→now)
 │   ├── post_reboot_check.sh      # Post-boot health check
 │   ├── tahoe_validate.sh         # Mail schema validator
 │   ├── run_bridge.sh             # Bridge startup wrapper
@@ -1599,8 +1614,12 @@ The PDF processor is built into the bridge (runs on the Mac host, not in Docker)
 | Permata | Savings (Rekening Koran) | `parsers/permata_savings.py` | Email `@permatabank.co.id` / manual upload | Via customer name in header |
 | CIMB Niaga | Credit card (Lembar Tagihan) | `parsers/cimb_niaga_cc.py` | Email `@cimbniaga.co.id` | Via card separator line; multi-owner (primary + supplementary) |
 | CIMB Niaga | Consolidated Portfolio | `parsers/cimb_niaga_consol.py` | Email `@cimbniaga.co.id` | Via customer name in header |
+| IPOT (Indo Premier) | Client Portfolio | `parsers/ipot_portfolio.py` | Manual upload | Via customer name ("To" line) |
+| IPOT (Indo Premier) | Client Statement (RDN) | `parsers/ipot_statement.py` | Manual upload | Via customer name ("To" line) |
+| BNI Sekuritas | Portfolio Statement | `parsers/bni_sekuritas.py` | Manual upload | Via customer name in header |
+| Stockbit Sekuritas | Statement of Account | `parsers/stockbit_sekuritas.py` | Manual upload | Via "Client" line |
 
-Detection is automatic — the router (`parsers/router.py`) reads the first page of any PDF and identifies bank and statement type. No manual selection required.
+Detection is automatic — the router (`parsers/router.py`) reads the first (and optionally second) page of any PDF and identifies bank and statement type in priority order. No manual selection required.
 
 #### Parser notes by bank
 
@@ -1633,6 +1652,40 @@ Detection is automatic — the router (`parsers/router.py`) reads the first page
 - Multiple savings accounts supported; accounts without transactions in the period show only a balance summary
 - Running balance computed from `SALDO AWAL` + debit/credit deltas
 - Detection: bank name `CIMB Niaga` + `COMBINE STATEMENT` (consol-specific English title)
+
+**IPOT Portfolio** (`ipot_portfolio.py`):
+- Date format: `DD/MM/YYYY` (period) and `DD-Mon-YY` for transactions (e.g. `14-Jan-26`)
+- Client name: `"To CUSTOMER NAME"` line; client code: `"Client Code RXXXXXXXX"`
+- Stock rows: leading sequence number, 10 fixed columns (ticker, name, qty, avg price, close price, stock value, avg value, market value, unrealised, %)
+- Mutual fund rows: similar structure; `asset_class` = `"mutual_fund"`
+- Number format: Western (commas = thousands, dots = decimals); uses `_parse_ipot_amount()`
+- Closing balance: `"END BALANCE"` row in the RDN section → `AccountSummary`
+- Gap-fill: after upserting the snapshot, carries all holdings forward month-by-month (INSERT OR IGNORE) until data for that institution already exists or the current month is reached
+- Detection: `"PT INDO PREMIER SEKURITAS"` + `"Client Portofolio"` (page 1)
+
+**IPOT Statement** (`ipot_statement.py`):
+- Purpose: RDN cash ledger only (no stock holdings)
+- Transactions: numbered rows with `DD-Mon-YY` transaction and due dates; 8–10 numeric columns depending on row type (cash-only vs. price/volume rows)
+- Cross-line regex guard: all numeric column separators use `[ \t]+` not `\s+` to prevent newline-spanning matches
+- Shifted-column handling: when a negative `Amount` (e.g. price outflow) is absorbed into the description by the non-greedy group, the remaining columns shift left; detected by `credit ≤ 0 and debet == 0` → use `amount` (group 5) as the IDR amount
+- Print date: `"Weekday, DD-MM-YYYY HH:MM:SS"` → stored as `DD/MM/YYYY`
+- Detection: `"PT INDO PREMIER SEKURITAS"` + `"Client Statement"` (page 1)
+
+**BNI Sekuritas** (`bni_sekuritas.py`):
+- Date format: `"Sunday, DD-Mon-YYYY"` (English) for period; `DD/MM/YYYY` for transactions
+- Client name: `"To : CUSTOMER NAME"` line; client code: `"Customer : XXXXXXXX"` field
+- Stock and mutual fund rows: regex on raw text; funds have multi-line names (suffix line e.g. `"Kelas A"` appended if no digits and no ticker pattern)
+- RDN closing balance: `"End Balance"` row in the `"Cash RDN"` section
+- Detection: `"BNI Sekuritas"` + `"CLIENT STATEMENT"` (page 1, all caps)
+
+**Stockbit Sekuritas** (`stockbit_sekuritas.py`):
+- Header: `"Date DD/MM/YYYY - DD/MM/YYYY"` (period); `"Client CODE NAME Cash Investor BALANCE"` (client info and cash on one line)
+- Client name detection: regex stops before the first TitleCase word (`Cash`) via lookahead `(?=\s+[A-Z][a-z]|\s*$)`
+- Stock rows: no leading sequence number; optional single-letter flags (`M`, `X`, etc.) between company name and numeric columns, absorbed by non-greedy group and stripped with `re.sub(r"(?:\s+[A-Z])+$", "", name)`
+- Two-line company names: continuation line (`"Tbk."`, `"(Persero) Tbk."`) appended if it contains no digits and does not start with another ticker
+- Cash ledger: `DD/MM/YYYY` dates; Ending Balance may use parentheses for negatives — `(3,460,000)` → `-3,460,000`; Interest column is optional (absent in payment rows — `(?:[ \t]+(\d+))?`)
+- Number format: Western (commas = thousands, dots = decimals); `_parse_ipot_amount()` for all amounts; `_parse_stockbit_amount()` for parenthesised Ending Balance
+- Detection: `"PT. STOCKBIT SEKURITAS DIGITAL"` + `"Statement of Account"` (page 1)
 
 **Maybank Credit Card** (`maybank_cc.py`):
 - Date format: `DD-MM-YY`; normalized to `DD/MM/YYYY`
@@ -1676,10 +1729,9 @@ Recommended rollout: keep `warn` mode enabled until the verifier has been calibr
 `POST /pdf/upload` always stages the uploaded PDF into `pdf_inbox_dir` first.
 
 - If no file with that name exists, the upload is written normally.
-- If a file with the same name already exists **and its bytes are identical**, the bridge reuses the existing file and does **not** create a new copy.
-- If a file with the same name exists but the content differs, the bridge preserves both by appending a unique suffix to the new upload.
+- If a file with the same name already exists, the bridge **reuses it as-is** and does not overwrite or create a copy.
 
-This avoids duplicate timestamped PDFs when the same file is retried after a verifier timeout or other non-upload-related failure.
+This avoids duplicate hash-suffixed copies that would appear when the same PDF is uploaded more than once (e.g. retried after a parse error or reprocessed for a different month).
 
 ### PDF unlocking
 
@@ -2085,6 +2137,41 @@ docker compose up -d
 #### Fixed
 
 - `GroupDrilldown.vue` was reading `c.transaction_count` for the transaction count sub-label; the actual field name returned by `GET /api/summary/{year}/{month}` → `by_category` is `c.count`. Fixed to `c.count ?? 0`.
+
+---
+
+### v3.5.0 (2026-04-08)
+
+#### Features
+
+- **Added: IPOT Portfolio parser** (`parsers/ipot_portfolio.py`) — parses PT Indo Premier Sekuritas "Client Portofolio" PDFs. Extracts stocks and mutual funds into the `holdings` table and the RDN closing balance into `account_balances`. After upserting, carries all holdings forward month-by-month (INSERT OR IGNORE gap-fill) until the current month or until data for that institution already exists.
+
+- **Added: IPOT Statement parser** (`parsers/ipot_statement.py`) — parses IPOT "Client Statement" (RDN cash ledger) PDFs. Extracts numbered transaction rows (handling 8-column cash-only rows and 10-column price/volume rows) and the END BALANCE into `account_balances`. Uses `[ \t]+` (not `\s+`) for all numeric column separators to prevent cross-line regex matches.
+
+- **Added: BNI Sekuritas parser** (`parsers/bni_sekuritas.py`) — parses PT BNI Sekuritas "CLIENT STATEMENT" portfolio PDFs. Extracts stocks and mutual funds (with multi-line fund name continuation) and the Cash RDN closing balance.
+
+- **Added: Stockbit Sekuritas parser** (`parsers/stockbit_sekuritas.py`) — parses PT Stockbit Sekuritas Digital "Statement of Account" PDFs. Stock rows have no leading sequence number; optional single-letter flags (`M`, `X`) are stripped from company names; company names span two lines. Cash ledger Ending Balance uses parentheses for negatives; the Interest column is optional (absent in payment rows).
+
+- **Added: `bridge/gold_price.py`** — fetches the IDR price per gram of gold via the fawazahmed0 XAU/IDR API (same free, no-key, historical-capable source as `bridge/fx_rate.py`). `get_gold_price_idr_per_gram(date_str)` → `xau_idr / 31.1035`.
+
+- **Added: `scripts/seed_gold_holdings.py`** — idempotent seeder for 14 Antam Logam Mulia gold bars (100 gr × 5 bars: KSQ 052, DE 074, OR 023, IMA 022, IMA 021; 50 gr × 5: JP 060, JM 037, JM 038, ID 002, BB 063; 25 gr × 4: BXJ 055, FB 024, BDP 013, ACO 073). Fetches end-of-month XAU/IDR spot prices for every month from `--from` (default 2026-01) to the current month and upserts 3 `holdings` rows per month (`asset_class="gold"`, `asset_group="Physical Assets"`, `institution="Physical"`). Certificate numbers stored in `notes`. Re-running refreshes prices via `ON CONFLICT DO UPDATE`. Supports `--dry-run`, `--owner`, `--from YYYY-MM`, `--db`.
+
+- **Added: ↺ Refresh button in Holdings.vue** — inline button in the month-nav bar calls `loadItems()` to reload all holdings data for the current snapshot date without a full page reload.
+
+#### Fixed
+
+- **Fixed: `holdings` UNIQUE constraint missing `institution`** — the original `UNIQUE(snapshot_date, asset_class, asset_name, owner)` key caused `INSERT OR IGNORE` in the gap-fill to silently block rows when two brokerages held the same ticker (e.g. BNGA at both IPOT and BNI Sekuritas). Rebuilt to `UNIQUE(snapshot_date, asset_class, asset_name, owner, institution)`. All `ON CONFLICT(...)` clauses in `bridge/pdf_handler.py` updated to match.
+
+- **Fixed: `_resolve_upload_dest()` creating hash-suffixed duplicate PDFs** — the previous implementation compared file bytes; multipart boundary differences caused identical PDFs re-uploaded through different clients to create `_8f7294f2`-suffixed copies. Simplified to filename-only check: reuse existing file if the name matches; write only if the name is new.
+
+- **Fixed: gap-fill stop condition hardcoded to `institution='IPOT'`** — the check `WHERE institution='IPOT'` in the gap-fill loop blocked forward-fill for BNI Sekuritas and Stockbit Sekuritas portfolios. Changed to `institution=?` parameterised with `result.bank`.
+
+- **Fixed: stale `mom_change_idr` after retroactive gold seeding** — adding gold to historical months after their net_worth_snapshots rows were already created left `mom_change_idr` comparing the new (gold-inclusive) month against an old (gold-absent) previous month. Fix: re-upsert all affected snapshots oldest-first via `POST /api/wealth/snapshot` so each month's MoM is recomputed against the corrected predecessor.
+
+#### Changed
+
+- **`parsers/router.py`** — detection expanded to 11 parsers in priority order: Permata CC → Permata Savings → BCA CC → BCA Savings → Maybank Consol → Maybank CC → CIMB CC → CIMB Consol → IPOT Portfolio → IPOT Statement → BNI Sekuritas → Stockbit Sekuritas.
+- **`bridge/pdf_handler.py`** — `_run_job()` step 2.8 (`_upsert_investment_holdings`) now used for all brokerage portfolio parsers (IPOT, BNI Sekuritas, Stockbit Sekuritas), not only IPOT. Gap-fill institution check and log messages use `result.bank` dynamically. Note strings use `f"Auto-imported from {result.bank} portfolio"`.
 
 ---
 
@@ -3831,8 +3918,8 @@ Stage 3 extends the system into a full **Wealth Management dashboard** that trac
 
 ```
 ┌──────────────────────────────┐   ┌──────────────────────────────┐
-│  PWA Holdings.vue            │   │  (Future) PDF Parsers         │
-│  Balance / Holding /         │   │  Brokerage / bank reports     │
+│  PWA Holdings.vue            │   │  PDF Parsers (brokerage)      │
+│  Balance / Holding /         │   │  IPOT · BNI Sek · Stockbit   │
 │  Liability entry modals      │   │  → auto-populate holdings     │
 └──────────────┬───────────────┘   └───────────────┬──────────────┘
                │                                   │
@@ -3861,8 +3948,9 @@ Stage 3 extends the system into a full **Wealth Management dashboard** that trac
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Data flow:** PWA entry form → POST API → SQLite upsert → GET summary → PWA render.
-Manual entry is the primary input method. Automated PDF ingestion (brokerage reports) is planned for a future phase.
+**Data flow (manual):** PWA entry form → POST API → SQLite upsert → GET summary → PWA render.
+**Data flow (automated):** PDF upload → bridge parser → `_upsert_investment_holdings()` / `_upsert_closing_balance()` → SQLite → GET summary → PWA render.
+Both paths are active: brokerage statements (IPOT, BNI Sekuritas, Stockbit Sekuritas) populate holdings automatically; bank savings balances, liabilities, and physical assets (gold, real estate) use manual entry or the gold seeder script.
 
 ---
 
@@ -3908,7 +3996,7 @@ Manual entry is the primary input method. Automated PDF ingestion (brokerage rep
 | maturity_date | TEXT | YYYY-MM-DD (bonds only) |
 | coupon_rate | REAL | % (bonds only) |
 | notes | TEXT | |
-| UNIQUE | — | `(snapshot_date, asset_class, asset_name, owner)` |
+| UNIQUE | — | `(snapshot_date, asset_class, asset_name, owner, institution)` — includes `institution` so different brokerages holding the same ticker (e.g. BNGA at IPOT and BNI Sekuritas) coexist without conflict |
 
 #### `liabilities` — All debts
 
@@ -4044,16 +4132,16 @@ Monthly wealth management cycle (1st–5th of each month):
    └── Sources: bank statement closing balances, physical cash count
 
 4. Update Investment holdings
-   └── Add/edit Holding entries for bonds, stocks, mutual funds, retirement (Jamsostek)
-   └── Sources: brokerage monthly report, bank statement (e-Rekening), employer retirement statement
-   └── To edit existing: **tap the row** → modify market value → Save (works for all investment types)
-   └── Retirement-specific (Jamsostek): enter contribution updates from employer each month
-   └── Bond-specific: enter maturity date and coupon rate
+   └── **Brokerage stocks/funds (automated):** upload IPOT Portfolio, BNI Sekuritas, or Stockbit SOA PDF
+       → bridge auto-upserts holdings and gap-fills forward to current month
+   └── **Bonds (automated):** upload Permata Savings PDF → bridge auto-upserts bond positions
+   └── **Retirement (Jamsostek):** tap the existing row → update market value → Save
+   └── **Bond-specific edits:** tap the row → update market price, maturity date, coupon rate
 
 5. Update Tangible Assets (if changed since last month)
    └── Real estate: annual revaluation (update market_value_idr)
    └── Vehicles: annual depreciation update
-   └── Gold: current spot price × quantity
+   └── Gold: run `python3 scripts/seed_gold_holdings.py` to refresh all months with the latest XAU/IDR spot price; or update manually in Holdings → Physical tab
 
 6. Update Liabilities
    └── Credit card: outstanding balance from CC statement
@@ -4090,6 +4178,18 @@ Monthly wealth management cycle (1st–5th of each month):
 - [x] Jamsostek (retirement fund) support — asset_class `retirement` with "Retirement (Jamsostek)" label in dropdown
 - [x] Monthly Jamsostek balance updates via tap-to-edit in Holdings → Investments tab
 - [x] Automatic Google Sheets sync on every holding save via `_sync_holdings_to_sheets()`
+- [x] `parsers/ipot_portfolio.py` — IPOT Client Portfolio parser: stocks + mutual funds → `holdings`; RDN → `account_balances`; month-end gap-fill
+- [x] `parsers/ipot_statement.py` — IPOT Client Statement parser: RDN cash ledger + END BALANCE → `account_balances`; shifted-column row handling; `[ \t]+` separators to prevent cross-line regex matches
+- [x] `parsers/bni_sekuritas.py` — BNI Sekuritas portfolio parser: stocks, mutual funds, RDN cash balance; multi-line fund name continuation
+- [x] `parsers/stockbit_sekuritas.py` — Stockbit Sekuritas SOA parser: stocks with two-line names and optional flag characters; parenthesised negative balances; optional Interest column in cash ledger
+- [x] `parsers/router.py` — updated detection priority order (11 parsers); both `detect_and_parse()` and `detect_bank_and_type()` support all new parsers
+- [x] `bridge/pdf_handler.py` — auto-upsert pipeline steps 2.5–2.9: savings/consol balance, bond holdings, mutual-fund holdings, equity/fund holdings with gap-fill, portfolio/statement RDN balance; gap-fill checks `institution=?` (not hardcoded `'IPOT'`); note strings use `result.bank`
+- [x] `bridge/pdf_handler.py` — `_resolve_upload_dest()` reuses by filename only (no content comparison, no hash suffix)
+- [x] `holdings` UNIQUE constraint rebuilt to include `institution`: `UNIQUE(snapshot_date, asset_class, asset_name, owner, institution)` — allows same ticker at multiple brokerages (e.g. BNGA at IPOT and BNI Sekuritas)
+- [x] `bridge/gold_price.py` — XAU/IDR gold price per gram via fawazahmed0 API (historical-capable, no API key)
+- [x] `scripts/seed_gold_holdings.py` — idempotent seeder for 14 Antam gold bars (100 gr × 5, 50 gr × 5, 25 gr × 4); end-of-month prices Jan 2026 → current month; `--dry-run`, `--owner`, `--from`, `--db` flags
+- [x] `pwa/src/views/Holdings.vue` — ↺ inline refresh button in month-nav bar (calls `loadItems()` without page reload)
+- [x] Net worth snapshot MoM recalculation — re-upserting snapshots oldest-first corrects `mom_change_idr` when historical holdings are retroactively updated (e.g. adding gold to past months)
 
 ### Deferred to future phase
 

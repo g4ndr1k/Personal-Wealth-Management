@@ -19,6 +19,7 @@
         <template v-if="!showMonthPicker">
           <span class="month-label">{{ fmtDateChip(snapshotDate) || '—' }}</span>
           <button class="nav-btn nav-btn-sm" @click="showMonthPicker = true" title="Jump to month">+</button>
+          <button class="nav-btn nav-btn-sm" @click="loadItems" title="Refresh" style="margin-left:2px">↺</button>
         </template>
         <template v-else>
           <input

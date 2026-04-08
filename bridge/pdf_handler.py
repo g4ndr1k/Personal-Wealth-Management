@@ -60,29 +60,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_upload_dest(inbox_dir: str, filename: str, file_bytes: bytes) -> tuple[str, bool]:
-    """Return (dest_path, should_write). Reuse identical existing files. Atomic creation."""
-    from uuid import uuid4
+def _resolve_upload_dest(inbox_dir: str, filename: str, file_bytes: bytes) -> str:
+    """Save file_bytes to inbox and return the dest path.
+    If a file with the same name already exists, reuse it as-is (no duplicate)."""
     safe_name = Path(filename).name
     dest = os.path.join(inbox_dir, safe_name)
-
-    try:
-        fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "wb") as f:
-            f.write(file_bytes)
-        return dest, True
-    except FileExistsError:
-        try:
-            with open(dest, "rb") as existing:
-                if existing.read() == file_bytes:
-                    return dest, False
-        except OSError:
-            pass
-        stem, ext = os.path.splitext(dest)
-        dest = f"{stem}_{uuid4().hex[:8]}{ext}"
+    if not os.path.exists(dest):
         with open(dest, "wb") as f:
             f.write(file_bytes)
-        return dest, True
+    return dest
 
 
 def _run_verification(pdf_path: str, result, logs: list[str]) -> None:
@@ -205,10 +191,7 @@ def handle_upload(request_body: bytes, content_type: str) -> tuple[int, dict]:
     inbox_dir = _config.get("pdf_inbox_dir", "data/pdf_inbox")
     os.makedirs(inbox_dir, exist_ok=True)
     safe_name = Path(filename).name  # strip any path components
-    dest, should_write = _resolve_upload_dest(inbox_dir, safe_name, file_bytes)
-    if should_write:
-        with open(dest, "wb") as f:
-            f.write(file_bytes)
+    dest = _resolve_upload_dest(inbox_dir, safe_name, file_bytes)
 
     # Auto-detect bank/type
     bank, stmt_type = "Unknown", "unknown"
@@ -804,7 +787,7 @@ def _upsert_bond_holdings(result, logs: list):
                      unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
                      notes, import_date)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(snapshot_date, asset_class, asset_name, owner)
+                ON CONFLICT(snapshot_date, asset_class, asset_name, owner, institution)
                 DO UPDATE SET
                     isin_or_code       = excluded.isin_or_code,
                     institution        = excluded.institution,
@@ -933,7 +916,7 @@ def _upsert_fund_holdings(result, logs: list):
                      unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
                      notes, import_date)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(snapshot_date, asset_class, asset_name, owner)
+                ON CONFLICT(snapshot_date, asset_class, asset_name, owner, institution)
                 DO UPDATE SET
                     isin_or_code       = excluded.isin_or_code,
                     institution        = excluded.institution,
@@ -1046,7 +1029,7 @@ def _upsert_investment_holdings(result, logs: list):
         # ── Upsert the snapshot date's holdings ───────────────────────────────
         for h in holdings:
             note = (
-                f"Auto-imported from IPOT portfolio ({snapshot_date})"
+                f"Auto-imported from {result.bank} portfolio ({snapshot_date})"
                 f" | {h.asset_class.title()}: {h.isin_or_code}"
                 f" | qty={h.quantity:,.0f}  price={h.unit_price:,.2f}"
                 f"  cost={h.cost_basis_idr:,.0f}  mktval={h.market_value_idr:,.0f}"
@@ -1059,7 +1042,7 @@ def _upsert_investment_holdings(result, logs: list):
                      unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
                      notes, import_date)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(snapshot_date, asset_class, asset_name, owner)
+                ON CONFLICT(snapshot_date, asset_class, asset_name, owner, institution)
                 DO UPDATE SET
                     isin_or_code       = excluded.isin_or_code,
                     institution        = excluded.institution,
@@ -1102,7 +1085,7 @@ def _upsert_investment_holdings(result, logs: list):
                 f"Investments: upserted {upserted} position(s) for {result.bank} [{snapshot_date}]"
             )
 
-        # ── Gap-fill: copy holdings forward into months with no IPOT data ─────
+        # ── Gap-fill: copy holdings forward into months with no data ─────────
         # Parse snapshot_date into year/month
         snap_y, snap_m, snap_d = (int(x) for x in snapshot_date.split("-"))
         today_dt = _dt.now().date()
@@ -1126,16 +1109,16 @@ def _upsert_investment_holdings(result, logs: list):
             last_day = monthrange(cur_y, cur_m)[1]
             fill_date = f"{cur_y}-{cur_m:02d}-{last_day:02d}"
 
-            # Check if any IPOT holdings already exist for this month-end
+            # Check if holdings for this institution already exist for this month-end
             existing = con.execute(
-                "SELECT COUNT(*) FROM holdings WHERE snapshot_date=? AND institution='IPOT' AND owner=?",
-                (fill_date, result.owner or ""),
+                "SELECT COUNT(*) FROM holdings WHERE snapshot_date=? AND institution=? AND owner=?",
+                (fill_date, result.bank, result.owner or ""),
             ).fetchone()[0]
 
             if existing > 0:
                 # A later PDF was already processed — stop filling
                 logs.append(
-                    f"  Gap-fill: {fill_date} already has IPOT data — stopping carry-forward"
+                    f"  Gap-fill: {fill_date} already has {result.bank} data — stopping carry-forward"
                 )
                 break
 

@@ -14,6 +14,7 @@ Detection priority:
   8. Maybank Consol  — "Maybank" + "PORTFOLIO"  (page 1+2 combined)
   9. IPOT Portfolio  — "PT INDO PREMIER SEKURITAS" + "Client Portofolio"  (page 1)
  10. IPOT Statement  — "PT INDO PREMIER SEKURITAS" + "Client Statement"  (page 1)
+ 11. BNI Sekuritas   — "BNI Sekuritas" + "CLIENT STATEMENT"  (page 1, all-caps)
 """
 import pdfplumber
 from .base import StatementResult
@@ -23,6 +24,8 @@ from . import (
     permata_cc, permata_savings,
     cimb_niaga_cc, cimb_niaga_consol,
     ipot_portfolio, ipot_statement,
+    bni_sekuritas,
+    stockbit_sekuritas,
 )
 
 
@@ -83,6 +86,12 @@ def detect_and_parse(pdf_path: str, ollama_client=None,
     if ipot_statement.can_parse(page1_text):
         return ipot_statement.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
 
+    if bni_sekuritas.can_parse(page1_text):
+        return bni_sekuritas.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
+
+    if stockbit_sekuritas.can_parse(page1_text):
+        return stockbit_sekuritas.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
+
     raise UnknownStatementError(
         f"Could not identify statement type from PDF: {pdf_path}\n"
         f"First-page preview: {page1_text[:300]}"
@@ -118,5 +127,11 @@ def detect_bank_and_type(pdf_path: str) -> tuple[str, str]:
 
     if ipot_statement.can_parse(page1_text):
         return "IPOT", "statement"
+
+    if bni_sekuritas.can_parse(page1_text):
+        return "BNI Sekuritas", "portfolio"
+
+    if stockbit_sekuritas.can_parse(page1_text):
+        return "Stockbit Sekuritas", "portfolio"
 
     return "Unknown", "unknown"
