@@ -1634,7 +1634,8 @@ The PDF processor is built into the bridge (runs on the Mac host, not in Docker)
 | CIMB Niaga | Consolidated Portfolio | `parsers/cimb_niaga_consol.py` | Email `@cimbniaga.co.id` | Via customer name in header |
 | IPOT (Indo Premier) | Client Portfolio | `parsers/ipot_portfolio.py` | Manual upload | Via customer name ("To" line) |
 | IPOT (Indo Premier) | Client Statement (RDN) | `parsers/ipot_statement.py` | Manual upload | Via customer name ("To" line) |
-| BNI Sekuritas | Portfolio Statement | `parsers/bni_sekuritas.py` | Manual upload | Via customer name in header |
+| BNI Sekuritas | Portfolio Statement (`CLIENT STATEMENT`) | `parsers/bni_sekuritas.py` | Manual upload | Via customer name in header |
+| BNI Sekuritas | Legacy Portfolio Statement (`CONSOLIDATE ACCOUNT STATEMENT`) | `parsers/bni_sekuritas_legacy.py` | Manual upload | Via `Mr/Mrs.` header + client code |
 | Stockbit Sekuritas | Statement of Account | `parsers/stockbit_sekuritas.py` | Manual upload | Via "Client" line |
 
 Detection is automatic — the router (`parsers/router.py`) reads the first (and optionally second) page of any PDF and identifies bank and statement type in priority order. No manual selection required.
@@ -1695,6 +1696,14 @@ Detection is automatic — the router (`parsers/router.py`) reads the first (and
 - Stock and mutual fund rows: regex on raw text; funds have multi-line names (suffix line e.g. `"Kelas A"` appended if no digits and no ticker pattern)
 - RDN closing balance: `"End Balance"` row in the `"Cash RDN"` section
 - Detection: `"BNI Sekuritas"` + `"CLIENT STATEMENT"` (page 1, all caps)
+
+**BNI Sekuritas Legacy** (`bni_sekuritas_legacy.py`):
+- Header: `Mr/Mrs. NAME (CLIENT_CODE)` with `Period : MONTH YYYY` and `Total Asset`
+- Cash summary: first-page `CASH SUMMARY` section; closing balance taken from the `Reguler` row / total balance
+- Equity rows: two-line stock rows in `PORTFOLIO STATEMENT` → `Equity Instrument`
+- Mutual fund rows: two-line fund rows in `Mutual Fund`
+- Detection: `"CONSOLIDATE ACCOUNT STATEMENT"` + `"CASH SUMMARY"` + `"PORTFOLIO STATEMENT"` + `"BNI Sekuritas"` (page 1)
+- Purpose: old-format January 2026 BNI PDFs only; kept separate so newer `CLIENT STATEMENT` parsing remains unchanged
 
 **Stockbit Sekuritas** (`stockbit_sekuritas.py`):
 - Header: `"Date DD/MM/YYYY - DD/MM/YYYY"` (period); `"Client CODE NAME Cash Investor BALANCE"` (client info and cash on one line)
@@ -2167,6 +2176,7 @@ docker compose up -d
 - **Added: IPOT Statement parser** (`parsers/ipot_statement.py`) — parses IPOT "Client Statement" (RDN cash ledger) PDFs. Extracts numbered transaction rows (handling 8-column cash-only rows and 10-column price/volume rows) and the END BALANCE into `account_balances`. Uses `[ \t]+` (not `\s+`) for all numeric column separators to prevent cross-line regex matches.
 
 - **Added: BNI Sekuritas parser** (`parsers/bni_sekuritas.py`) — parses PT BNI Sekuritas "CLIENT STATEMENT" portfolio PDFs. Extracts stocks and mutual funds (with multi-line fund name continuation) and the Cash RDN closing balance.
+- **Added: legacy BNI Sekuritas parser** (`parsers/bni_sekuritas_legacy.py`) — parses older PT BNI Sekuritas `CONSOLIDATE ACCOUNT STATEMENT` PDFs used by January 2026. Extracts the cash summary closing balance plus stock and mutual-fund holdings; intentionally separate from the newer `CLIENT STATEMENT` parser.
 
 - **Added: Stockbit Sekuritas parser** (`parsers/stockbit_sekuritas.py`) — parses PT Stockbit Sekuritas Digital "Statement of Account" PDFs. Stock rows have no leading sequence number; optional single-letter flags (`M`, `X`) are stripped from company names; company names span two lines. Cash ledger Ending Balance uses parentheses for negatives; the Interest column is optional (absent in payment rows).
 
@@ -2179,6 +2189,7 @@ docker compose up -d
 #### Fixed
 
 - **Fixed: `holdings` UNIQUE constraint missing `institution`** — the original `UNIQUE(snapshot_date, asset_class, asset_name, owner)` key caused `INSERT OR IGNORE` in the gap-fill to silently block rows when two brokerages held the same ticker (e.g. BNGA at both IPOT and BNI Sekuritas). Rebuilt to `UNIQUE(snapshot_date, asset_class, asset_name, owner, institution)`. All `ON CONFLICT(...)` clauses in `bridge/pdf_handler.py` updated to match.
+- **Fixed: `POST /api/wealth/holdings` still used the old 4-column `ON CONFLICT` target** — after the DB unique key was expanded to include `institution`, the API upsert path still targeted `(snapshot_date, asset_class, asset_name, owner)` and raised `sqlite3.OperationalError`. Updated the conflict target and post-upsert lookup to include `institution`.
 
 - **Fixed: `_resolve_upload_dest()` creating hash-suffixed duplicate PDFs** — the previous implementation compared file bytes; multipart boundary differences caused identical PDFs re-uploaded through different clients to create `_8f7294f2`-suffixed copies. Simplified to filename-only check: reuse existing file if the name matches; write only if the name is new.
 
@@ -2188,7 +2199,7 @@ docker compose up -d
 
 #### Changed
 
-- **`parsers/router.py`** — detection expanded to 11 parsers in priority order: Permata CC → Permata Savings → BCA CC → BCA Savings → Maybank Consol → Maybank CC → CIMB CC → CIMB Consol → IPOT Portfolio → IPOT Statement → BNI Sekuritas → Stockbit Sekuritas.
+- **`parsers/router.py`** — detection expanded to 12 parsers in priority order: Permata CC → Permata Savings → BCA CC → BCA Savings → Maybank Consol → Maybank CC → CIMB CC → CIMB Consol → IPOT Portfolio → IPOT Statement → BNI Sekuritas (legacy) → BNI Sekuritas → Stockbit Sekuritas.
 - **`bridge/pdf_handler.py`** — `_run_job()` step 2.8 (`_upsert_investment_holdings`) now used for all brokerage portfolio parsers (IPOT, BNI Sekuritas, Stockbit Sekuritas), not only IPOT. Gap-fill institution check and log messages use `result.bank` dynamically. Note strings use `f"Auto-imported from {result.bank} portfolio"`.
 
 ---
@@ -2461,6 +2472,13 @@ docker compose up -d --build finance-api
 - **Updated: `Wealth.vue` Net Worth Trend card** — now shows an explanation panel above the chart, suggested follow-up chips, a free-text ask box, and an in-card answer history for recent follow-up questions.
 - **Updated: `pwa/src/api/client.js`** — added `wealthExplanation()` and `wealthExplanationQuery()` client methods.
 - **Deployment note:** because the finance Docker image copies `pwa/dist/` at build time, frontend changes require both `npm run build --prefix pwa` and `docker compose up -d --build finance-api`; a plain container restart only refreshes backend Python code.
+
+#### Stage 3 — Legacy brokerage import fixes
+
+- **Added: legacy BNI Sekuritas parser** (`parsers/bni_sekuritas_legacy.py`) — parses older `CONSOLIDATE ACCOUNT STATEMENT` PDFs separately from the newer `CLIENT STATEMENT` parser. Extracts January-style BNI cash summary balance plus equity and mutual-fund holdings without changing the existing February/March BNI parser.
+- **Updated: `parsers/router.py`** — old-format BNI detection now runs before the current `bni_sekuritas.py` branch, so January legacy PDFs and February/March `CLIENT STATEMENT` PDFs route independently.
+- **Fixed: `finance/api.py` holdings upsert conflict target** — `POST /api/wealth/holdings` now uses `ON CONFLICT(snapshot_date, asset_class, asset_name, owner, institution)` to match the live SQLite unique constraint. This restores upsert behavior when the same asset name exists at multiple brokerages.
+- **Operational note: missing-month IPOT backfill** — when a current-month IPOT PDF is missing, the previous month's holding can be rolled forward into the current snapshot under the same institution/account/owner and then the month snapshot should be regenerated. Example applied: `BNGA` from IPOT `2026-01-31` → `2026-02-28`.
 
 ### v3.0.0 (2026-04-04)
 
@@ -4214,16 +4232,19 @@ Monthly wealth management cycle (1st–5th of each month):
 - [x] Automatic Google Sheets sync on every holding save via `_sync_holdings_to_sheets()`
 - [x] `parsers/ipot_portfolio.py` — IPOT Client Portfolio parser: stocks + mutual funds → `holdings`; RDN → `account_balances`; month-end gap-fill
 - [x] `parsers/ipot_statement.py` — IPOT Client Statement parser: RDN cash ledger + END BALANCE → `account_balances`; shifted-column row handling; `[ \t]+` separators to prevent cross-line regex matches
-- [x] `parsers/bni_sekuritas.py` — BNI Sekuritas portfolio parser: stocks, mutual funds, RDN cash balance; multi-line fund name continuation
+- [x] `parsers/bni_sekuritas.py` — BNI Sekuritas `CLIENT STATEMENT` portfolio parser: stocks, mutual funds, RDN cash balance; multi-line fund name continuation
+- [x] `parsers/bni_sekuritas_legacy.py` — BNI Sekuritas legacy `CONSOLIDATE ACCOUNT STATEMENT` parser: January-style cash summary + stock/mutual-fund holdings
 - [x] `parsers/stockbit_sekuritas.py` — Stockbit Sekuritas SOA parser: stocks with two-line names and optional flag characters; parenthesised negative balances; optional Interest column in cash ledger
-- [x] `parsers/router.py` — updated detection priority order (11 parsers); both `detect_and_parse()` and `detect_bank_and_type()` support all new parsers
+- [x] `parsers/router.py` — updated detection priority order (12 parsers); both `detect_and_parse()` and `detect_bank_and_type()` support all new parsers
 - [x] `bridge/pdf_handler.py` — auto-upsert pipeline steps 2.5–2.9: savings/consol balance, bond holdings, mutual-fund holdings, equity/fund holdings with gap-fill, portfolio/statement RDN balance; gap-fill checks `institution=?` (not hardcoded `'IPOT'`); note strings use `result.bank`
 - [x] `bridge/pdf_handler.py` — `_resolve_upload_dest()` reuses by filename only (no content comparison, no hash suffix)
 - [x] `holdings` UNIQUE constraint rebuilt to include `institution`: `UNIQUE(snapshot_date, asset_class, asset_name, owner, institution)` — allows same ticker at multiple brokerages (e.g. BNGA at IPOT and BNI Sekuritas)
+- [x] `finance/api.py` — holdings upsert conflict target updated to include `institution`, matching the live SQLite unique key
 - [x] `bridge/gold_price.py` — XAU/IDR gold price per gram via fawazahmed0 API (historical-capable, no API key)
 - [x] `scripts/seed_gold_holdings.py` — idempotent seeder for 14 Antam gold bars (100 gr × 5, 50 gr × 5, 25 gr × 4); end-of-month prices Jan 2026 → current month; `--dry-run`, `--owner`, `--from`, `--db` flags
 - [x] `pwa/src/views/Holdings.vue` — ↺ inline refresh button in month-nav bar (calls `loadItems()` without page reload)
 - [x] Net worth snapshot MoM recalculation — re-upserting snapshots oldest-first corrects `mom_change_idr` when historical holdings are retroactively updated (e.g. adding gold to past months)
+- [x] IPOT missing-month backfill applied — rolled `BNGA` from `2026-01-31` forward to `2026-02-28` when no February IPOT PDF was available, then regenerated the February snapshot
 
 ### Deferred to future phase
 

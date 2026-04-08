@@ -1450,11 +1450,10 @@ def upsert_holding(req: HoldingUpsertRequest):
                  unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
                  last_appraised_date, notes, import_date)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(snapshot_date, asset_class, asset_name, owner)
+            ON CONFLICT(snapshot_date, asset_class, asset_name, owner, institution)
             DO UPDATE SET
                 asset_group          = excluded.asset_group,
                 isin_or_code         = excluded.isin_or_code,
-                institution          = excluded.institution,
                 account              = excluded.account,
                 currency             = excluded.currency,
                 quantity             = excluded.quantity,
@@ -1480,8 +1479,8 @@ def upsert_holding(req: HoldingUpsertRequest):
         )
         row = conn.execute(
             "SELECT * FROM holdings "
-            "WHERE snapshot_date=? AND asset_class=? AND asset_name=? AND owner=?",
-            (req.snapshot_date, req.asset_class, req.asset_name, req.owner),
+            "WHERE snapshot_date=? AND asset_class=? AND asset_name=? AND owner=? AND institution=?",
+            (req.snapshot_date, req.asset_class, req.asset_name, req.owner, req.institution),
         ).fetchone()
     _sync_holdings_to_sheets()
     _auto_snapshot(req.snapshot_date)
