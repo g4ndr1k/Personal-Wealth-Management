@@ -151,6 +151,53 @@
       <!-- 12-month trend chart -->
       <div class="card">
         <div class="card-title">Net Worth Trend</div>
+        <div v-if="explanation?.available" class="trend-explanation">
+          <div class="trend-explanation-headline">{{ explanation.headline }}</div>
+          <div class="trend-explanation-summary">{{ explanation.summary }}</div>
+          <div v-if="explanation.drivers?.length" class="trend-driver-list">
+            <div v-for="driver in explanation.drivers" :key="driver" class="trend-driver-item">
+              {{ driver }}
+            </div>
+          </div>
+          <div class="trend-ai">
+            <div class="trend-ai-label">Ask AI to explain further</div>
+            <div v-if="suggestedQuestions.length" class="trend-suggestion-list">
+              <button
+                v-for="question in suggestedQuestions"
+                :key="question"
+                class="trend-suggestion-chip"
+                @click="askFollowUp(question)"
+                :disabled="askingAi"
+              >
+                {{ question }}
+              </button>
+            </div>
+            <div class="trend-ask-row">
+              <input
+                v-model="followUpQuestion"
+                class="form-input trend-ask-input"
+                placeholder="Ask about the Rp 1.7B investment increase..."
+                @keydown.enter.prevent="submitFollowUp"
+              />
+              <button class="btn btn-primary btn-sm" @click="submitFollowUp" :disabled="askingAi || !followUpQuestion.trim()">
+                {{ askingAi ? 'Asking…' : 'Ask' }}
+              </button>
+            </div>
+            <div v-if="qaHistory.length" class="trend-qa-list">
+              <div v-for="(item, idx) in qaHistory" :key="idx" class="trend-qa-item">
+                <div class="trend-qa-question">{{ item.question }}</div>
+                <div class="trend-qa-answer-title" v-if="item.answer?.title">{{ item.answer.title }}</div>
+                <div class="trend-qa-answer">{{ item.answer?.answer }}</div>
+                <div v-if="item.answer?.bullets?.length" class="trend-qa-bullets">
+                  <div v-for="bullet in item.answer.bullets" :key="bullet" class="trend-qa-bullet">{{ bullet }}</div>
+                </div>
+                <div v-if="item.answer?.references?.length" class="trend-qa-refs">
+                  Based on: {{ item.answer.references.join(', ') }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div v-if="history.length < 2" class="empty-state" style="padding:16px 0">
           <div class="e-sub">Generate at least 2 monthly snapshots to see a trend</div>
         </div>
@@ -193,6 +240,10 @@ const holdings    = ref([])
 const liabilities = ref([])
 const dates       = ref([])
 const history     = ref([])
+const explanation = ref(null)
+const followUpQuestion = ref('')
+const askingAi = ref(false)
+const qaHistory = ref([])
 const selectedDate = ref('')
 
 const trendRef = ref(null)
@@ -390,6 +441,20 @@ const liabSubs = computed(() => {
   ].filter(Boolean)
 })
 
+const suggestedQuestions = computed(() => {
+  if (!explanation.value?.available) return []
+  const rows = explanation.value.rows || []
+  const investment = rows.find(r => r.label === 'Investments')
+  const cash = rows.find(r => r.label === 'Cash & Liquid')
+  const physical = rows.find(r => r.label === 'Physical Assets')
+  return [
+    investment?.delta > 0 ? `What made Investments rise by ${fmtM(investment.delta)}?` : null,
+    cash?.delta < 0 ? `Which cash accounts fell by ${fmtM(Math.abs(cash.delta))}?` : null,
+    'Show the top item-level changes this month',
+    physical?.delta > 0 ? `What changed inside Physical Assets by ${fmtM(physical.delta)}?` : null,
+  ].filter(Boolean)
+})
+
 // ── Chart ─────────────────────────────────────────────────────────────────────
 function destroyChart() {
   if (trendChart) { trendChart.destroy(); trendChart = null }
@@ -435,9 +500,10 @@ async function load() {
   loading.value = true
   error.value   = null
   try {
-    const [summary, hist] = await Promise.all([
+    const [summary, hist, explanationRes] = await Promise.all([
       api.wealthSummary({ snapshot_date: selectedDate.value || undefined }),
       api.wealthHistory(24),
+      api.wealthExplanation({ snapshot_date: selectedDate.value || undefined }).catch(() => null),
     ])
     const collapsedDates = collapseMonthDates(summary.dates, summary.snapshot_date || selectedDate.value)
     const collapsedHistory = collapseMonthlyHistory(hist)
@@ -448,6 +514,9 @@ async function load() {
     liabilities.value = summary.liabilities
     dates.value       = collapsedDates
     history.value     = collapsedHistory
+    explanation.value = explanationRes
+    qaHistory.value = []
+    followUpQuestion.value = ''
 
     // Auto-select most recent date (prefer a date with a snapshot, fall back to any data date)
     if (!selectedDate.value) {
@@ -459,9 +528,49 @@ async function load() {
     buildChart()
   } catch (e) {
     error.value = e.message
+    explanation.value = null
   } finally {
     loading.value = false
   }
+}
+
+async function askFollowUp(question) {
+  if (!question?.trim()) return
+  askingAi.value = true
+  const pending = { question, answer: { title: '', answer: 'Thinking…', bullets: [], references: [] } }
+  qaHistory.value = [pending, ...qaHistory.value].slice(0, 4)
+  try {
+    const answer = await api.wealthExplanationQuery({
+      snapshot_date: selectedDate.value || undefined,
+      question,
+      history: qaHistory.value.slice(1).map(item => ({
+        question: item.question,
+        answer: item.answer?.answer || '',
+      })),
+    })
+    qaHistory.value[0] = { question, answer }
+    qaHistory.value = [...qaHistory.value]
+  } catch (e) {
+    qaHistory.value[0] = {
+      question,
+      answer: {
+        title: 'Unable to answer',
+        answer: e.message || 'The AI explainer could not answer that question right now.',
+        bullets: [],
+        references: [],
+      },
+    }
+    qaHistory.value = [...qaHistory.value]
+  } finally {
+    askingAi.value = false
+  }
+}
+
+async function submitFollowUp() {
+  const question = followUpQuestion.value.trim()
+  if (!question) return
+  followUpQuestion.value = ''
+  await askFollowUp(question)
 }
 
 function selectDate(d) {
@@ -591,6 +700,131 @@ onUnmounted(destroyChart)
 .wealth-pct   { font-size: 12px; color: var(--neutral); min-width: 34px; text-align: right; }
 
 .cat-bar-wealth { background: var(--primary); opacity: 0.7; }
+
+.trend-explanation {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(30, 58, 95, 0.1);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(30, 58, 95, 0.04), rgba(30, 58, 95, 0.02));
+}
+.trend-explanation-headline {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary-deep);
+  margin-bottom: 6px;
+}
+.trend-explanation-summary {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.trend-driver-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+.trend-driver-item {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--neutral);
+}
+.trend-driver-item::before {
+  content: '•';
+  color: var(--primary);
+  margin-right: 8px;
+}
+
+.trend-ai {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(30, 58, 95, 0.08);
+}
+.trend-ai-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.trend-suggestion-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.trend-suggestion-chip {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--primary-deep);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.trend-suggestion-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.trend-ask-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.trend-ask-input {
+  flex: 1;
+  min-height: 40px;
+}
+.trend-qa-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.trend-qa-item {
+  background: rgba(255,255,255,0.7);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
+  padding: 12px;
+}
+.trend-qa-question {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--primary-deep);
+  margin-bottom: 6px;
+}
+.trend-qa-answer-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.trend-qa-answer {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.trend-qa-bullets {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+.trend-qa-bullet {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--neutral);
+}
+.trend-qa-bullet::before {
+  content: '•';
+  color: var(--primary);
+  margin-right: 8px;
+}
+.trend-qa-refs {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
 
 /* ── Shared group/chip styles ────────────────────────────────────────────────  */
 .cat-drill-chevron { font-size: 14px; color: var(--text-muted); margin-left: 2px; font-weight: 400; }

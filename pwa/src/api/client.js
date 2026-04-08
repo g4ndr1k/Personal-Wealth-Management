@@ -85,6 +85,8 @@ export const api = {
   // ── Stage 3: Wealth Management ─────────────────────────────────────────────
   wealthSummary:       (p = {})   => get('/wealth/summary', p),
   wealthHistory:       (limit=24) => get('/wealth/history', { limit }),
+  wealthExplanation:   (p = {})   => get('/wealth/explanation', p),
+  wealthExplanationQuery: (body)  => post('/wealth/explanation/query', body),
   wealthSnapshotDates: ()         => get('/wealth/snapshot/dates'),
   createSnapshot:      (body)     => post('/wealth/snapshot', body),
 

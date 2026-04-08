@@ -27,9 +27,12 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Generator, NamedTuple, Optional
+import urllib.error
+import urllib.request
 
 import hmac
 
@@ -141,6 +144,448 @@ def _row(row: sqlite3.Row) -> dict:
     return dict(row)
 
 
+def _fmt_idr_compact(value: float) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"Rp {value / 1_000_000_000:.1f}B"
+    if abs_value >= 1_000_000:
+        return f"Rp {value / 1_000_000:.1f}M"
+    if abs_value >= 1_000:
+        return f"Rp {value / 1_000:.0f}K"
+    return f"Rp {round(value):,}"
+
+
+def _wealth_delta_rows(curr: dict, prev: dict) -> list[dict]:
+    rows = [
+        {
+            "label": "Cash & Liquid",
+            "curr": curr["savings_idr"] + curr["checking_idr"] + curr["money_market_idr"] + curr["physical_cash_idr"],
+            "prev": prev["savings_idr"] + prev["checking_idr"] + prev["money_market_idr"] + prev["physical_cash_idr"],
+            "is_liability": False,
+        },
+        {
+            "label": "Investments",
+            "curr": curr["bonds_idr"] + curr["stocks_idr"] + curr["mutual_funds_idr"] + curr["retirement_idr"] + curr["crypto_idr"],
+            "prev": prev["bonds_idr"] + prev["stocks_idr"] + prev["mutual_funds_idr"] + prev["retirement_idr"] + prev["crypto_idr"],
+            "is_liability": False,
+        },
+        {
+            "label": "Real Estate",
+            "curr": curr["real_estate_idr"],
+            "prev": prev["real_estate_idr"],
+            "is_liability": False,
+        },
+        {
+            "label": "Physical Assets",
+            "curr": curr["vehicles_idr"] + curr["gold_idr"] + curr["other_assets_idr"],
+            "prev": prev["vehicles_idr"] + prev["gold_idr"] + prev["other_assets_idr"],
+            "is_liability": False,
+        },
+        {
+            "label": "Liabilities",
+            "curr": curr["total_liabilities_idr"],
+            "prev": prev["total_liabilities_idr"],
+            "is_liability": True,
+        },
+    ]
+    out = []
+    for row in rows:
+        delta = row["curr"] - row["prev"]
+        pct = round((delta / abs(row["prev"])) * 100) if row["prev"] else None
+        out.append({**row, "delta": delta, "pct": pct})
+    return out
+
+
+def _wealth_explanation_fallback(curr: dict, prev: dict) -> dict:
+    net_change = curr["net_worth_idr"] - prev["net_worth_idr"]
+    rows = _wealth_delta_rows(curr, prev)
+    ordered = sorted(rows, key=lambda row: abs(row["delta"]), reverse=True)
+    direction = "rose" if net_change >= 0 else "fell"
+
+    positives = [row for row in ordered if row["delta"] > 0]
+    negatives = [row for row in ordered if row["delta"] < 0]
+
+    lead_parts = []
+    if positives:
+        lead_parts.append(
+            ", ".join(f"{row['label']} {_fmt_idr_compact(row['delta'])}" for row in positives[:2])
+        )
+    if negatives:
+        lead_parts.append(
+            "offset by " + ", ".join(f"{row['label']} {_fmt_idr_compact(abs(row['delta']))}" for row in negatives[:2])
+        )
+
+    summary = (
+        f"Net worth {direction} by {_fmt_idr_compact(abs(net_change))} in "
+        f"{curr['snapshot_date'][:7]} because "
+        f"{'; '.join(lead_parts) if lead_parts else 'asset values moved higher overall'}."
+    )
+
+    drivers = []
+    for row in ordered[:4]:
+        direction = "increased" if row["delta"] > 0 else "decreased" if row["delta"] < 0 else "was flat"
+        if row["delta"] == 0:
+            drivers.append(f"{row['label']} was flat month over month.")
+            continue
+        pct_suffix = f" ({abs(row['pct'])}%)" if row["pct"] is not None else ""
+        drivers.append(
+            f"{row['label']} {direction} by {_fmt_idr_compact(abs(row['delta']))}{pct_suffix}."
+        )
+
+    return {
+        "available": True,
+        "source": "fallback",
+        "model": None,
+        "headline": f"Why net worth changed by {_fmt_idr_compact(abs(net_change))}",
+        "summary": summary,
+        "drivers": drivers,
+        "net_change_idr": net_change,
+        "current_snapshot_date": curr["snapshot_date"],
+        "previous_snapshot_date": prev["snapshot_date"],
+        "rows": rows,
+    }
+
+
+def _generate_wealth_explanation_with_ollama(curr: dict, prev: dict, fallback: dict) -> dict:
+    rows = fallback["rows"]
+    prompt = (
+        "You are writing a net worth change explanation for a personal finance dashboard.\n"
+        "Use only the numbers provided.\n"
+        "Return JSON only with keys: headline, summary, drivers.\n"
+        "Rules:\n"
+        "- headline: max 80 chars.\n"
+        "- summary: 2 sentences, specific and plain English.\n"
+        "- drivers: array of 3 to 4 short bullet strings.\n"
+        "- Mention the biggest positive driver and the main offset.\n"
+        "- Do not give advice or speculate beyond the numbers.\n\n"
+        f"Current month: {curr['snapshot_date']}\n"
+        f"Previous month: {prev['snapshot_date']}\n"
+        f"Net worth change: {curr['net_worth_idr'] - prev['net_worth_idr']:.2f} IDR\n"
+        f"Current net worth: {curr['net_worth_idr']:.2f} IDR\n"
+        f"Previous net worth: {prev['net_worth_idr']:.2f} IDR\n"
+        "Component deltas:\n"
+        + "\n".join(
+            f"- {row['label']}: prev={row['prev']:.2f} IDR, curr={row['curr']:.2f} IDR, delta={row['delta']:.2f} IDR"
+            for row in rows
+        )
+    )
+    payload = json.dumps({
+        "model": _ollama_cfg.model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 300,
+        },
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{_ollama_cfg.host.rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=_ollama_cfg.timeout_seconds) as resp:
+        data = json.loads(resp.read())
+
+    raw = (data.get("response") or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("No JSON object in Ollama response")
+    parsed = json.loads(raw[start:end + 1])
+
+    headline = str(parsed.get("headline") or fallback["headline"]).strip()[:80]
+    summary = str(parsed.get("summary") or fallback["summary"]).strip()
+    drivers = parsed.get("drivers")
+    if not isinstance(drivers, list):
+        drivers = fallback["drivers"]
+    drivers = [str(item).strip() for item in drivers if str(item).strip()][:4] or fallback["drivers"]
+
+    return {
+        **fallback,
+        "source": "ollama",
+        "model": _ollama_cfg.model,
+        "headline": headline or fallback["headline"],
+        "summary": summary or fallback["summary"],
+        "drivers": drivers,
+    }
+
+
+def _fetch_snapshot_detail_rows(
+    conn: sqlite3.Connection,
+    snapshot_date: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    balances = conn.execute(
+        "SELECT * FROM account_balances WHERE snapshot_date=? ORDER BY institution, account, owner",
+        (snapshot_date,),
+    ).fetchall()
+    holdings = conn.execute(
+        "SELECT * FROM holdings WHERE snapshot_date=? ORDER BY asset_group, asset_class, asset_name, owner",
+        (snapshot_date,),
+    ).fetchall()
+    liabilities = conn.execute(
+        "SELECT * FROM liabilities WHERE snapshot_date=? ORDER BY liability_type, liability_name, owner",
+        (snapshot_date,),
+    ).fetchall()
+    return ([_row(r) for r in balances], [_row(r) for r in holdings], [_row(r) for r in liabilities])
+
+
+def _diff_named_rows(
+    curr_rows: list[dict],
+    prev_rows: list[dict],
+    key_fields: list[str],
+    value_field: str,
+    label_builder,
+    extra_fields: list[str],
+) -> list[dict]:
+    prev_map = {tuple(row.get(k, "") for k in key_fields): row for row in prev_rows}
+    curr_map = {tuple(row.get(k, "") for k in key_fields): row for row in curr_rows}
+    all_keys = set(prev_map) | set(curr_map)
+
+    diffs: list[dict] = []
+    for key in all_keys:
+        prev = prev_map.get(key, {})
+        curr = curr_map.get(key, {})
+        prev_value = float(prev.get(value_field, 0) or 0)
+        curr_value = float(curr.get(value_field, 0) or 0)
+        delta = curr_value - prev_value
+        if abs(delta) < 0.5:
+            continue
+        item = {
+            "label": label_builder(curr or prev),
+            "prev": prev_value,
+            "curr": curr_value,
+            "delta": delta,
+        }
+        for field in extra_fields:
+            item[field] = (curr or prev).get(field, "")
+        diffs.append(item)
+    return sorted(diffs, key=lambda row: abs(row["delta"]), reverse=True)
+
+
+def _build_wealth_question_context(conn: sqlite3.Connection, snapshot_date: Optional[str]) -> dict:
+    if snapshot_date:
+        curr = conn.execute(
+            "SELECT * FROM net_worth_snapshots WHERE snapshot_date=?",
+            (snapshot_date,),
+        ).fetchone()
+    else:
+        curr = conn.execute(
+            "SELECT * FROM net_worth_snapshots ORDER BY snapshot_date DESC LIMIT 1"
+        ).fetchone()
+
+    if not curr:
+        return {"available": False, "reason": "no_snapshot"}
+
+    prev = conn.execute(
+        "SELECT * FROM net_worth_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
+        (curr["snapshot_date"],),
+    ).fetchone()
+    if not prev:
+        return {"available": False, "reason": "no_previous_month", "snapshot_date": curr["snapshot_date"]}
+
+    curr_dict = _row(curr)
+    prev_dict = _row(prev)
+    balances_curr, holdings_curr, liabilities_curr = _fetch_snapshot_detail_rows(conn, curr["snapshot_date"])
+    balances_prev, holdings_prev, liabilities_prev = _fetch_snapshot_detail_rows(conn, prev["snapshot_date"])
+
+    balance_diffs = _diff_named_rows(
+        balances_curr,
+        balances_prev,
+        ["institution", "account", "owner"],
+        "balance_idr",
+        lambda row: " / ".join([part for part in [row.get("institution", ""), row.get("account", ""), row.get("owner", "")] if part]),
+        ["institution", "account", "owner", "account_type", "asset_group"],
+    )
+    holding_diffs = _diff_named_rows(
+        holdings_curr,
+        holdings_prev,
+        ["asset_class", "asset_name", "owner"],
+        "market_value_idr",
+        lambda row: " / ".join([part for part in [row.get("asset_name", ""), row.get("institution", ""), row.get("owner", "")] if part]),
+        ["asset_class", "asset_group", "asset_name", "institution", "owner"],
+    )
+    liability_diffs = _diff_named_rows(
+        liabilities_curr,
+        liabilities_prev,
+        ["liability_type", "liability_name", "owner"],
+        "balance_idr",
+        lambda row: " / ".join([part for part in [row.get("liability_name", ""), row.get("institution", ""), row.get("owner", "")] if part]),
+        ["liability_type", "liability_name", "institution", "owner"],
+    )
+
+    investment_item_diffs = [row for row in holding_diffs if row.get("asset_group") == "Investments"]
+    new_holdings = [row for row in holding_diffs if row["prev"] == 0 and row["curr"] > 0]
+    removed_holdings = [row for row in holding_diffs if row["prev"] > 0 and row["curr"] == 0]
+
+    return {
+        "available": True,
+        "current_snapshot_date": curr["snapshot_date"],
+        "previous_snapshot_date": prev["snapshot_date"],
+        "net_change_idr": curr_dict["net_worth_idr"] - prev_dict["net_worth_idr"],
+        "summary_rows": _wealth_delta_rows(curr_dict, prev_dict),
+        "balance_diffs": balance_diffs,
+        "holding_diffs": holding_diffs,
+        "investment_item_diffs": investment_item_diffs,
+        "liability_diffs": liability_diffs,
+        "new_holdings": new_holdings,
+        "removed_holdings": removed_holdings,
+    }
+
+
+def _fallback_wealth_question_answer(question: str, context: dict) -> dict:
+    q = (question or "").lower()
+    if any(term in q for term in ("invest", "bond", "stock", "mutual", "retire", "holding")):
+        candidates = context["investment_item_diffs"] or context["holding_diffs"]
+        title = "Investment drivers"
+    elif any(term in q for term in ("cash", "liquid", "bank", "account", "balance")):
+        candidates = context["balance_diffs"]
+        title = "Cash account drivers"
+    elif any(term in q for term in ("liabil", "debt", "loan", "mortgage", "credit card")):
+        candidates = context["liability_diffs"]
+        title = "Liability drivers"
+    elif any(term in q for term in ("new", "added", "buy", "bought")):
+        candidates = context["new_holdings"]
+        title = "New positions"
+    else:
+        candidates = (
+            context["investment_item_diffs"]
+            + context["balance_diffs"]
+            + context["liability_diffs"]
+        )
+        candidates = sorted(candidates, key=lambda row: abs(row["delta"]), reverse=True)
+        title = "Top drivers"
+
+    top = candidates[:5]
+    if not top:
+        return {
+            "available": True,
+            "source": "fallback",
+            "model": None,
+            "title": title,
+            "answer": "I could not find any item-level month-over-month changes for that question in the selected snapshot.",
+            "bullets": [],
+            "references": [],
+        }
+
+    bullets = []
+    references = []
+    for row in top:
+        direction = "up" if row["delta"] > 0 else "down"
+        bullets.append(
+            f"{row['label']} was {direction} {_fmt_idr_compact(abs(row['delta']))} "
+            f"from {_fmt_idr_compact(row['prev'])} to {_fmt_idr_compact(row['curr'])}."
+        )
+        references.append(row["label"])
+
+    return {
+        "available": True,
+        "source": "fallback",
+        "model": None,
+        "title": title,
+        "answer": f"Here are the biggest item-level movements I found for that question across {context['previous_snapshot_date']} to {context['current_snapshot_date']}.",
+        "bullets": bullets,
+        "references": references,
+    }
+
+
+def _ask_wealth_question_with_ollama(question: str, context: dict, history: list[dict]) -> dict:
+    compact_context = {
+        "current_snapshot_date": context["current_snapshot_date"],
+        "previous_snapshot_date": context["previous_snapshot_date"],
+        "net_change_idr": context["net_change_idr"],
+        "summary_rows": context["summary_rows"],
+        "top_investment_item_diffs": context["investment_item_diffs"][:12],
+        "top_balance_diffs": context["balance_diffs"][:12],
+        "top_liability_diffs": context["liability_diffs"][:12],
+        "new_holdings": context["new_holdings"][:8],
+        "removed_holdings": context["removed_holdings"][:8],
+    }
+    prompt = (
+        "You answer follow-up questions about a user's net worth change using only provided month-over-month data.\n"
+        "Return JSON only with keys: title, answer, bullets, references.\n"
+        "Rules:\n"
+        "- answer: 2 to 4 sentences.\n"
+        "- bullets: array of 2 to 5 short factual bullets with numbers when helpful.\n"
+        "- references: array of item names or sections you relied on.\n"
+        "- If the user asks what caused an increase, name the largest item-level drivers.\n"
+        "- Do not invent transactions, prices, or reasons beyond the data.\n\n"
+        f"Conversation history: {json.dumps(history[-4:], ensure_ascii=True)}\n"
+        f"Question: {question}\n"
+        f"Context JSON: {json.dumps(compact_context, ensure_ascii=True)}"
+    )
+    payload = json.dumps({
+        "model": _ollama_cfg.model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 450,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        f"{_ollama_cfg.host.rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=_ollama_cfg.timeout_seconds) as resp:
+        data = json.loads(resp.read())
+
+    raw = (data.get("response") or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("No JSON object in Ollama response")
+    parsed = json.loads(raw[start:end + 1])
+
+    bullets = parsed.get("bullets")
+    references = parsed.get("references")
+    return {
+        "available": True,
+        "source": "ollama",
+        "model": _ollama_cfg.model,
+        "title": str(parsed.get("title") or "AI explanation").strip()[:80],
+        "answer": str(parsed.get("answer") or "").strip(),
+        "bullets": [str(item).strip() for item in bullets if str(item).strip()][:5] if isinstance(bullets, list) else [],
+        "references": [str(item).strip() for item in references if str(item).strip()][:8] if isinstance(references, list) else [],
+    }
+
+
+def _build_wealth_explanation(conn: sqlite3.Connection, snapshot_date: Optional[str]) -> dict:
+    if snapshot_date:
+        curr = conn.execute(
+            "SELECT * FROM net_worth_snapshots WHERE snapshot_date=?",
+            (snapshot_date,),
+        ).fetchone()
+    else:
+        curr = conn.execute(
+            "SELECT * FROM net_worth_snapshots ORDER BY snapshot_date DESC LIMIT 1"
+        ).fetchone()
+
+    if not curr:
+        return {"available": False, "reason": "no_snapshot"}
+
+    prev = conn.execute(
+        "SELECT * FROM net_worth_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
+        (curr["snapshot_date"],),
+    ).fetchone()
+    if not prev:
+        return {"available": False, "reason": "no_previous_month", "snapshot_date": curr["snapshot_date"]}
+
+    curr_dict = _row(curr)
+    prev_dict = _row(prev)
+    fallback = _wealth_explanation_fallback(curr_dict, prev_dict)
+
+    try:
+        return _generate_wealth_explanation_with_ollama(curr_dict, prev_dict, fallback)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        log.info("Wealth explanation falling back to deterministic summary: %s", exc)
+        return fallback
+    except Exception as exc:
+        log.warning("Unexpected wealth explanation error, using fallback: %s", exc)
+        return fallback
+
+
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class AliasRequest(BaseModel):
@@ -161,6 +606,12 @@ class CategoryOverrideRequest(BaseModel):
     category:     str
     notes:        str  = ""
     update_alias: bool = True   # also update Merchant Aliases tab so future imports auto-categorise
+
+
+class WealthQuestionRequest(BaseModel):
+    snapshot_date: Optional[str] = None
+    question: str
+    history: list[dict] = []
 
 
 # ── /api/health ───────────────────────────────────────────────────────────────
@@ -1488,6 +1939,30 @@ def get_wealth_summary(
         "liabilities":   [_row(r) for r in liab_rows],
         "dates":         [r[0] for r in dates],
     }
+
+
+@app.get("/api/wealth/explanation", dependencies=[Depends(require_api_key)])
+def get_wealth_explanation(snapshot_date: Optional[str] = Query(None)):
+    """Explain the selected month's net worth movement using local Ollama with fallback."""
+    with _db() as conn:
+        return _build_wealth_explanation(conn, snapshot_date)
+
+
+@app.post("/api/wealth/explanation/query", dependencies=[Depends(require_api_key)])
+def query_wealth_explanation(req: WealthQuestionRequest):
+    """Answer follow-up questions about the selected month's wealth movement."""
+    with _db() as conn:
+        context = _build_wealth_question_context(conn, req.snapshot_date)
+        if not context.get("available"):
+            return context
+        try:
+            return _ask_wealth_question_with_ollama(req.question, context, req.history)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            log.info("Wealth Q&A falling back to deterministic answer: %s", exc)
+            return _fallback_wealth_question_answer(req.question, context)
+        except Exception as exc:
+            log.warning("Unexpected wealth Q&A error, using fallback: %s", exc)
+            return _fallback_wealth_question_answer(req.question, context)
 
 
 # ── PDF Local Processing ───────────────────────────────────────────────────────

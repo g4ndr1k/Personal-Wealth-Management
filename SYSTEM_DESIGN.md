@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.5.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
+**Version:** 3.5.1 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
 **Last validated against:** checked-in codebase 2026-04-08
 
@@ -1094,6 +1094,24 @@ docker compose up -d
 docker compose ps           # confirm "Up (healthy)"
 docker compose logs -f mail-agent
 ```
+
+### Frontend rebuild gotcha
+
+The `finance-api` Docker image copies `pwa/dist/` at build time for static serving. Because of that:
+
+- Backend-only Python changes can be picked up with a container restart.
+- Frontend changes in `pwa/src/` require a fresh PWA build and a rebuilt `finance-api` image.
+- A plain `docker compose restart finance-api` will not pick up new Vue code if `pwa/dist/` was not rebuilt into the image.
+
+For any PWA/UI change, use:
+
+```bash
+cd ~/agentic-ai
+npm run build --prefix pwa
+docker compose up -d --build finance-api
+```
+
+If the browser still shows old UI after redeploy, clear the site data or unregister the service worker because the PWA may still be serving cached assets.
 
 ### Stop
 
@@ -2433,6 +2451,16 @@ docker compose up -d --build finance-api
 - **`pwa/src/views/Holdings.vue`** — chip-bar replaced with arrow nav + `+` / inline month picker; `filteredBonds` and `filteredOtherInvestments` computed refs for Government Bonds split; `.sub-header`, `.price-badge.premium`, `.price-badge.discount` styles added; `.asset-fx` span for non-IDR balance display.
 
 ---
+
+### v3.5.1 (2026-04-08)
+
+#### Stage 3 — Wealth explanation + interactive Q&A
+
+- **Added: `GET /api/wealth/explanation`** — returns a monthly net worth explanation for the selected snapshot date. Uses local Ollama via the existing `[ollama_finance]` config and falls back to a deterministic explanation when the model is unavailable or returns invalid JSON.
+- **Added: `POST /api/wealth/explanation/query`** — follow-up Q&A endpoint for the Wealth screen. Answers questions like “What made Investments rise by Rp 1.7B?” from item-level month-over-month diffs across balances, holdings, and liabilities.
+- **Updated: `Wealth.vue` Net Worth Trend card** — now shows an explanation panel above the chart, suggested follow-up chips, a free-text ask box, and an in-card answer history for recent follow-up questions.
+- **Updated: `pwa/src/api/client.js`** — added `wealthExplanation()` and `wealthExplanationQuery()` client methods.
+- **Deployment note:** because the finance Docker image copies `pwa/dist/` at build time, frontend changes require both `npm run build --prefix pwa` and `docker compose up -d --build finance-api`; a plain container restart only refreshes backend Python code.
 
 ### v3.0.0 (2026-04-04)
 
@@ -3932,6 +3960,8 @@ Stage 3 extends the system into a full **Wealth Management dashboard** that trac
 │  POST /api/wealth/snapshot    → net_worth_snapshots (aggregate)   │
 │  GET  /api/wealth/summary     → all 4 tables in one call          │
 │  GET  /api/wealth/history     → snapshots oldest-first (chart)    │
+│  GET  /api/wealth/explanation → monthly explanation (LLM/fallback)│
+│  POST /api/wealth/explanation/query → follow-up wealth Q&A        │
 └────────────────────────────────────┬─────────────────────────────┘
                                      │
                                      ▼
@@ -3943,7 +3973,7 @@ Stage 3 extends the system into a full **Wealth Management dashboard** that trac
                                      ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                   Vue 3 PWA                                       │
-│   /wealth    Wealth.vue   — net worth hero card, breakdown, chart │
+│   /wealth    Wealth.vue   — hero, breakdown, explanation, chart   │
 │   /holdings  Holdings.vue — asset list, group tabs, entry modal   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -4064,6 +4094,8 @@ All endpoints are under `/api/wealth/` and follow Stage 2 conventions (JSON, SQL
 | `POST` | `/api/wealth/snapshot` | Aggregate all 3 tables for `snapshot_date` → upsert `net_worth_snapshots` row |
 | `GET` | `/api/wealth/history` | Snapshots oldest-first (for trend chart). Param: `limit` (default 24) |
 | `GET` | `/api/wealth/summary` | Full snapshot + all items for a date in one call. Params: `snapshot_date`, `owner` |
+| `GET` | `/api/wealth/explanation` | Monthly explanation for why net worth changed. Param: `snapshot_date`; uses local Ollama with deterministic fallback |
+| `POST` | `/api/wealth/explanation/query` | Follow-up Q&A for the explanation card. Body: `{snapshot_date?, question, history[]}`; answers from item-level month-over-month diffs |
 
 ### `asset_class` → `asset_group` mapping (auto-applied on POST)
 
@@ -4085,6 +4117,8 @@ All endpoints are under `/api/wealth/` and follow Stage 2 conventions (JSON, SQL
 - **Assets / Liabilities cards** — side-by-side summary grid
 - **Asset group breakdown** — tappable rows per group (Cash & Liquid, Investments, Real Estate, Physical Assets) with bar, % of total, and sub-type chips; tapping navigates to `/holdings?group=…`
 - **Liabilities row** — shown when liabilities > 0; sub-chips list mortgage/CC/loans/taxes
+- **Net worth explanation panel** — above the chart, explains why monthly net worth changed using local Ollama with deterministic fallback based on snapshot deltas
+- **Interactive Ask AI follow-up** — suggested question chips plus a free-text input allow drill-down questions such as “What made Investments rise by Rp 1.7B?” and “Which cash accounts fell?”
 - **12-month trend chart** — Chart.js line chart of net worth in IDR millions, oldest-to-newest
 - **Refresh Snapshot button** — calls `POST /api/wealth/snapshot` for the selected date and reloads
 - **FAB (+)** — links to `/holdings` to add data
@@ -4161,10 +4195,10 @@ Monthly wealth management cycle (1st–5th of each month):
 ### Completed ✅
 
 - [x] 4 new SQLite tables in `finance/db.py` (`account_balances`, `holdings`, `liabilities`, `net_worth_snapshots`)
-- [x] 13 new API endpoints in `finance/api.py` (full CRUD for all 3 asset tables + snapshot generation + history + summary)
-- [x] `pwa/src/views/Wealth.vue` — net worth dashboard with `‹ Month Year ›` arrow navigation, hero card, asset breakdown, Chart.js trend, snapshot button
+- [x] 15 wealth API endpoints in `finance/api.py` (full CRUD for all 3 asset tables + snapshot generation + history + summary + explanation + follow-up Q&A)
+- [x] `pwa/src/views/Wealth.vue` — net worth dashboard with `‹ Month Year ›` arrow navigation, hero card, asset breakdown, local-AI explanation panel, interactive Ask AI follow-up flow, Chart.js trend, and snapshot button
 - [x] `pwa/src/views/Holdings.vue` — asset manager with arrow navigation, group tabs, non-IDR FX display, Government Bonds sub-group, per-item delete, FAB → 3-mode modal form
-- [x] `pwa/src/api/client.js` — 13 new wealth API calls + `del()` helper
+- [x] `pwa/src/api/client.js` — wealth API calls for CRUD, snapshots, history, summary, explanation, follow-up Q&A, and `del()` helper
 - [x] `pwa/src/router/index.js` — `/wealth` and `/holdings` routes
 - [x] `pwa/src/App.vue` — 6-tab bottom nav; app title changed to "Wealth"
 - [x] `bridge/fx_rate.py` — automatic historical FX rate fetching via `fawazahmed0/currency-api` (jsdelivr CDN primary, Cloudflare Pages fallback); module-level cache; returns 0.0 on failure
@@ -4198,4 +4232,4 @@ Monthly wealth management cycle (1st–5th of each month):
 - [ ] Multi-owner net worth split (currently shown per-item via `owner` field; aggregated snapshot is household total)
 
 
-*Guide last updated 2026-04-07 · v3.4.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*
+*Guide last updated 2026-04-08 · v3.5.1 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*
