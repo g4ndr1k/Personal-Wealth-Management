@@ -28,9 +28,10 @@ class OllamaProvider(Provider):
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
+                "think": False,
                 "options": {
                     "temperature": 0.1,
-                    "num_predict": 250
+                    "num_predict": 350
                 }
             }
         )
@@ -52,7 +53,7 @@ class OllamaProvider(Provider):
             content = snippet[:2000]
             content_label = "Preview"
         else:
-            content = "(no body text available)"
+            content = "(body unavailable — infer from subject and sender only)"
             content_label = "Body"
 
         return f"""You are an email classification system for a personal finance alert service.
@@ -83,8 +84,12 @@ Urgency rules:
 - not_financial = low
 
 Summary rules:
-- Write exactly 1 short sentence (max 150 chars) describing what the email is about
-- Focus on the actionable content, not the sender
+- Write exactly 1 concise sentence (max 200 chars) capturing the SPECIFIC event
+- For transactions: include amount, account (last 4 digits if shown), and type
+- For security alerts: include what happened (login/OTP/fraud), time, and device/IP if shown
+- For bills/statements: include the total amount due and due date if present
+- For other: state the specific action required or key fact
+- Do not mention the bank name unless it adds meaning
 - If unsure between financial and not_financial, choose financial_other
 
 Email to classify:
@@ -100,7 +105,7 @@ Subject: {subject}
 
         category = payload.get("category", "financial_other")
         urgency = payload.get("urgency", "medium")
-        summary = str(payload.get("summary", ""))[:200]
+        summary = str(payload.get("summary", ""))[:250]
         requires_action = bool(payload.get("requires_action", False))
 
         if category not in ALLOWED_CATEGORIES:

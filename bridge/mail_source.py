@@ -11,7 +11,12 @@ Tahoe V10 normalized schema:
 Dates: Unix timestamps (seconds since 1970-01-01).
 """
 
+import email as _email_module
+import html as _html_module
+import logging
+import re
 import sqlite3
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
@@ -66,6 +71,69 @@ class MailSource:
             settings["mail"].get("initial_lookback_days", 7))
         self.max_batch = int(settings["mail"].get("max_batch", 25))
         self._schema_valid = None
+        # Detect optional schema features at startup
+        self._has_document_id = False
+        self._gen_summary_join: str | None = None  # SQL fragment for JOIN
+        self._detect_optional_schema()
+        self._log_mail_directory_structure()
+
+    def _log_mail_directory_structure(self) -> None:
+        """Log top-level folder names under ~/Library/Mail/V* for debugging."""
+        log = logging.getLogger("bridge.mail_source")
+        try:
+            mail_root = Path.home() / "Library" / "Mail"
+            for v_dir in sorted(mail_root.glob("V*"), reverse=True):
+                folders = sorted(p.name for p in v_dir.iterdir()
+                                 if p.is_dir())[:10]
+                log.info("Mail %s folders: %s", v_dir.name, folders)
+                break  # Only need first V* dir
+        except Exception as e:
+            log.warning("Could not list Mail directory: %s", e)
+
+    def _detect_optional_schema(self) -> None:
+        """Detect optional schema features (document_id, generated_summaries)."""
+        import logging
+        log = logging.getLogger("bridge.mail_source")
+        try:
+            with self._connect() as conn:
+                # Check messages.document_id
+                msg_cols = {
+                    r[1] for r in conn.execute(
+                        "PRAGMA table_info(messages)").fetchall()
+                }
+                self._has_document_id = "document_id" in msg_cols
+
+                # Check generated_summaries and find its join column
+                tables = {
+                    r[0] for r in conn.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table'").fetchall()
+                }
+                if "generated_summaries" in tables:
+                    gs_cols = {
+                        r[1] for r in conn.execute(
+                            "PRAGMA table_info(generated_summaries)"
+                        ).fetchall()
+                    }
+                    # Common join patterns in order of preference
+                    if "message_id" in gs_cols:
+                        self._gen_summary_join = \
+                            "LEFT JOIN generated_summaries gs " \
+                            "ON gs.message_id = m.ROWID"
+                    elif "mail_id" in gs_cols:
+                        self._gen_summary_join = \
+                            "LEFT JOIN generated_summaries gs " \
+                            "ON gs.mail_id = m.ROWID"
+                    elif "summary" in gs_cols:
+                        # Fall back to ROWID-based join (same primary key)
+                        self._gen_summary_join = \
+                            "LEFT JOIN generated_summaries gs " \
+                            "ON gs.ROWID = m.ROWID"
+                    log.info(
+                        "generated_summaries detected, cols=%s, join=%s",
+                        sorted(gs_cols), self._gen_summary_join)
+        except Exception as e:
+            log.warning("Optional schema detection failed: %s", e)
 
     def can_access(self) -> bool:
         if not self.mail_db.exists():
@@ -200,6 +268,220 @@ class MailSource:
             "schema_valid": self._schema_valid,
         }
 
+    def _find_emlx_by_spotlight(self, message_id: str) -> Path | None:
+        """Use mdfind (Spotlight) to locate the .emlx file by Message-ID.
+
+        This does not require Automation permission and works from daemon context.
+        Returns None if Spotlight doesn't index ~/Library/Mail or the message
+        isn't found.
+        """
+        if not message_id or message_id.startswith("rowid-"):
+            return None
+        log = logging.getLogger("bridge.mail_source")
+        mail_root = str(Path.home() / "Library" / "Mail")
+        safe_id = message_id.replace("'", "").replace("\\", "")
+        # Try known Spotlight attributes for RFC 2822 Message-ID
+        for attr in ("kMDItemIdentifier", "kMDItemMessageID",
+                     "com_apple_mail_messageID"):
+            try:
+                r = subprocess.run(
+                    ["mdfind", f"{attr} == '{safe_id}'",
+                     "-onlyin", mail_root],
+                    capture_output=True, text=True, timeout=5)
+                if r.returncode == 0 and r.stdout.strip():
+                    for p in r.stdout.strip().split("\n"):
+                        if p.endswith(".emlx"):
+                            log.info("Spotlight found emlx via %s: %s",
+                                     attr, p)
+                            return Path(p)
+                elif r.returncode != 0:
+                    log.info("mdfind %s returncode=%d stderr=%s",
+                             attr, r.returncode, r.stderr[:80])
+            except subprocess.TimeoutExpired:
+                log.warning("mdfind timed out for attr=%s msgid=%s",
+                            attr, message_id[:40])
+            except Exception as e:
+                log.warning("mdfind error (%s): %s", attr, e)
+        log.debug("Spotlight found no emlx for %s", message_id[:40])
+        return None
+
+    def _mailbox_to_fs_path(self, mailbox_url: str) -> Path | None:
+        """Convert a Mail.app mailbox URL to its Messages directory on disk.
+
+        Format: imap://{account_uuid}/{encoded_mailbox_path}
+        Maps to: ~/Library/Mail/V*/{account_uuid}.mbox/{mailbox}.mbox/Messages/
+        """
+        log = logging.getLogger("bridge.mail_source")
+        if not mailbox_url:
+            return None
+        try:
+            decoded = unquote(mailbox_url)
+            # Strip scheme: imap://UUID/path  or  mailboxes://UUID/path
+            no_scheme = re.sub(r"^[a-z]+://", "", decoded)
+            # UUID is the first path component
+            parts = no_scheme.split("/", 1)
+            if len(parts) < 2:
+                return None
+            account_id = parts[0]
+            mailbox_path = parts[1].strip("/")
+            # Build filesystem path
+            mail_root = Path.home() / "Library" / "Mail"
+            # Account folder: V*/{account_id}.mbox
+            for v_dir in sorted(mail_root.glob("V*"), reverse=True):
+                # V10 Tahoe: account dirs are plain UUIDs (no .mbox suffix)
+                for suffix in ("", ".mbox"):
+                    acct_dir = v_dir / f"{account_id}{suffix}"
+                    if not acct_dir.exists():
+                        continue
+                    # Log account dir contents to understand structure
+                    try:
+                        contents = sorted(p.name for p in acct_dir.iterdir()
+                                          if p.is_dir())[:6]
+                        log.info("acct_dir %s contents: %s",
+                                 acct_dir.name, contents)
+                    except Exception:
+                        pass
+                    # Mailbox path: each component gets a .mbox suffix
+                    # e.g. "[Gmail]/All Mail" → "[Gmail].mbox/All Mail.mbox"
+                    sub_parts = mailbox_path.split("/")
+                    sub = Path("/".join(p + ".mbox" for p in sub_parts))
+                    messages_dir = acct_dir / sub / "Messages"
+                    log.info("Messages dir: %s exists=%s",
+                             messages_dir, messages_dir.exists())
+                    if messages_dir.exists():
+                        return messages_dir
+        except Exception as e:
+            log.warning("_mailbox_to_fs_path error: %s", e)
+        return None
+
+    def _find_emlx(self, rowid: int, document_id: str | None = None,
+                   remote_id: int | None = None,
+                   mailbox_url: str | None = None,
+                   message_id: int | None = None) -> Path | None:
+        """Search for the .emlx file for this message.
+
+        In Mail.app V10 Tahoe, emlx files are named by messages.message_id
+        (a local integer ID), NOT the IMAP remote_id (server UID).
+
+        Tries in order:
+        1. account dir + message_id.emlx glob (correct for V10 Tahoe)
+        2. account dir + remote_id.emlx glob (fallback)
+        3. document_id-based broad glob
+        4. ROWID-based broad glob (older Mail.app layout)
+        """
+        log = logging.getLogger("bridge.mail_source")
+        mail_root = Path.home() / "Library" / "Mail"
+        try:
+            account_id = None
+            if mailbox_url:
+                decoded = unquote(mailbox_url)
+                no_scheme = re.sub(r"^[a-z]+://", "", decoded)
+                account_id = no_scheme.split("/", 1)[0]
+
+            if account_id:
+                for v_dir in sorted(mail_root.glob("V*"), reverse=True):
+                    for suffix in ("", ".mbox"):
+                        acct_dir = v_dir / f"{account_id}{suffix}"
+                        if not acct_dir.exists():
+                            continue
+                        # Strategy 1: message_id (local ID, correct for V10)
+                        if message_id:
+                            matches = list(
+                                acct_dir.glob(f"**/{message_id}.emlx"))
+                            if matches:
+                                log.info(
+                                    "Found emlx via message_id: %s",
+                                    matches[0])
+                                return matches[0]
+                        # Strategy 2: remote_id (IMAP UID, may differ)
+                        if remote_id:
+                            matches = list(
+                                acct_dir.glob(f"**/{remote_id}.emlx"))
+                            if matches:
+                                log.info(
+                                    "Found emlx via remote_id: %s",
+                                    matches[0])
+                                return matches[0]
+                log.debug(
+                    "Acct glob miss rowid=%s msg_id=%s remote_id=%s acct=%s",
+                    rowid, message_id, remote_id, account_id)
+            # Strategy 3: document_id broad glob
+            if document_id:
+                matches = list(mail_root.glob(f"V*/**/{document_id}.emlx"))
+                if matches:
+                    return matches[0]
+            # Strategy 4: message_id broad glob
+            if message_id:
+                matches = list(mail_root.glob(f"V*/**/{message_id}.emlx"))
+                if matches:
+                    log.info("Found emlx via broad message_id glob: %s",
+                             matches[0])
+                    return matches[0]
+            # Strategy 5: ROWID broad glob (older Mail.app layout)
+            matches = list(mail_root.glob(f"V*/**/{rowid}.emlx"))
+            if matches:
+                log.info("Found emlx via ROWID glob: %s", matches[0])
+                return matches[0]
+            log.debug("No emlx found rowid=%s msg_id=%s remote_id=%s",
+                      rowid, message_id, remote_id)
+            return None
+        except Exception as e:
+            log.warning("_find_emlx error rowid=%s: %s", rowid, e)
+            return None
+
+    def _read_emlx_body(self, path: Path) -> str:
+        """Parse a .emlx file and return plain-text body (up to 6000 chars).
+
+        .emlx format:
+          Line 1: byte count of the RFC 2822 message (ASCII integer)
+          Next N bytes: RFC 2822 MIME message
+          Remainder: plist XML (ignored)
+        """
+        log = logging.getLogger("bridge.mail_source")
+        try:
+            raw = path.read_bytes()
+        except OSError as e:
+            log.warning("emlx read error %s: %s", path.name, e)
+            return ""
+
+        # Find the first newline to get the byte count
+        nl = raw.find(b"\n")
+        if nl < 0:
+            return ""
+        try:
+            msg_len = int(raw[:nl].strip())
+        except ValueError:
+            return ""
+
+        rfc822_bytes = raw[nl + 1: nl + 1 + msg_len]
+        if not rfc822_bytes.strip():
+            return ""
+
+        rfc822 = rfc822_bytes.decode("utf-8", errors="replace")
+        msg = _email_module.message_from_string(rfc822)
+        parts = []
+        walk = msg.walk() if msg.is_multipart() else [msg]
+        for part in walk:
+            ctype = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_param("charset") or "utf-8"
+            decoded = payload.decode(charset, errors="replace")
+            if ctype == "text/plain":
+                parts.append(decoded)
+            elif ctype == "text/html" and not parts:
+                # Remove style/script blocks before stripping tags
+                decoded = re.sub(
+                    r"<(style|script)[^>]*>.*?</(style|script)>",
+                    " ", decoded, flags=re.DOTALL | re.IGNORECASE)
+                decoded = re.sub(r"<[^>]+>", " ", decoded)
+                decoded = _html_module.unescape(decoded)
+                parts.append(" ".join(decoded.split()))
+        result = "\n".join(parts)[:6000]
+        log.debug("emlx body extracted %s: %d chars", path.name, len(result))
+        return result
+
     def get_pending_messages(
         self, ack_token: str, limit: int = 25
     ) -> tuple[list[dict], str]:
@@ -220,11 +502,21 @@ class MailSource:
             where_sql = (" AND ".join(where_parts)
                          if where_parts else "1=1")
 
+            doc_id_col = (
+                "m.document_id" if self._has_document_id else "NULL")
+            gen_sum_col = (
+                "gs.summary" if self._gen_summary_join else "NULL")
+            gen_sum_join = self._gen_summary_join or ""
+
             query = f"""
             SELECT m.ROWID, sub.subject,
                 a.address AS sender_email,
                 a.comment AS sender_name,
                 summ.summary AS body_text,
+                {gen_sum_col} AS generated_summary,
+                {doc_id_col} AS document_id,
+                m.message_id,
+                m.remote_id,
                 m.date_received, m.date_sent,
                 mb.url AS mailbox_url,
                 mgd.message_id_header,
@@ -236,6 +528,7 @@ class MailSource:
             LEFT JOIN subjects sub ON sub.ROWID = m.subject
             LEFT JOIN addresses a ON a.ROWID = m.sender
             LEFT JOIN summaries summ ON summ.ROWID = m.summary
+            {gen_sum_join}
             LEFT JOIN mailboxes mb ON mb.ROWID = m.mailbox
             LEFT JOIN message_global_data mgd
                 ON mgd.ROWID = m.global_message_id
@@ -253,6 +546,41 @@ class MailSource:
             raw_body = row["body_text"] or ""
             body_text, body_truncated = truncate_bytes(
                 raw_body, self.max_body_text_bytes)
+
+            # Prefer Apple Intelligence generated summary when richer
+            gen_summary = (row["generated_summary"] or "").strip()
+            if len(gen_summary) > len(body_text):
+                body_text = gen_summary
+                body_truncated = False
+
+            document_id = row["document_id"] or None
+            message_id = row["message_id"] if row["message_id"] else None
+            remote_id = row["remote_id"] if row["remote_id"] else None
+            mailbox_url_row = row["mailbox_url"] or ""
+
+            # If the summaries/generated tables gave us little or no content,
+            # try to find and read the actual .emlx file on disk.
+            body_source = "summaries_db"
+            message_id_header = row["message_id_header"] or ""
+            if len(body_text.encode("utf-8", errors="ignore")) < 200:
+                emlx_path = self._find_emlx(
+                    rowid, document_id, remote_id, mailbox_url_row,
+                    message_id=message_id)
+                if emlx_path:
+                    emlx_body = self._read_emlx_body(emlx_path)
+                    if len(emlx_body) > len(body_text):
+                        body_text = emlx_body
+                        body_truncated = len(body_text) >= 6000
+                        body_source = "emlx_file"
+
+            if len(body_text.encode("utf-8", errors="ignore")) < 200:
+                spot_path = self._find_emlx_by_spotlight(message_id_header)
+                if spot_path:
+                    spot_body = self._read_emlx_body(spot_path)
+                    if len(spot_body) > len(body_text):
+                        body_text = spot_body
+                        body_truncated = len(body_text) >= 6000
+                        body_source = "spotlight_emlx"
 
             sender_email = row["sender_email"] or ""
             sender_name = row["sender_name"] or ""
@@ -286,7 +614,8 @@ class MailSource:
                 "body_text": body_text,
                 "body_html": "",
                 "body_text_truncated": body_truncated,
-                "has_body": bool(raw_body),
+                "body_source": body_source,
+                "has_body": bool(body_text),
                 "apple_category": row["apple_category"],
                 "apple_high_impact": row["apple_high_impact"],
                 "apple_urgent": row["apple_urgent"],
