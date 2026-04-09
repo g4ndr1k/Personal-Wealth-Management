@@ -76,6 +76,7 @@ export const api = {
   summaryYears:        ()         => get('/summary/years'),
   summaryYear:         (y)        => get(`/summary/year/${y}`),
   summaryMonth:        (y, m)     => get(`/summary/${y}/${m}`),
+  summaryExplanation:  (y, m, p={}) => get(`/summary/${y}/${m}/explanation`, p),
   reviewQueue:         (limit=100)=> get('/review-queue', { limit }),
   saveAlias:           (body)     => post('/alias', body),
   sync:                ()         => post('/sync'),

@@ -112,6 +112,25 @@
       <!-- Monthly trend chart -->
       <div class="card">
         <div class="card-title">{{ store.selectedYear }} — Monthly Trend</div>
+        <div v-if="trendExplanation?.available" class="trend-explanation">
+          <div class="trend-explanation-topline">
+            <div class="trend-explanation-headline">{{ trendExplanation.headline }}</div>
+            <div v-if="trendExplanationLoading" class="trend-explanation-status">
+              <span class="spinner spinner-sm"></span>
+              Refining with AI…
+            </div>
+          </div>
+          <div class="trend-explanation-summary">{{ trendExplanation.summary }}</div>
+          <div v-if="trendExplanation.drivers?.length" class="trend-driver-list">
+            <div v-for="driver in trendExplanation.drivers" :key="driver" class="trend-driver-item">
+              {{ driver }}
+            </div>
+          </div>
+        </div>
+        <div v-else-if="trendExplanationLoading" class="trend-explanation-loading">
+          <span class="spinner spinner-sm"></span>
+          Building monthly trend analysis…
+        </div>
         <div v-if="!yearData" class="loading" style="padding:20px"><div class="spinner"></div></div>
         <div v-else class="chart-wrap">
           <canvas ref="trendRef"></canvas>
@@ -161,6 +180,9 @@ const summary  = ref(null)
 const yearData = ref(null)
 const loading  = ref(false)
 const error    = ref(null)
+const trendExplanation = ref(null)
+const trendExplanationLoading = ref(false)
+let loadToken = 0
 
 const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 const MONTHS_LONG  = ['January','February','March','April','May','June','July','August','September','October','November','December']
@@ -270,22 +292,44 @@ function nextMonth() {
 
 // ── Data loading ─────────────────────────────────────────────────────────────
 async function load() {
+  const token = ++loadToken
   loading.value = true
   error.value   = null
+  trendExplanation.value = null
+  trendExplanationLoading.value = true
   try {
     const [s, y] = await Promise.all([
       api.summaryMonth(store.selectedYear, store.selectedMonth),
       api.summaryYear(store.selectedYear),
     ])
+    if (token !== loadToken) return
     summary.value  = s
     yearData.value = y
     await nextTick()
     renderChart()
   } catch (e) {
+    if (token !== loadToken) return
     error.value = e.message
+    trendExplanationLoading.value = false
+    return
   } finally {
-    loading.value = false
+    if (token === loadToken) loading.value = false
   }
+
+  api.summaryExplanation(store.selectedYear, store.selectedMonth)
+    .then(res => {
+      if (token !== loadToken) return
+      trendExplanation.value = res
+      return api.summaryExplanation(store.selectedYear, store.selectedMonth, { ai: true })
+    })
+    .then(res => {
+      if (!res || token !== loadToken) return
+      trendExplanation.value = res
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (token === loadToken) trendExplanationLoading.value = false
+    })
 }
 
 function renderChart() {
@@ -390,5 +434,71 @@ onUnmounted(() => { if (trendChart) trendChart.destroy() })
 .grp-cat-more {
   color: var(--text-muted);
   font-style: italic;
+}
+
+.trend-explanation-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.trend-explanation {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(30,58,95,0.04), rgba(255,255,255,0.9));
+}
+
+.trend-explanation-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.trend-explanation-headline {
+  font-weight: 800;
+  color: var(--primary);
+}
+
+.trend-explanation-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.trend-explanation-summary {
+  color: var(--neutral);
+  line-height: 1.45;
+}
+
+.trend-driver-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.trend-driver-item {
+  position: relative;
+  padding-left: 14px;
+  color: var(--neutral);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.trend-driver-item::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: var(--primary);
+  font-weight: 700;
 }
 </style>

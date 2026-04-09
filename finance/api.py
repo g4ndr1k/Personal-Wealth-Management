@@ -155,6 +155,338 @@ def _fmt_idr_compact(value: float) -> str:
     return f"Rp {round(value):,}"
 
 
+def _previous_year_month(year: int, month: int) -> tuple[int, int]:
+    if month == 1:
+        return (year - 1, 12)
+    return (year, month - 1)
+
+
+def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -> dict:
+    if not (1 <= month <= 12):
+        raise HTTPException(400, f"month must be 1–12, got {month}")
+
+    period = f"{year}-{month:02d}"
+
+    cat_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(t.category, '') AS category,
+            c.icon,
+            c.sort_order,
+            SUM(t.amount)            AS total_amount,
+            COUNT(*)                 AS tx_count
+        FROM transactions t
+        LEFT JOIN categories c ON t.category = c.category
+        WHERE strftime('%Y-%m', t.date) = ?
+        GROUP BY t.category
+        ORDER BY c.sort_order NULLS LAST, t.category
+        """,
+        (period,),
+    ).fetchall()
+
+    owner_rows = conn.execute(
+        """
+        SELECT
+            owner,
+            SUM(CASE WHEN amount > 0
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      THEN amount ELSE 0 END) AS income,
+            SUM(CASE WHEN amount < 0
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      THEN amount ELSE 0 END) AS expense,
+            COUNT(*) AS tx_count
+        FROM transactions
+        WHERE strftime('%Y-%m', date) = ?
+        GROUP BY owner
+        ORDER BY owner
+        """,
+        (period,),
+    ).fetchall()
+
+    totals = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN amount > 0
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      THEN amount ELSE 0 END) AS income,
+            SUM(CASE WHEN amount < 0
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      THEN amount ELSE 0 END) AS expense,
+            COUNT(*) AS tx_count
+        FROM transactions
+        WHERE strftime('%Y-%m', date) = ?
+        """,
+        (period,),
+    ).fetchone()
+
+    needs_review = conn.execute(
+        """
+        SELECT COUNT(*) FROM transactions
+        WHERE strftime('%Y-%m', date) = ?
+          AND (category IS NULL OR category = '')
+        """,
+        (period,),
+    ).fetchone()[0]
+
+    total_income = totals["income"] or 0.0
+    total_expense = totals["expense"] or 0.0
+
+    transfer_cats = {"Transfer", "Adjustment"}
+    by_category = []
+    for r in cat_rows:
+        amt = r["total_amount"] or 0.0
+        cat_name = r["category"] or "Uncategorised"
+        pct = (
+            round(abs(amt) / abs(total_expense) * 100, 1)
+            if total_expense and amt < 0 and cat_name not in transfer_cats
+            else 0.0
+        )
+        by_category.append({
+            "category": cat_name,
+            "icon": r["icon"] or "",
+            "sort_order": r["sort_order"] or 99,
+            "amount": round(amt, 2),
+            "count": r["tx_count"],
+            "pct_of_expense": pct,
+        })
+
+    by_owner = []
+    for r in owner_rows:
+        inc = r["income"] or 0.0
+        exp = r["expense"] or 0.0
+        by_owner.append({
+            "owner": r["owner"],
+            "income": round(inc, 2),
+            "expense": round(exp, 2),
+            "net": round(inc + exp, 2),
+            "transaction_count": r["tx_count"],
+        })
+
+    return {
+        "year": year,
+        "month": month,
+        "period": period,
+        "total_income": round(total_income, 2),
+        "total_expense": round(total_expense, 2),
+        "net": round(total_income + total_expense, 2),
+        "transaction_count": totals["tx_count"] or 0,
+        "needs_review": needs_review,
+        "by_category": by_category,
+        "by_owner": by_owner,
+    }
+
+
+def _monthly_flow_delta_rows(curr: dict, prev: dict) -> list[dict]:
+    rows = [
+        {
+            "label": "Income",
+            "curr": curr["total_income"],
+            "prev": prev["total_income"],
+            "delta": curr["total_income"] - prev["total_income"],
+        },
+        {
+            "label": "Expense",
+            "curr": abs(curr["total_expense"]),
+            "prev": abs(prev["total_expense"]),
+            "delta": abs(curr["total_expense"]) - abs(prev["total_expense"]),
+        },
+        {
+            "label": "Net",
+            "curr": curr["net"],
+            "prev": prev["net"],
+            "delta": curr["net"] - prev["net"],
+        },
+    ]
+    for row in rows:
+        row["pct"] = round((row["delta"] / abs(row["prev"])) * 100) if row["prev"] else None
+    return rows
+
+
+def _monthly_flow_category_deltas(curr: dict, prev: dict) -> list[dict]:
+    excluded = {"Transfer", "Adjustment", "Uncategorised"}
+    curr_map = {
+        row["category"]: abs(row["amount"])
+        for row in curr["by_category"]
+        if row["amount"] < 0 and row["category"] not in excluded
+    }
+    prev_map = {
+        row["category"]: abs(row["amount"])
+        for row in prev["by_category"]
+        if row["amount"] < 0 and row["category"] not in excluded
+    }
+    out = []
+    for category in sorted(set(curr_map) | set(prev_map)):
+        curr_amount = curr_map.get(category, 0.0)
+        prev_amount = prev_map.get(category, 0.0)
+        delta = curr_amount - prev_amount
+        if abs(delta) < 0.005:
+            continue
+        pct = round((delta / prev_amount) * 100) if prev_amount else None
+        out.append({
+            "label": category,
+            "curr": round(curr_amount, 2),
+            "prev": round(prev_amount, 2),
+            "delta": round(delta, 2),
+            "pct": pct,
+        })
+    return sorted(out, key=lambda row: abs(row["delta"]), reverse=True)
+
+
+def _monthly_flow_explanation_fallback(curr: dict, prev: dict) -> dict:
+    net_change = curr["net"] - prev["net"]
+    income_change = curr["total_income"] - prev["total_income"]
+    expense_change = abs(curr["total_expense"]) - abs(prev["total_expense"])
+    category_deltas = _monthly_flow_category_deltas(curr, prev)
+
+    top_spend_up = next((row for row in category_deltas if row["delta"] > 0), None)
+    top_spend_down = next((row for row in category_deltas if row["delta"] < 0), None)
+    current_spending = sorted(
+        [row for row in curr["by_category"] if row["amount"] < 0 and row["category"] not in {"Transfer", "Adjustment"}],
+        key=lambda row: abs(row["amount"]),
+        reverse=True,
+    )
+
+    net_direction = "improved" if net_change >= 0 else "weakened"
+    income_direction = "rose" if income_change >= 0 else "fell"
+    expense_direction = "rose" if expense_change >= 0 else "fell"
+
+    summary_parts = [
+        f"Net flow {net_direction} by {_fmt_idr_compact(abs(net_change))} in {curr['period']} versus {prev['period']}.",
+        f"Income {income_direction} by {_fmt_idr_compact(abs(income_change))} and spending {expense_direction} by {_fmt_idr_compact(abs(expense_change))}.",
+    ]
+    if top_spend_up:
+        summary_parts.append(
+            f"The biggest spending increase was {top_spend_up['label']} at {_fmt_idr_compact(top_spend_up['delta'])} higher month over month."
+        )
+    elif top_spend_down:
+        summary_parts.append(
+            f"The biggest spending relief was {top_spend_down['label']} at {_fmt_idr_compact(abs(top_spend_down['delta']))} lower month over month."
+        )
+
+    drivers = [
+        f"Income moved from {_fmt_idr_compact(prev['total_income'])} to {_fmt_idr_compact(curr['total_income'])}.",
+        f"Expense moved from {_fmt_idr_compact(abs(prev['total_expense']))} to {_fmt_idr_compact(abs(curr['total_expense']))}.",
+    ]
+    if top_spend_up:
+        pct_suffix = f" ({abs(top_spend_up['pct'])}%)" if top_spend_up["pct"] is not None else ""
+        drivers.append(
+            f"{top_spend_up['label']} spending was up {_fmt_idr_compact(top_spend_up['delta'])}{pct_suffix}."
+        )
+    if top_spend_down:
+        pct_suffix = f" ({abs(top_spend_down['pct'])}%)" if top_spend_down["pct"] is not None else ""
+        drivers.append(
+            f"{top_spend_down['label']} spending was down {_fmt_idr_compact(abs(top_spend_down['delta']))}{pct_suffix}."
+        )
+    if current_spending:
+        top_labels = ", ".join(
+            f"{row['category']} {_fmt_idr_compact(abs(row['amount']))}"
+            for row in current_spending[:2]
+        )
+        drivers.append(f"Top expense categories this month were {top_labels}.")
+
+    return {
+        "available": True,
+        "source": "fallback",
+        "model": None,
+        "headline": f"Why {curr['period']} net flow changed",
+        "summary": " ".join(summary_parts[:3]),
+        "drivers": drivers[:4],
+        "current_period": curr["period"],
+        "previous_period": prev["period"],
+        "net_change": round(net_change, 2),
+        "income_change": round(income_change, 2),
+        "expense_change": round(expense_change, 2),
+        "rows": _monthly_flow_delta_rows(curr, prev),
+        "category_deltas": category_deltas[:8],
+    }
+
+
+def _generate_monthly_flow_explanation_with_ollama(curr: dict, prev: dict, fallback: dict) -> dict:
+    prompt = (
+        "You are writing a monthly cash flow explanation for a personal finance dashboard.\n"
+        "Use only the numbers provided.\n"
+        "Return JSON only with keys: headline, summary, drivers.\n"
+        "Rules:\n"
+        "- headline: max 80 chars.\n"
+        "- summary: 2 sentences, specific and plain English.\n"
+        "- drivers: array of 3 to 4 short bullet strings.\n"
+        "- Focus on income, expense, net flow, and the largest spending-category shifts.\n"
+        "- Do not give advice or speculate beyond the data.\n\n"
+        f"Current period: {curr['period']}\n"
+        f"Previous period: {prev['period']}\n"
+        f"Current income: {curr['total_income']:.2f} IDR\n"
+        f"Previous income: {prev['total_income']:.2f} IDR\n"
+        f"Current expense: {abs(curr['total_expense']):.2f} IDR\n"
+        f"Previous expense: {abs(prev['total_expense']):.2f} IDR\n"
+        f"Current net: {curr['net']:.2f} IDR\n"
+        f"Previous net: {prev['net']:.2f} IDR\n"
+        f"Top spending category deltas JSON: {json.dumps(fallback['category_deltas'][:6], ensure_ascii=True)}\n"
+        f"Current top expense categories JSON: {json.dumps(sorted([row for row in curr['by_category'] if row['amount'] < 0], key=lambda row: abs(row['amount']), reverse=True)[:6], ensure_ascii=True)}"
+    )
+    payload = json.dumps({
+        "model": _ollama_cfg.model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 280,
+        },
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{_ollama_cfg.host.rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=_ollama_cfg.timeout_seconds) as resp:
+        data = json.loads(resp.read())
+
+    raw = (data.get("response") or "").strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("No JSON object in Ollama response")
+    parsed = json.loads(raw[start:end + 1])
+
+    headline = str(parsed.get("headline") or fallback["headline"]).strip()[:80]
+    summary = str(parsed.get("summary") or fallback["summary"]).strip()
+    drivers = parsed.get("drivers")
+    if not isinstance(drivers, list):
+        drivers = fallback["drivers"]
+    drivers = [str(item).strip() for item in drivers if str(item).strip()][:4] or fallback["drivers"]
+
+    return {
+        **fallback,
+        "source": "ollama",
+        "model": _ollama_cfg.model,
+        "headline": headline or fallback["headline"],
+        "summary": summary or fallback["summary"],
+        "drivers": drivers,
+    }
+
+
+def _build_monthly_flow_explanation(
+    conn: sqlite3.Connection,
+    year: int,
+    month: int,
+    use_ai: bool = False,
+) -> dict:
+    curr = _get_monthly_summary_data(conn, year, month)
+    prev_year, prev_month = _previous_year_month(year, month)
+    prev = _get_monthly_summary_data(conn, prev_year, prev_month)
+    fallback = _monthly_flow_explanation_fallback(curr, prev)
+    if not use_ai:
+        return fallback
+    try:
+        return _generate_monthly_flow_explanation_with_ollama(curr, prev, fallback)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        log.info("Monthly flow explanation falling back to deterministic summary: %s", exc)
+        return fallback
+    except Exception as exc:
+        log.warning("Unexpected monthly flow explanation error, using fallback: %s", exc)
+        return fallback
+
+
 def _wealth_delta_rows(curr: dict, prev: dict) -> list[dict]:
     rows = [
         {
@@ -843,122 +1175,19 @@ def get_monthly_summary(year: int, month: int):
     Returns totals, per-category breakdown (with % of expense), and
     per-owner split.  Also includes needs_review count for the month.
     """
-    if not (1 <= month <= 12):
-        raise HTTPException(400, f"month must be 1–12, got {month}")
-
-    period = f"{year}-{month:02d}"
-
     with _db() as conn:
-        # ── Category breakdown ────────────────────────────────────────────────
-        cat_rows = conn.execute(
-            """
-            SELECT
-                COALESCE(t.category, '') AS category,
-                c.icon,
-                c.sort_order,
-                SUM(t.amount)            AS total_amount,
-                COUNT(*)                 AS tx_count
-            FROM transactions t
-            LEFT JOIN categories c ON t.category = c.category
-            WHERE strftime('%Y-%m', t.date) = ?
-            GROUP BY t.category
-            ORDER BY c.sort_order NULLS LAST, t.category
-            """,
-            (period,),
-        ).fetchall()
+        return _get_monthly_summary_data(conn, year, month)
 
-        # ── Per-owner totals (Internal Transfer excluded from income/expense) ──
-        owner_rows = conn.execute(
-            """
-            SELECT
-                owner,
-                SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
-                          THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
-                          THEN amount ELSE 0 END) AS expense,
-                COUNT(*) AS tx_count
-            FROM transactions
-            WHERE strftime('%Y-%m', date) = ?
-            GROUP BY owner
-            ORDER BY owner
-            """,
-            (period,),
-        ).fetchall()
 
-        # ── Grand totals (Internal Transfer + Opening Balance excluded) ────
-        totals = conn.execute(
-            """
-            SELECT
-                SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
-                          THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
-                          THEN amount ELSE 0 END) AS expense,
-                COUNT(*) AS tx_count
-            FROM transactions
-            WHERE strftime('%Y-%m', date) = ?
-            """,
-            (period,),
-        ).fetchone()
+@app.get("/api/summary/{year}/{month}/explanation", dependencies=[Depends(require_api_key)])
+def get_monthly_flow_explanation(year: int, month: int, ai: bool = Query(False)):
+    """Explain the selected month's cash-flow movement.
 
-        needs_review = conn.execute(
-            """
-            SELECT COUNT(*) FROM transactions
-            WHERE strftime('%Y-%m', date) = ?
-              AND (category IS NULL OR category = '')
-            """,
-            (period,),
-        ).fetchone()[0]
-
-    total_income  = totals["income"]  or 0.0
-    total_expense = totals["expense"] or 0.0
-
-    TRANSFER_CATS = {"Transfer", "Adjustment"}  # excluded from income/expense % calculation
-    by_category = []
-    for r in cat_rows:
-        amt  = r["total_amount"] or 0.0
-        cat_name = r["category"] or "Uncategorised"
-        pct = (
-            round(abs(amt) / abs(total_expense) * 100, 1)
-            if total_expense and amt < 0 and cat_name not in TRANSFER_CATS
-            else 0.0
-        )
-        by_category.append({
-            "category":       cat_name,
-            "icon":           r["icon"]       or "",
-            "sort_order":     r["sort_order"] or 99,
-            "amount":         round(amt, 2),
-            "count":          r["tx_count"],
-            "pct_of_expense": pct,
-        })
-
-    by_owner = []
-    for r in owner_rows:
-        inc = r["income"]  or 0.0
-        exp = r["expense"] or 0.0
-        by_owner.append({
-            "owner":             r["owner"],
-            "income":            round(inc, 2),
-            "expense":           round(exp, 2),
-            "net":               round(inc + exp, 2),
-            "transaction_count": r["tx_count"],
-        })
-
-    return {
-        "year":              year,
-        "month":             month,
-        "period":            period,
-        "total_income":      round(total_income, 2),
-        "total_expense":     round(total_expense, 2),
-        "net":               round(total_income + total_expense, 2),
-        "transaction_count": totals["tx_count"] or 0,
-        "needs_review":      needs_review,
-        "by_category":       by_category,
-        "by_owner":          by_owner,
-    }
+    Without ?ai=1 returns the deterministic fallback instantly.
+    With ?ai=1 calls Ollama for an AI-generated explanation (may be slow).
+    """
+    with _db() as conn:
+        return _build_monthly_flow_explanation(conn, year, month, use_ai=ai)
 
 
 # ── /api/review-queue ─────────────────────────────────────────────────────────
