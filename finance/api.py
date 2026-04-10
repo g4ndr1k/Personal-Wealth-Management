@@ -1989,9 +1989,20 @@ def create_snapshot(req: SnapshotRequest):
         hold = {r["asset_class"]: r["total"] or 0.0 for r in hold_rows}
 
         # ── Liabilities → sub-totals ──────────────────────────────────────────
+        # Use the most recent balance per card as of snapshot_date (carry-forward),
+        # so month-end snapshots reflect CC balances even when statement dates differ.
         liab_rows = conn.execute(
-            "SELECT liability_type, SUM(balance_idr) AS total "
-            "FROM liabilities WHERE snapshot_date=? GROUP BY liability_type",
+            """
+            SELECT liability_type, SUM(balance_idr) AS total
+            FROM (
+                SELECT liability_type, liability_name, owner,
+                       balance_idr, MAX(snapshot_date) AS latest_date
+                FROM liabilities
+                WHERE snapshot_date <= ?
+                GROUP BY liability_type, liability_name, owner
+            )
+            GROUP BY liability_type
+            """,
             (sd,),
         ).fetchall()
         liab = {r["liability_type"]: r["total"] or 0.0 for r in liab_rows}

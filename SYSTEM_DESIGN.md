@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.5.2 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
+**Version:** 3.6.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-04-09
+**Last validated against:** checked-in codebase 2026-04-10
 
 ---
 
@@ -118,6 +118,7 @@ The system alerts on:
 │  │ · Sends iMessage via AppleScript          │  │
 │  │ · HTTP API with bearer auth               │  │
 │  │ · PDF processor endpoints (/pdf/*)        │  │
+│  │ · Pipeline orchestrator (/pipeline/*)     │  │
 │  │ · Web UI served at /pdf/ui                │  │
 │  └───────────────────────────────────────────┘  │
 │                                                 │
@@ -190,6 +191,7 @@ The system alerts on:
   - Web UI at `http://127.0.0.1:9100/pdf/ui`
   - Auto-upsert pipeline in `bridge/pdf_handler.py` after every portfolio parse: savings/consol closing balance → `account_balances`; bond holdings → `holdings`; mutual-fund holdings → `holdings`; equity/fund holdings with month-end gap-fill → `holdings`; RDN cash balance → `account_balances`
   - Gap-fill logic — carries the most recent brokerage holdings forward month-by-month (INSERT OR IGNORE) until either the current month or the first month that already has data for that institution, preventing dashboard gaps between monthly PDFs
+  - End-to-end bridge pipeline orchestrator (`bridge/pipeline.py`) with scheduled runs, manual trigger/status endpoints, import/sync chaining, and month-complete notification tracking
 - Stage 2 finance package (`finance/`) — see §24–32
   - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation, XLSX date parser
@@ -199,7 +201,7 @@ The system alerts on:
   - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 22 default categories and 18 currency codes
   - `finance/db.py` — SQLite schema (5 tables + 5 indexes), WAL mode, `open_db()` connection helper
   - `finance/sync.py` — Sheets → SQLite sync engine: atomic DELETE + INSERT per table, hash deduplication, sync_log, `--status` CLI flag
-  - `finance/api.py` — FastAPI app: finance read/write APIs, monthly and annual summaries, review queue, PDF-local proxy endpoints, wealth APIs, CORS, SQLite `_db()` context manager; also mounts `pwa/dist/` at `/` when present
+  - `finance/api.py` — FastAPI app: finance read/write APIs, monthly and annual summaries, review queue, PDF-local proxy endpoints, pipeline proxy endpoints, wealth APIs, CORS, SQLite `_db()` context manager; also mounts `pwa/dist/` at `/` when present
   - `finance/server.py` — uvicorn entry point: `python3 -m finance.server`; `--host`, `--port`, `--reload` overrides
   - `finance/Dockerfile` — `python:3.12-slim` image; installs google-auth, fastapi, uvicorn[standard], rapidfuzz, openpyxl; copies `pwa/dist/` for production static serving
   - `finance/requirements.txt` — Python dependencies: `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `rapidfuzz`, `fastapi`, `uvicorn[standard]`
@@ -210,7 +212,7 @@ The system alerts on:
   - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), mobile expandable detail rows, desktop sortable table + detail panel
   - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback
   - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
-  - `pwa/src/views/Settings.vue` — Sync + Import buttons with live results, API health status card, PDF processing tools, desktop-only embedded bridge PDF workspace
+  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, PDF processing tools, desktop-only embedded bridge PDF workspace
   - `pwa/src/composables/useLayout.js` — responsive layout detection + persisted manual `Desktop View` override
   - `pwa/src/components/` + `pwa/src/layouts/` — extracted shell pieces for mobile header/nav, desktop sidebar, desktop transactions table, and desktop review workspace
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month, reviewCount badge
@@ -374,6 +376,7 @@ agentic-ai/
 │   ├── mail_source.py            # Mail.app SQLite adapter
 │   ├── messages_source.py        # Messages.app SQLite adapter + AppleScript sender
 │   ├── pdf_handler.py            # PDF processor endpoints (/pdf/*); auto-upsert pipeline for holdings/balances
+│   ├── pipeline.py               # Scheduled/manual PDF→import→sync orchestrator
 │   ├── pdf_unlock.py             # pikepdf unlock + AppleScript fallback
 │   ├── fx_rate.py                # Historical FX rates via fawazahmed0/currency-api (free, no key)
 │   ├── gold_price.py             # IDR/gram gold price via XAU/IDR from fx_rate (historical-capable)
@@ -446,14 +449,14 @@ agentic-ai/
 │           ├── Transactions.vue      # Mobile expandable list + desktop table/detail workspace
 │           ├── ReviewQueue.vue       # Mobile inline form + desktop review workspace + toast
 │           ├── ForeignSpend.vue      # Grouped by currency, per-currency subtotals
-│           └── Settings.vue          # Sync, Import, health status, PDF tools, desktop-only bridge PDF UI
+│           └── Settings.vue          # Sync, Import, pipeline controls, health status, PDF tools, desktop-only bridge PDF UI
 ├── config/
 │   └── settings.toml             # All runtime configuration (Stage 1 + Stage 2 sections)
 ├── data/                         # Runtime SQLite DBs (gitignored)
 │   ├── agent.db
 │   ├── bridge.db
 │   ├── pdf_jobs.db               # PDF processing job queue (bridge HTTP API)
-│   ├── processed_files.db        # Batch processor dedup registry (SHA-256 keyed)
+│   ├── processed_files.db        # Batch + pipeline dedup registry (SHA-256 keyed)
 │   ├── pdf_inbox/                # Drop PDFs/ZIPs here for batch processing
 │   │   └── _extracted/           # Auto-created; holds PDFs extracted from ZIPs
 │   ├── pdf_unlocked/             # Password-removed PDF copies
@@ -723,6 +726,19 @@ alert_on_categories = [
 | `verify_timeout_seconds` | `120` | Timeout for the PDF verifier Ollama call |
 | `verify_model` | `"gemma4:e4b"` | Ollama model used for parsed-PDF verification |
 
+### `[pipeline]`
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable the bridge-integrated scheduled pipeline |
+| `scan_interval_seconds` | `14400` | Delay between scheduled cycles (4 hours) |
+| `auto_import_enabled` | `true` | Run XLS → Google Sheets import after successful parsing |
+| `auto_sync_enabled` | `true` | Run Google Sheets → SQLite sync after a successful import adds rows |
+| `completeness_alert` | `true` | Send one-time month-complete notifications |
+| `parse_alert` | `true` | Send per-cycle success summaries |
+| `failure_alert` | `true` | Send per-cycle failure summaries |
+| `startup_delay_seconds` | `60` | Delay before the first scheduled run after bridge startup |
+
 ### `[owners]`
 
 Maps customer name substrings found in PDFs to canonical owner labels used for XLS file naming and the `Owner` column in `ALL_TRANSACTIONS.xlsx`. Matching is case-insensitive, first match wins.
@@ -747,6 +763,7 @@ Add new entries here when new account holders are added. The fallback label when
 - Serve HTTP API endpoints to the Docker agent
 - Send iMessage alerts via AppleScript
 - Persist ACK checkpoints and request logs in `data/bridge.db`
+- Persist pipeline cycle history and completion notifications in `data/bridge.db`
 - Serve PDF processor endpoints and web UI (see §19)
 
 ### Startup sequence
@@ -757,7 +774,8 @@ Add new entries here when new account holders are added. The fallback label when
 4. Initialize `pdf_jobs.db` (PDF processing job queue)
 5. Initialize `MailSource` — discover Mail DB, verify schema
 6. Initialize `MessagesSource` — open `chat.db`
-7. Start HTTP server on configured host:port
+7. If `[pipeline].enabled = true`, arm the first scheduled pipeline cycle after `startup_delay_seconds`
+8. Start HTTP server on configured host:port
 
 **If Mail DB is inaccessible or schema validation fails, the bridge exits immediately.** Check `logs/bridge-launchd-err.log` for the error.
 
@@ -1607,6 +1625,8 @@ The token is the contents of `secrets/bridge.token`.
 | GET | `/pdf/download/<job_id>` | ✓ | Download produced XLS file |
 | GET | `/pdf/jobs?limit=N` | ✓ | List recent jobs |
 | GET | `/pdf/attachments` | ✓ | List auto-detected bank PDFs from Mail.app |
+| POST | `/pipeline/run` | ✓ | Trigger a manual end-to-end pipeline cycle |
+| GET | `/pipeline/status` | ✓ | Current pipeline state, last result, next scheduled run |
 | GET | `/pdf/ui` | None | Web UI (HTML) |
 
 ### ACK payload
@@ -1632,6 +1652,21 @@ The token is the contents of `secrets/bridge.token`.
 ### Overview
 
 The PDF processor is built into the bridge (runs on the Mac host, not in Docker). It converts password-protected bank statement PDFs into structured Excel workbooks using a 3-layer parsing pipeline.
+
+### End-to-end pipeline orchestrator
+
+The bridge now also includes `bridge/pipeline.py`, an opt-in orchestrator that connects the deterministic monthly workflow into one host-local loop:
+
+1. Scan `data/pdf_inbox/` and `data/pdf_inbox/_extracted/`
+2. Compute SHA-256 for each PDF and consult `data/processed_files.db`
+3. Skip files already recorded with `status='ok'`; retry prior `status='error'`
+4. Reuse the shared PDF-processing flow from `bridge/pdf_handler.py`
+5. If any PDFs succeed and `auto_import_enabled = true`, run `finance.importer`
+6. If the importer adds rows and `auto_sync_enabled = true`, run `finance.sync`
+7. Rebuild completeness state using the PDF Import Log
+8. Send batched success/failure notifications or one-time month-complete alerts
+
+The scheduler lives inside the bridge process and uses a non-blocking lock to prevent overlap. Manual triggers while a cycle is running return `already_running`.
 
 ### Supported banks and statement types
 
@@ -1845,6 +1880,8 @@ The batch processor is a standalone Python script that watches `data/pdf_inbox/`
 
 Every file is SHA-256 hashed **before** processing. The hash and result are written to `data/processed_files.db` (SQLite). On any subsequent run, the same file content produces the same hash → immediate skip. This guarantee holds after restart and even if the file is renamed or re-copied.
 
+The bridge-integrated pipeline uses the same registry, so batch runs and scheduled pipeline runs share one deduplication source of truth.
+
 ```
 File dropped → hash computed → already in registry? → skip
                                 ↓ no
@@ -1914,7 +1951,7 @@ python3 scripts/batch_process.py -v
 
 | Table | Primary key | Purpose |
 |---|---|---|
-| `processed_files` | `sha256` | One row per unique file content; records bank, period, txn count, output filename, status, error |
+| `processed_files` | `sha256` | One row per unique file content; records bank, period, txn count, output filename, status, error, and `error_category` |
 | `zip_members` | `(zip_sha256, pdf_filename)` | Maps each ZIP extraction to its contained PDFs |
 
 To inspect directly:
@@ -1955,63 +1992,25 @@ The UI uses the same bearer token as the rest of the bridge API. On first load i
 
 Already-scanned attachments are recorded in `data/seen_attachments.db` so repeated scans don't re-queue the same file. Lookback window is configurable via `attachment_lookback_days` in `settings.toml`.
 
-### Enhancement proposal — PDF intake and processing
+### Pipeline orchestration status
 
-The key improvement opportunity is not just attachment discovery or parser robustness. The real operational gap is the manual handoff between:
+The end-to-end pipeline orchestrator is now implemented.
 
-`Mail attachment -> PDF parse -> XLS export -> finance importer -> Sheets sync -> dashboard-ready data`
+Current behavior:
 
-Today, Stage 1 can succeed while the monthly finance workflow is still incomplete. The best enhancement is therefore an **end-to-end monthly pipeline orchestrator** that automates the full happy path while preserving every current manual tool as an override.
+- Runs inside the bridge process when `[pipeline].enabled = true`
+- Schedules the first cycle after `startup_delay_seconds`, then repeats every `scan_interval_seconds`
+- Uses `data/processed_files.db` as the single automated-processing registry
+- Exposes manual control through `/pipeline/run`, `/pipeline/status`, `/api/pipeline/run`, and `/api/pipeline/status`
+- Surfaces a pipeline run/status card in the Settings view
 
-#### Core recommendation
+Deliberate non-changes:
 
-Add a small bridge-integrated orchestrator module, for example `bridge/pipeline.py`, that runs on a schedule and coordinates:
-- Mail attachment scan
-- staging new PDFs into `data/pdf_inbox/`
-- batch processing / XLS export
-- optional finance import into Google Sheets
-- optional sync back into SQLite / PWA
-- completeness checks using the existing PDF Import Log
-- targeted success / failure notifications
-
-This is deliberately narrower and lower-risk than a full unified queue rewrite. It optimizes the whole monthly cycle rather than only step 1.
-
-#### Why this is the best next move
-
-| Improvement | Reliability | UX | Feasibility | Why it matters |
-|---|---|---|---|---|
-| Scheduled attachment scan | High | High | High | removes the need to manually discover PDFs |
-| Stage-to-inbox automation | High | Medium | High | makes Mail attachments behave like first-class inputs to the existing Stage 1 pipeline |
-| Auto parse -> import -> sync chain | High | High | Medium | removes the real monthly bottleneck after PDFs are parsed |
-| PDF Import Log as completeness gate | High | High | High | gives a trustworthy “am I done yet?” signal |
-| Fingerprint-based attachment dedup | High | Medium | High | prevents duplicate intake when Mail paths change |
-| Structured job/failure statuses | Medium | High | High | makes recovery obvious without architectural churn |
-| iMessage summary alerts | Medium | High | Medium | reports only meaningful state changes instead of requiring UI checks |
-
-#### Proposed operating model
-
-The recommended target flow is:
-
-1. A background bridge timer scans Mail attachments every 30–60 minutes.
-2. Newly discovered bank PDFs are copied into `data/pdf_inbox/` rather than processed from the Mail cache path directly.
-3. The existing batch processor logic handles parse, verification, dedup, and XLS export.
-4. If new XLS output is created, the finance importer runs automatically.
-5. If import succeeds, Sheets -> SQLite sync runs automatically.
-6. `finance/pdf_log_sync.py` evaluates month completeness using the expected PDF manifest.
-7. The system sends one concise status notification only when something needs attention or when a month becomes complete.
-
-This uses the current architecture rather than fighting it:
-- `AttachmentScanner` remains the discovery mechanism
-- `scripts/batch_process.py` remains the parser / dedup workhorse
-- `finance.importer` remains the Stage 2 ingestion path
-- `finance/pdf_log_sync.py` becomes the monthly completeness gate
-- the bridge web UI remains a manual override and inspection surface
-
-#### What should change first
-
-##### 1. Background attachment scan + stage-to-inbox
-
-**Current behavior:** attachments are only discovered when the user manually clicks `Scan` in `/pdf/ui`.
+- `scripts/batch_process.py` still works unchanged and shares the dedup registry
+- `finance.importer` remains the only writer to Google Sheets transactions
+- `finance.sync` remains the SQLite cache refresh path
+- `pdf_jobs.db` remains separate from `processed_files.db`
+- the bridge `/pdf/*` workflow remains the manual override path
 
 **Proposal:**
 - add an opt-in scheduled scan loop inside the bridge process
@@ -3028,6 +3027,8 @@ Port `8090` (from `[fastapi]` in `settings.toml`). All read endpoints query SQLi
 | `PATCH` | `/api/transaction/{hash}/category` | — | Manual category override + optional alias update |
 | `POST` | `/api/sync` | — | Pull all data from Google Sheets → SQLite; returns stats dict |
 | `POST` | `/api/import` | — | Body: `{ dry_run, overwrite }` → run importer; auto-syncs on success |
+| `POST` | `/api/pipeline/run` | — | Proxy to bridge manual pipeline trigger |
+| `GET` | `/api/pipeline/status` | — | Proxy to bridge pipeline status |
 
 Additional operational endpoints are also live for PDF processing (`/api/pdf/*`) and wealth management (`/api/wealth/*`), covered later in this document.
 
@@ -3070,7 +3071,7 @@ AI narrative (via Ollama `gemma4:e4b`) runs after the deterministic summary and 
 | `/transactions` | Transactions | Year/month/owner/category/search filters; paginated list (50/page); mobile expandable detail rows; desktop sortable table with separate detail/editor pane |
 | `/review` | Review Queue | Mobile accordion review flow plus desktop two-pane workspace; alias form writes via `POST /api/alias`; removes affected rows locally and decrements badge |
 | `/foreign` | Foreign Spend | Year/month/owner filters; transactions grouped by `original_currency`; per-group subtotal row; summary cards (unique currencies, total IDR equivalent) |
-| `/settings` | Settings | API health, sync/import actions, local PDF processing controls, desktop-only embedded bridge PDF workspace (`/pdf/ui`) |
+| `/settings` | Settings | API health, sync/import actions, pipeline run/status card, local PDF processing controls, desktop-only embedded bridge PDF workspace (`/pdf/ui`) |
 | `/group-drilldown` | Group Drilldown | Group → categories breakdown for the selected month |
 | `/category-drilldown` | Category Drilldown | Category → transactions with inline edit flow |
 | `/wealth` | Wealth | Net worth dashboard, MoM movement, AI explanation panel, trend chart, snapshot refresh |

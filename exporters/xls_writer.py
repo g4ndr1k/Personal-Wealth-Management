@@ -169,6 +169,7 @@ def _write_cc_sheet(ws, result: StatementResult):
         for label, val in [
             ("Nomor Kartu",           acc.account_number or ""),
             ("Total Tagihan (IDR)",   _fmt(acc.closing_balance)),
+            ("Liability Amount (IDR)", _fmt(acc.closing_balance)),
             ("Pembayaran Minimum (IDR)", _fmt(acc.extra.get("min_payment"))),
             ("Limit Gabungan (IDR)",  _fmt(acc.credit_limit)),
             ("Tanggal Jatuh Tempo",   acc.extra.get("due_date", "")),

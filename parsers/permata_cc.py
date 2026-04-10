@@ -100,6 +100,7 @@ def _extract_summary(text: str) -> dict:
         "pembayaran":         r"Pembayaran/Konversi Cicilan\s*\(Rp\)\s+([\d,]+)",
         "bunga":              r"Bunga & Biaya Administrasi\s*\(Rp\)\s+([\d,]+)",
         "pagu_kredit":        r"Pagu Kredit \(Rp\)\s+([\d,]+)",
+        "min_payment":        r"Pembayaran Minimum \(Rp\)\s+([\d,]+)",
     }
     result = {}
     for k, pat in patterns.items():
@@ -319,6 +320,10 @@ def parse(
         total_credit=float(summary_data["pembayaran"]),
         print_date=print_date_str,
         credit_limit=float(summary_data["pagu_kredit"]),
+        extra={
+            "min_payment": float(summary_data.get("min_payment", 0)),
+            "bunga": float(summary_data.get("bunga", 0)),
+        },
     )
 
     return StatementResult(

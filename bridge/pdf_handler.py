@@ -190,6 +190,10 @@ def run_pdf_pipeline_file(src_path: str, password: str = "", bank_hint: str = ""
         if parsed.statement_type in ("savings", "consol", "consolidated") and parsed.accounts:
             _upsert_closing_balance(parsed, logs)
 
+        if parsed.statement_type == "cc" and parsed.accounts:
+            _check_cc_reconciliation(parsed, logs)
+            _upsert_cc_liability(parsed, logs)
+
         if getattr(parsed, "bonds", None):
             _upsert_bond_holdings(parsed, logs)
 
@@ -735,6 +739,152 @@ def _upsert_closing_balance(result, logs: list):
 
     except Exception as exc:
         logs.append(f"Closing-balance upsert warning: {exc}")
+
+
+def _upsert_cc_liability(result, logs: list):
+    """
+    After parsing a credit card statement, upsert the outstanding balance
+    (closing_balance = total amount due) into the Stage 3 liabilities table
+    so the Wealth dashboard reflects CC debt as a liability.
+
+    Runs silently on failure so a DB issue never breaks the main XLS export.
+    """
+    finance_db = _config.get("finance_sqlite_db", "")
+    if not finance_db:
+        logs.append("CC liability upsert skipped: finance_sqlite_db not configured")
+        return
+
+    if not result.accounts:
+        logs.append("CC liability upsert skipped: no accounts in result")
+        return
+
+    try:
+        import re as _re
+        import sqlite3 as _sqlite3
+        from datetime import datetime as _dt
+
+        owner_mappings = _config.get("owner_mappings", {})
+        today = _dt.now().strftime("%Y-%m-%d")
+        con = _sqlite3.connect(finance_db)
+        upserted = 0
+
+        for acct in result.accounts:
+            # ── Snapshot date ─────────────────────────────────────────────
+            raw_date = acct.period_end or result.period_end or result.print_date or ""
+            dm = _re.match(r"(\d{2})/(\d{2})/(\d{4})", raw_date)
+            if not dm:
+                continue
+            snapshot_date = f"{dm.group(3)}-{dm.group(2)}-{dm.group(1)}"
+
+            # ── Outstanding balance check ──────────────────────────────────
+            # Negative closing_balance = CR (overpayment, bank owes customer) → no liability
+            if acct.closing_balance <= 0:
+                if acct.closing_balance < 0:
+                    logs.append(
+                        f"  Skipped CC liability for {result.bank} {acct.account_number}"
+                        f": CR balance {acct.closing_balance:,.0f} (overpayment, not a liability)"
+                    )
+                continue
+
+            # ── Owner ──────────────────────────────────────────────────────
+            # Try result.owner first, then name-based lookup from customer_name,
+            # then account-number lookup (for savings-style owner_mappings).
+            owner = result.owner
+            if not owner:
+                customer_name = getattr(result, "customer_name", "") or ""
+                for keyword, mapped_owner in owner_mappings.items():
+                    if keyword.upper() in customer_name.upper():
+                        owner = mapped_owner
+                        break
+            if not owner:
+                owner = owner_mappings.get(str(acct.account_number or ""), "")
+
+            # ── Extra fields ───────────────────────────────────────────────
+            min_payment = acct.extra.get("min_payment", 0) if acct.extra else 0
+            due_date    = acct.extra.get("due_date", "") if acct.extra else ""
+            notes = (
+                f"Auto-imported from {result.bank} CC statement"
+                + (f"; min_payment={min_payment:,.0f}" if min_payment else "")
+            )
+
+            # ── Upsert ────────────────────────────────────────────────────
+            con.execute("""
+                INSERT INTO liabilities
+                    (snapshot_date, liability_type, liability_name, institution,
+                     account, owner, currency, balance, balance_idr,
+                     due_date, notes, import_date)
+                VALUES (?, 'credit_card', ?, ?, ?, ?, 'IDR', ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, liability_type, liability_name, owner)
+                DO UPDATE SET
+                    balance     = excluded.balance,
+                    balance_idr = excluded.balance_idr,
+                    due_date    = excluded.due_date,
+                    notes       = excluded.notes,
+                    import_date = excluded.import_date
+            """, (
+                snapshot_date,
+                acct.product_name or str(acct.account_number or ""),
+                result.bank, str(acct.account_number or ""), owner,
+                acct.closing_balance, acct.closing_balance,
+                due_date, notes, today,
+            ))
+            upserted += 1
+            logs.append(
+                f"  Saved CC liability {acct.closing_balance:,.0f} IDR"
+                f" → liabilities [{snapshot_date}] {result.bank} {acct.account_number}"
+            )
+
+        con.commit()
+        con.close()
+        if upserted:
+            logs.append(f"CC liability: upserted {upserted} card(s) for {result.bank}")
+        else:
+            logs.append(f"CC liability: no accounts with balance found for {result.bank}")
+
+    except Exception as exc:
+        logs.append(f"CC liability upsert warning: {exc}")
+
+
+def _check_cc_reconciliation(result, logs: list):
+    """
+    Deterministic check: closing_balance ≈ opening_balance + total_debit - total_credit.
+
+    Permata CC also includes bunga (interest/fees) in extra, so the formula is:
+      closing ≈ opening + purchases - payments + interest
+
+    Skips gracefully if opening_balance and total_debit/credit are all zero
+    (e.g. Maybank/BCA which don't populate those fields directly).
+    """
+    if result.statement_type != "cc" or not result.accounts:
+        return
+    for acct in result.accounts:
+        opening  = acct.opening_balance
+        debit    = acct.total_debit
+        credit   = acct.total_credit
+        bunga    = (acct.extra or {}).get("bunga", 0.0)
+        closing  = acct.closing_balance
+
+        # Skip if we don't have enough data to verify
+        if opening == 0.0 and debit == 0.0 and credit == 0.0:
+            continue
+
+        expected = opening + debit - credit + bunga
+        diff = abs(closing - expected)
+        card_id = acct.account_number or acct.product_name
+        if diff > 1.0:
+            logs.append(
+                f"[VERIFY] CC balance mismatch for {result.bank} {card_id}: "
+                f"closing={closing:,.0f}, "
+                f"expected={expected:,.0f} "
+                f"(opening={opening:,.0f} + debit={debit:,.0f}"
+                f" - credit={credit:,.0f} + bunga={bunga:,.0f}), "
+                f"diff={diff:,.0f}"
+            )
+        else:
+            logs.append(
+                f"[VERIFY] CC balance OK for {result.bank} {card_id}: "
+                f"{closing:,.0f} IDR"
+            )
 
 
 def _upsert_bond_holdings(result, logs: list):

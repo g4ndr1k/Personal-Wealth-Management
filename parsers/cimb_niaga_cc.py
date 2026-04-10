@@ -102,6 +102,9 @@ _CREDIT_LIMIT_PAT = re.compile(
     r"(?:MC PLATINUM|VISA|JCB)\s+\w+(?:\s+\w+)?\s+([\d,]+\.\d{2})\s+[\d,]+\.\d{2}\s+[\d,]+\.\d{2}"
 )
 
+# Minimum payment: "MINIMUM PAYMENT 500,000.00"
+_MIN_PAYMENT_PAT = re.compile(r"MINIMUM PAYMENT\s+([\d,]+\.\d{2})")
+
 # Skip lines in PERINCIAN TAGIHAN that are headers, not transactions
 _SKIP_HEADERS = {
     "Jenis Kartu", "Batas Kredit", "Batas Penarikan",
@@ -304,6 +307,9 @@ def parse(
 
     sheet_name = stmt_date.strftime("%b %Y") + " CC"
 
+    min_pay_m = _MIN_PAYMENT_PAT.search(all_text)
+    min_payment = _parse_amount(min_pay_m.group(1)) if min_pay_m else 0.0
+
     summary = AccountSummary(
         product_name=card_product,
         account_number=primary_card,
@@ -312,6 +318,7 @@ def parse(
         opening_balance=opening_bal,
         print_date=stmt_date_str,
         credit_limit=credit_limit,
+        extra={"min_payment": min_payment},
     )
 
     return StatementResult(
