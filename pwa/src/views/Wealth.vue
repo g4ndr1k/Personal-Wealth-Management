@@ -234,9 +234,11 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import Chart from 'chart.js/auto'
 import { api } from '../api/client.js'
+import { useLayout } from '../composables/useLayout.js'
 import { formatIDR } from '../utils/currency.js'
 
 const router = useRouter()
+const { isDesktop } = useLayout()
 
 const loading            = ref(false)
 const explanationLoading = ref(false)
@@ -492,6 +494,10 @@ function buildChart() {
   destroyChart()
   const labels = history.value.map(h => fmtDateChip(h.snapshot_date))
   const data   = history.value.map(h => Math.round(h.net_worth_idr / 1_000_000))
+  const tickColor = isDesktop.value ? '#9db0c9' : '#64748b'
+  const gridColor = isDesktop.value ? 'rgba(141,162,191,0.12)' : 'rgba(0,0,0,0.06)'
+  const strokeColor = isDesktop.value ? '#76a6ff' : '#1e3a5f'
+  const fillColor = isDesktop.value ? 'rgba(118,166,255,0.16)' : 'rgba(30,58,95,0.08)'
   trendChart = new Chart(trendRef.value, {
     type: 'line',
     data: {
@@ -499,8 +505,8 @@ function buildChart() {
       datasets: [{
         label: 'Net Worth (IDR M)',
         data,
-        borderColor: '#1e3a5f',
-        backgroundColor: 'rgba(30,58,95,0.08)',
+        borderColor: strokeColor,
+        backgroundColor: fillColor,
         borderWidth: 2,
         pointRadius: 3,
         fill: true,
@@ -515,8 +521,8 @@ function buildChart() {
         tooltip: { callbacks: { label: (ctx) => `Rp ${ctx.parsed.y.toLocaleString()} M` } },
       },
       scales: {
-        x: { grid: { display: false }, ticks: { font: { size: 11 } } },
-        y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { font: { size: 11 }, callback: (v) => `${v}M` } },
+        x: { grid: { display: false }, ticks: { color: tickColor, font: { size: 11 } } },
+        y: { grid: { color: gridColor }, ticks: { color: tickColor, font: { size: 11 }, callback: (v) => `${v}M` } },
       },
     },
   })

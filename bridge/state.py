@@ -35,6 +35,26 @@ class BridgeState:
             );
             CREATE INDEX IF NOT EXISTS idx_request_log_endpoint_created
                 ON request_log(endpoint, created_at);
+            CREATE TABLE IF NOT EXISTS pipeline_notifications (
+                month TEXT PRIMARY KEY,
+                notified_at TEXT NOT NULL,
+                message TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                trigger TEXT NOT NULL,
+                files_scanned INTEGER DEFAULT 0,
+                files_new INTEGER DEFAULT 0,
+                files_skipped INTEGER DEFAULT 0,
+                files_ok INTEGER DEFAULT 0,
+                files_failed INTEGER DEFAULT 0,
+                import_new_tx INTEGER DEFAULT 0,
+                import_review INTEGER DEFAULT 0,
+                sync_performed INTEGER DEFAULT 0,
+                result_json TEXT DEFAULT ''
+            );
             """)
             conn.commit()
 
@@ -75,3 +95,69 @@ class BridgeState:
                   AND created_at >= ?
             """, (action, cutoff)).fetchone()
             return row[0] if row else 0
+
+    def start_pipeline_run(self, started_at: str, trigger: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO pipeline_runs (started_at, trigger)
+                VALUES (?, ?)
+                """,
+                (started_at, trigger),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def finish_pipeline_run(self, run_id: int, result: dict):
+        import json
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE pipeline_runs
+                SET finished_at = ?,
+                    files_scanned = ?,
+                    files_new = ?,
+                    files_skipped = ?,
+                    files_ok = ?,
+                    files_failed = ?,
+                    import_new_tx = ?,
+                    import_review = ?,
+                    sync_performed = ?,
+                    result_json = ?
+                WHERE id = ?
+                """,
+                (
+                    result.get("finished_at"),
+                    result.get("files_scanned", 0),
+                    result.get("files_new", 0),
+                    result.get("files_skipped", 0),
+                    result.get("files_ok", 0),
+                    result.get("files_failed", 0),
+                    result.get("import_new_tx", 0),
+                    result.get("import_review", 0),
+                    result.get("sync_performed", 0),
+                    json.dumps(result, default=str),
+                    run_id,
+                ),
+            )
+            conn.commit()
+
+    def has_pipeline_notification(self, month: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pipeline_notifications WHERE month = ?",
+                (month,),
+            ).fetchone()
+            return row is not None
+
+    def record_pipeline_notification(self, month: str, message: str):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pipeline_notifications (month, notified_at, message)
+                VALUES (?, ?, ?)
+                """,
+                (month, datetime.now(timezone.utc).isoformat(), message),
+            )
+            conn.commit()

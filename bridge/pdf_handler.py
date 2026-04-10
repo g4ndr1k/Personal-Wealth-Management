@@ -116,6 +116,108 @@ def _run_verification(pdf_path: str, result, logs: list[str]) -> None:
         raise ValueError(f"Verifier blocked statement: {llm.get('summary', 'unknown reason')}")
 
 
+def get_bank_password(bank_name: str) -> str:
+    key = (bank_name or "").lower().replace(" ", "_")
+    passwords_file = _config.get("bank_passwords_file", "")
+    if not passwords_file or not os.path.exists(passwords_file):
+        return ""
+    try:
+        import tomllib
+
+        with open(passwords_file, "rb") as f:
+            data = tomllib.load(f)
+        return data.get("passwords", {}).get(key, "")
+    except Exception:
+        return ""
+
+
+def run_pdf_pipeline_file(src_path: str, password: str = "", bank_hint: str = "") -> dict:
+    """Run the shared PDF pipeline and return structured results."""
+    logs: list[str] = []
+    result = {
+        "status": "error",
+        "bank": bank_hint or "Unknown",
+        "stmt_type": "unknown",
+        "period": "",
+        "output_path": "",
+        "output_file": "",
+        "transactions": 0,
+        "error": "",
+        "log": "",
+    }
+
+    try:
+        from bridge.pdf_unlock import is_encrypted, unlock_pdf
+        from parsers.router import detect_and_parse, detect_bank_and_type
+        from exporters.xls_writer import export
+
+        unlocked_path = src_path
+        detected_bank = bank_hint or "Unknown"
+        try:
+            detected_bank, _ = detect_bank_and_type(src_path)
+            result["bank"] = detected_bank
+        except Exception:
+            pass
+
+        if is_encrypted(src_path):
+            if not password:
+                password = get_bank_password(detected_bank)
+            if not password:
+                raise ValueError(
+                    f"PDF is encrypted but no password provided for {detected_bank}"
+                )
+            unlocked_dir = _config.get("pdf_unlocked_dir", "data/pdf_unlocked")
+            unlocked_path = unlock_pdf(src_path, password, unlocked_dir)
+            logs.append(f"Unlocked: {Path(unlocked_path).name}")
+        else:
+            logs.append("PDF not encrypted — no unlock needed")
+
+        owner_mappings = _config.get("owner_mappings", {})
+        parsed = detect_and_parse(unlocked_path, owner_mappings=owner_mappings)
+        result["bank"] = parsed.bank
+        result["stmt_type"] = parsed.statement_type
+        result["period"] = f"{parsed.period_start}–{parsed.period_end}"
+        result["transactions"] = len(parsed.transactions)
+        logs.append(
+            f"Parsed: {parsed.bank} {parsed.statement_type} "
+            f"{parsed.period_start}–{parsed.period_end} "
+            f"({len(parsed.transactions)} transactions)"
+        )
+        if parsed.raw_errors:
+            logs.append(f"Parser warnings: {parsed.raw_errors}")
+        _run_verification(unlocked_path, parsed, logs)
+
+        if parsed.statement_type in ("savings", "consol", "consolidated") and parsed.accounts:
+            _upsert_closing_balance(parsed, logs)
+
+        if getattr(parsed, "bonds", None):
+            _upsert_bond_holdings(parsed, logs)
+
+        if parsed.statement_type in ("consol", "consolidated"):
+            _upsert_fund_holdings(parsed, logs)
+
+        if getattr(parsed, "holdings", None):
+            _upsert_investment_holdings(parsed, logs)
+
+        if parsed.statement_type in ("portfolio", "statement") and parsed.accounts:
+            _upsert_closing_balance(parsed, logs)
+
+        output_dir = _config.get("xls_output_dir", "output/xls")
+        output_path, _ = export(parsed, output_dir, owner_mappings)
+        logs.append(f"Exported: {Path(output_path).name}")
+
+        result["status"] = "done"
+        result["output_path"] = output_path
+        result["output_file"] = Path(output_path).name
+    except Exception as exc:
+        log.error("PDF pipeline failed for %s: %s", src_path, exc)
+        result["error"] = str(exc)
+        logs.append(traceback.format_exc())
+
+    result["log"] = "\n".join(logs)
+    return result
+
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 def _init_jobs_db():
     con = sqlite3.connect(_db_path)
@@ -420,93 +522,23 @@ def _run_job(job_id: str, password: str):
     job["status"] = "running"
     _upsert_job(job)
 
-    logs = []
     try:
         src_path = job["source_path"]
+        result = run_pdf_pipeline_file(src_path, password=password, bank_hint=job["bank"])
 
-        # ── Step 1: unlock if encrypted ──────────────────────────────────
-        from bridge.pdf_unlock import is_encrypted, unlock_pdf
-        unlocked_path = src_path
-        if is_encrypted(src_path):
-            if not password:
-                password = _get_bank_password(job["bank"])
-            if not password:
-                raise ValueError(f"PDF is encrypted but no password provided for {job['bank']}")
-            unlocked_dir = _config.get("pdf_unlocked_dir", "data/pdf_unlocked")
-            unlocked_path = unlock_pdf(src_path, password, unlocked_dir)
-            logs.append(f"Unlocked: {Path(unlocked_path).name}")
-        else:
-            logs.append("PDF not encrypted — no unlock needed")
-
-        # ── Step 2: parse ─────────────────────────────────────────────────
-        from parsers.router import detect_and_parse
-        owner_mappings = _config.get("owner_mappings", {})
-        result = detect_and_parse(unlocked_path, owner_mappings=owner_mappings)
-        logs.append(f"Parsed: {result.bank} {result.statement_type} "
-                    f"{result.period_start}–{result.period_end} "
-                    f"({len(result.transactions)} transactions)")
-        if result.raw_errors:
-            logs.append(f"Parser warnings: {result.raw_errors}")
-        _run_verification(unlocked_path, result, logs)
-
-        # ── Step 2.5: auto-upsert closing balance → account_balances ─────
-        #   For savings / consolidated statements, write each savings-type
-        #   account's closing balance into the Stage 3 account_balances table
-        #   so the Wealth dashboard picks it up without manual data entry.
-        #   Covers: BCA savings, Permata savings, CIMB Niaga consol, Maybank consol.
-        if result.statement_type in ("savings", "consol", "consolidated") and result.accounts:
-            _upsert_closing_balance(result, logs)
-
-        # ── Step 2.6: auto-upsert bond holdings → holdings ────────────────
-        #   For statements that include Rekening Investasi Obligasi data,
-        #   write each bond position into the Stage 3 holdings table so the
-        #   Wealth dashboard shows government bond values and P/L.
-        #   Covers: Permata savings, Maybank consolidated.
-        if getattr(result, "bonds", None):
-            _upsert_bond_holdings(result, logs)
-
-        # ── Step 2.7: auto-upsert mutual fund holdings → holdings ─────────
-        #   For consolidated statements that include Reksa Dana positions,
-        #   write each fund position into the Stage 3 holdings table.
-        #   Fund accounts are tagged with extra["account_category"]=="mutual_fund"
-        #   by the parser (currently Maybank consolidated only).
-        if result.statement_type in ("consol", "consolidated"):
-            _upsert_fund_holdings(result, logs)
-
-        # ── Step 2.8: IPOT equity/fund holdings → holdings table ──────────
-        #   For IPOT portfolio statements, write each stock and mutual-fund
-        #   position into the Stage 3 holdings table.  Also gap-fills any
-        #   missing months between this snapshot and today using carry-forward
-        #   (INSERT OR IGNORE) so the Wealth dashboard shows continuity.
-        if getattr(result, "holdings", None):
-            _upsert_investment_holdings(result, logs)
-
-        # ── Step 2.9: IPOT RDN cash balance → account_balances ────────────
-        #   Portfolio and Statement PDFs both carry an AccountSummary with
-        #   account_number set (the client code), which bypasses the
-        #   _is_savings_account keyword filter inside _upsert_closing_balance.
-        if result.statement_type in ("portfolio", "statement") and result.accounts:
-            _upsert_closing_balance(result, logs)
-
-        # ── Step 3: export XLS ────────────────────────────────────────────
-        from exporters.xls_writer import export
-        output_dir = _config.get("xls_output_dir", "output/xls")
-        output_path, _ = export(result, output_dir, owner_mappings)
-        logs.append(f"Exported: {Path(output_path).name}")
-
-        job["status"] = "done"
-        job["bank"] = result.bank
-        job["stmt_type"] = result.statement_type
-        job["period"] = f"{result.period_start}–{result.period_end}"
-        job["output_path"] = output_path
-        job["error"] = ""
-        job["log"] = "\n".join(logs)
+        job["status"] = result["status"]
+        job["bank"] = result["bank"]
+        job["stmt_type"] = result["stmt_type"]
+        job["period"] = result["period"]
+        job["output_path"] = result["output_path"]
+        job["error"] = result["error"]
+        job["log"] = result["log"]
 
     except Exception as e:
         log.error(f"Job {job_id} failed: {e}")
         job["status"] = "error"
         job["error"] = str(e)
-        job["log"] = "\n".join(logs) + f"\n{traceback.format_exc()}"
+        job["log"] = traceback.format_exc()
 
     _upsert_job(job)
 

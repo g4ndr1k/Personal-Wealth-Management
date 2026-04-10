@@ -112,7 +112,8 @@ class Registry:
             transactions INTEGER DEFAULT 0,
             output_file  TEXT    DEFAULT '',
             status       TEXT    NOT NULL,
-            error        TEXT    DEFAULT ''
+            error        TEXT    DEFAULT '',
+            error_category TEXT  DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS zip_members (
@@ -142,6 +143,16 @@ class Registry:
                 s = stmt.strip()
                 if s:
                     con.execute(s)
+            columns = {
+                row["name"]
+                for row in con.execute(
+                    "PRAGMA table_info(processed_files)"
+                ).fetchall()
+            }
+            if "error_category" not in columns:
+                con.execute(
+                    "ALTER TABLE processed_files ADD COLUMN error_category TEXT DEFAULT ''"
+                )
 
     # ── Public API ────────────────────────────────────────────────────────
     def seen(self, sha256: str) -> bool:
@@ -163,14 +174,15 @@ class Registry:
     def record(self, sha256: str, filename: str, source_path: str,
                status: str, bank: str = "", stmt_type: str = "",
                period: str = "", transactions: int = 0,
-               output_file: str = "", error: str = ""):
+               output_file: str = "", error: str = "",
+               error_category: str = ""):
         now = datetime.utcnow().isoformat()
         with self._con() as con:
             con.execute("""
                 INSERT INTO processed_files
                     (sha256, filename, source_path, first_seen, processed_at,
-                     bank, stmt_type, period, transactions, output_file, status, error)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                     bank, stmt_type, period, transactions, output_file, status, error, error_category)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(sha256) DO UPDATE SET
                     processed_at=excluded.processed_at,
                     status=excluded.status,
@@ -179,9 +191,10 @@ class Registry:
                     period=excluded.period,
                     transactions=excluded.transactions,
                     output_file=excluded.output_file,
-                    error=excluded.error
+                    error=excluded.error,
+                    error_category=excluded.error_category
             """, (sha256, filename, source_path, now, now,
-                  bank, stmt_type, period, transactions, output_file, status, error))
+                  bank, stmt_type, period, transactions, output_file, status, error, error_category))
 
     def record_zip_member(self, zip_sha256: str, pdf_filename: str, pdf_sha256: str = ""):
         now = datetime.utcnow().isoformat()

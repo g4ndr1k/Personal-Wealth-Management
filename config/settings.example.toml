@@ -70,6 +70,16 @@ verify_ollama_host = "http://localhost:11434"
 verify_timeout_seconds = 120
 verify_model = "gemma4:e4b"
 
+[pipeline]
+enabled = false
+scan_interval_seconds = 14400
+auto_import_enabled = true
+auto_sync_enabled = true
+completeness_alert = true
+parse_alert = true
+failure_alert = true
+startup_delay_seconds = 60
+
 [owners]
 "YourFirstName" = "Owner1"
 

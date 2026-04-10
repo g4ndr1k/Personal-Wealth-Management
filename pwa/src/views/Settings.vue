@@ -139,6 +139,53 @@
       </div>
     </div>
 
+    <div class="setting-card">
+      <div class="setting-title">🧩 PDF Pipeline</div>
+      <div class="setting-desc">
+        Run the end-to-end pipeline from <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">data/pdf_inbox</code>
+        through import and sync. Desktop only, and controlled by the bridge pipeline setting.
+      </div>
+
+      <div class="pipeline-grid">
+        <button
+          class="btn btn-primary"
+          :disabled="pipelineState.loading || pipelineState.status?.status === 'running'"
+          @click="runPipeline"
+        >
+          <span v-if="pipelineState.loading || pipelineState.status?.status === 'running'">
+            <span class="spinner" style="width:14px;height:14px;border-width:2px"></span>
+            Running pipeline…
+          </span>
+          <span v-else>🔄 Run Pipeline</span>
+        </button>
+
+        <div class="result-box" v-if="pipelineState.status">
+          <div class="result-row">
+            <span class="rk">Status</span>
+            <span class="rv">{{ pipelineState.status.status || 'idle' }}</span>
+          </div>
+          <div class="result-row">
+            <span class="rk">Last run</span>
+            <span class="rv">{{ pipelineState.status.last_run_at || 'Never' }}</span>
+          </div>
+          <div class="result-row">
+            <span class="rk">Next run</span>
+            <span class="rv">{{ pipelineState.status.next_scheduled_at || 'Not scheduled' }}</span>
+          </div>
+          <div class="result-row">
+            <span class="rk">Last result</span>
+            <span class="rv">
+              {{ formatPipelineSummary(pipelineState.status.last_result) }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="pipelineState.error" class="alert alert-error" style="margin-top:10px">
+        ❌ {{ pipelineState.error }}
+      </div>
+    </div>
+
     <!-- ── Process Local PDFs ──────────────────────────────────────────────── -->
     <div class="setting-card">
       <div class="setting-title">📄 Process Local PDFs</div>
@@ -287,6 +334,7 @@ const store = useFinanceStore()
 const syncState   = ref({ loading: false, result: null, error: null })
 const importState = ref({ loading: false, result: null, error: null })
 const importOpts  = ref({ dry_run: false, overwrite: false })
+const pipelineState = ref({ loading: false, status: null, error: null })
 const showPdfWorkspace = ref(false)
 
 // ── Mac desktop detection ────────────────────────────────────────────────────
@@ -445,7 +493,41 @@ async function doImport() {
   }
 }
 
-onMounted(() => store.loadHealth())
+function formatPipelineSummary(result) {
+  if (!result) return 'No runs yet'
+  return `${result.files_ok || 0} ok, ${result.files_failed || 0} failed, ${result.files_skipped || 0} skipped, ${result.import_new_tx || 0} imported`
+}
+
+async function loadPipelineStatus() {
+  try {
+    pipelineState.value.status = await api.pipelineStatus()
+    pipelineState.value.error = null
+  } catch (e) {
+    pipelineState.value.error = e.message
+  }
+}
+
+async function runPipeline() {
+  pipelineState.value.loading = true
+  try {
+    const res = await api.runPipeline()
+    if (res.status === 'already_running') {
+      await loadPipelineStatus()
+      return
+    }
+    await loadPipelineStatus()
+    if (!importOpts.value.dry_run) await store.loadHealth()
+  } catch (e) {
+    pipelineState.value.error = e.message
+  } finally {
+    pipelineState.value.loading = false
+  }
+}
+
+onMounted(async () => {
+  await store.loadHealth()
+  await loadPipelineStatus()
+})
 </script>
 
 <style scoped>
@@ -454,6 +536,11 @@ onMounted(() => store.loadHealth())
 /* Wrapper around the button so title tooltip works when button is :disabled */
 .pdf-btn-wrapper {
   display: block;
+}
+
+.pipeline-grid {
+  display: grid;
+  gap: 12px;
 }
 
 /* Visual greyed-out look for non-Mac (disabled button already prevents clicks) */

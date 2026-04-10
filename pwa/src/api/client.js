@@ -81,6 +81,8 @@ export const api = {
   saveAlias:           (body)     => post('/alias', body),
   sync:                ()         => post('/sync'),
   importData:          (body={})  => post('/import', body),
+  pipelineStatus:      ()         => get('/pipeline/status'),
+  runPipeline:         ()         => post('/pipeline/run'),
   patchCategory:       (hash, body) => patch(`/transaction/${hash}/category`, body),
 
   // ── Stage 3: Wealth Management ─────────────────────────────────────────────

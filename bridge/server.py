@@ -19,6 +19,7 @@ from bridge.state import BridgeState
 from bridge.rate_limit import RateLimiter
 from bridge.mail_source import MailSource
 from bridge.messages_source import MessagesSource
+from bridge.pipeline import PipelineRunner
 from bridge.pdf_handler import (
     init_pdf_handler,
     handle_upload, handle_process, handle_process_file, handle_status,
@@ -85,6 +86,8 @@ class AppContext:
             "finance_sqlite_db":        cfg.get("finance", {}).get("sqlite_db", ""),
         }
         init_pdf_handler(pdf_config, cfg["pdf"]["jobs_db"])
+        self.pipeline = PipelineRunner(self.settings, self.state, self.messages)
+        self.pipeline.start()
 
         if not self.messages.can_access():
             logger.warning(
@@ -247,6 +250,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(status, payload)
                 return
 
+            if path == "/pipeline/status":
+                self._json(200, self.ctx.pipeline.status())
+                return
+
             self._json(404, {"error": "Not found"})
 
         except Exception as e:
@@ -327,6 +334,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200 if success else 500, result)
                 return
 
+            if path == "/pipeline/run":
+                result = self.ctx.pipeline.trigger("manual")
+                self._json(200, result)
+                return
+
             self._json(404, {"error": "Not found"})
 
         except ValueError as e:
@@ -351,6 +363,7 @@ def main():
 
     def shutdown_handler(signum, frame):
         logger.info("Bridge signal %s, shutting down", signum)
+        ctx.pipeline.stop()
         if ctx.settings["imessage"].get(
                 "shutdown_notifications", False):
             try:

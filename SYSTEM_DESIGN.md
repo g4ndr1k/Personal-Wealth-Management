@@ -1955,6 +1955,174 @@ The UI uses the same bearer token as the rest of the bridge API. On first load i
 
 Already-scanned attachments are recorded in `data/seen_attachments.db` so repeated scans don't re-queue the same file. Lookback window is configurable via `attachment_lookback_days` in `settings.toml`.
 
+### Enhancement proposal — PDF intake and processing
+
+The key improvement opportunity is not just attachment discovery or parser robustness. The real operational gap is the manual handoff between:
+
+`Mail attachment -> PDF parse -> XLS export -> finance importer -> Sheets sync -> dashboard-ready data`
+
+Today, Stage 1 can succeed while the monthly finance workflow is still incomplete. The best enhancement is therefore an **end-to-end monthly pipeline orchestrator** that automates the full happy path while preserving every current manual tool as an override.
+
+#### Core recommendation
+
+Add a small bridge-integrated orchestrator module, for example `bridge/pipeline.py`, that runs on a schedule and coordinates:
+- Mail attachment scan
+- staging new PDFs into `data/pdf_inbox/`
+- batch processing / XLS export
+- optional finance import into Google Sheets
+- optional sync back into SQLite / PWA
+- completeness checks using the existing PDF Import Log
+- targeted success / failure notifications
+
+This is deliberately narrower and lower-risk than a full unified queue rewrite. It optimizes the whole monthly cycle rather than only step 1.
+
+#### Why this is the best next move
+
+| Improvement | Reliability | UX | Feasibility | Why it matters |
+|---|---|---|---|---|
+| Scheduled attachment scan | High | High | High | removes the need to manually discover PDFs |
+| Stage-to-inbox automation | High | Medium | High | makes Mail attachments behave like first-class inputs to the existing Stage 1 pipeline |
+| Auto parse -> import -> sync chain | High | High | Medium | removes the real monthly bottleneck after PDFs are parsed |
+| PDF Import Log as completeness gate | High | High | High | gives a trustworthy “am I done yet?” signal |
+| Fingerprint-based attachment dedup | High | Medium | High | prevents duplicate intake when Mail paths change |
+| Structured job/failure statuses | Medium | High | High | makes recovery obvious without architectural churn |
+| iMessage summary alerts | Medium | High | Medium | reports only meaningful state changes instead of requiring UI checks |
+
+#### Proposed operating model
+
+The recommended target flow is:
+
+1. A background bridge timer scans Mail attachments every 30–60 minutes.
+2. Newly discovered bank PDFs are copied into `data/pdf_inbox/` rather than processed from the Mail cache path directly.
+3. The existing batch processor logic handles parse, verification, dedup, and XLS export.
+4. If new XLS output is created, the finance importer runs automatically.
+5. If import succeeds, Sheets -> SQLite sync runs automatically.
+6. `finance/pdf_log_sync.py` evaluates month completeness using the expected PDF manifest.
+7. The system sends one concise status notification only when something needs attention or when a month becomes complete.
+
+This uses the current architecture rather than fighting it:
+- `AttachmentScanner` remains the discovery mechanism
+- `scripts/batch_process.py` remains the parser / dedup workhorse
+- `finance.importer` remains the Stage 2 ingestion path
+- `finance/pdf_log_sync.py` becomes the monthly completeness gate
+- the bridge web UI remains a manual override and inspection surface
+
+#### What should change first
+
+##### 1. Background attachment scan + stage-to-inbox
+
+**Current behavior:** attachments are only discovered when the user manually clicks `Scan` in `/pdf/ui`.
+
+**Proposal:**
+- add an opt-in scheduled scan loop inside the bridge process
+- when new Mail attachments are found, copy them into `data/pdf_inbox/`
+- keep the current UI scan button as a manual “refresh now” action
+
+**Why this matters:**
+- the inbox directory becomes the single operational staging area
+- Mail remains the source, but processing no longer depends on ephemeral Mail cache paths
+- the current batch processor can keep doing what it already does well
+
+##### 2. Fingerprint-based dedup for attachments
+
+**Current behavior:** `seen_attachments.db` keys on `file_path`, which is brittle if Mail rewrites paths or stores duplicates.
+
+**Proposal:**
+- add SHA-256 content hash to attachment discovery
+- treat content hash as the primary dedup identity
+- retain `file_path` as metadata, not the only key
+
+**Why this matters:**
+- matches the stronger dedup strategy already used in `processed_files.db`
+- avoids duplicate downstream work
+- keeps discovery reliable across Mail directory changes
+
+##### 3. Auto-run importer and sync after successful parse
+
+**Current behavior:** PDF processing can succeed, but the user still has to run additional CLI steps before the PWA reflects the new month.
+
+**Proposal:**
+- after a successful parse cycle, run the equivalent of the current importer flow automatically
+- then run Sheets -> SQLite sync automatically
+- make both steps configurable in `settings.toml`
+
+**Why this matters:**
+- closes the biggest monthly workflow gap
+- turns “PDF processed” into “dashboard updated” on the happy path
+- reduces the number of manual commands needed after statements arrive
+
+##### 4. Use PDF Import Log as the completeness gate
+
+**Current behavior:** the codebase already has `finance/pdf_log_sync.py`, but it is not the center of the automation proposal.
+
+**Proposal:**
+- after each processing cycle, evaluate month completeness against the expected manifest
+- only send the “month complete” signal when the manifest says the month is truly complete
+- surface incomplete / missing sources in the UI and alerts
+
+**Why this matters:**
+- this is the most trustworthy answer to “am I done yet?”
+- avoids false confidence from individual parse success
+- aligns automation with the actual monthly checklist already encoded in the system
+
+##### 5. Keep the web UI as an override path, not the primary control plane
+
+**Current behavior:** the PDF UI mixes primary operations and recovery operations.
+
+**Proposal:**
+- keep `/pdf/ui` for upload, manual queueing, retries, password entry, and diagnostics
+- treat background orchestration as the primary happy path
+- do not force a risky merge of `pdf_jobs.db` and `processed_files.db` in the first iteration
+
+**Why this matters:**
+- preserves current tools and operator habits
+- reduces migration risk
+- lets automation prove itself before deeper consolidation work
+
+#### Recommended implementation order
+
+**Phase 1 — highest value, lowest risk:**
+- opt-in bridge timer for automatic Mail attachment scans
+- copy discovered PDFs into `data/pdf_inbox/`
+- add SHA-256 fingerprinting to `seen_attachments.db`
+- add structured error categories (`wrong_password`, `unsupported_statement`, `parser_error`, `verification_blocked`)
+
+**Phase 2 — end-to-end monthly automation:**
+- run importer automatically after successful PDF parsing
+- run Sheets -> SQLite sync automatically after import
+- evaluate completeness using `finance/pdf_log_sync.py`
+- add concise iMessage / notification summaries for completion and actionable failures
+
+**Phase 3 — operational polish:**
+- surface counters in Settings / PDF UI: last scan, queued PDFs, failed PDFs, incomplete months
+- add stale-job detection and retry with backoff
+- optionally support password re-entry workflows without re-uploading files
+
+#### Suggested configuration
+
+```toml
+[pipeline]
+enabled = false
+scan_interval_minutes = 60
+stage_to_inbox = true
+auto_import_enabled = true
+auto_sync_enabled = true
+completeness_alert = true
+```
+
+Keep this feature-flagged off by default until it has been exercised across a full monthly cycle.
+
+#### Design principle
+
+The goal is not to replace the existing bridge UI, batch processor, importer, or review queue. The goal is to **connect them into one reliable monthly pipeline** so that:
+- statements arrive
+- PDFs are discovered and staged automatically
+- parsing and import happen automatically
+- the PWA stays current
+- the system tells the user only when intervention is actually needed
+
+That approach is more reliable than a discovery-only improvement, more useful than a parser-only improvement, and more feasible than a full state-machine rewrite at this stage of the project.
+
 ### Detection strategy
 
 All `can_parse()` functions follow a **bank-name-first** approach. Layout labels (section headings, table titles) change between PDF versions; the bank name does not.

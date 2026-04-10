@@ -106,6 +106,16 @@ verify_ollama_host = "http://localhost:11434"
 verify_timeout_seconds = 120
 verify_model = "gemma4:e4b"
 
+[pipeline]
+enabled = true
+scan_interval_seconds = 14400
+auto_import_enabled = true
+auto_sync_enabled = true
+completeness_alert = true
+parse_alert = true
+failure_alert = true
+startup_delay_seconds = 60
+
 # Owner name mapping — substring match, case-insensitive, first match wins
 # Maps customer names found in PDFs to canonical owner labels
 # Used for output file naming (e.g. Maybank_Gandrik.xlsx) and ALL_TRANSACTIONS Owner column
@@ -163,4 +173,3 @@ cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 host            = "http://localhost:11434"
 model           = "gemma4:e4b"
 timeout_seconds = 5
-

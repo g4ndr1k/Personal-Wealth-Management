@@ -613,6 +613,28 @@ html, body {
   display: flex;
   min-height: 100vh;
   min-height: 100dvh;
+  --primary: #4f8cff;
+  --primary-light: #76a6ff;
+  --primary-deep: #0f1726;
+  --primary-dim: rgba(79,140,255,0.18);
+  --income: #4ade80;
+  --income-bg: rgba(34,197,94,0.14);
+  --expense: #f87171;
+  --expense-bg: rgba(239,68,68,0.14);
+  --warning: #fbbf24;
+  --neutral: #a7b8cf;
+  --bg: #0b1220;
+  --card: #111b2c;
+  --border: #223147;
+  --text: #edf4ff;
+  --text-muted: #8da2bf;
+  --shadow: 0 12px 28px rgba(0,0,0,0.24);
+  --shadow-md: 0 22px 48px rgba(0,0,0,0.34);
+  --shadow-soft: 0 30px 70px rgba(0,0,0,0.28);
+  background:
+    radial-gradient(circle at top center, rgba(79,140,255,0.10), transparent 32%),
+    linear-gradient(180deg, #08111d 0%, #0b1220 55%, #0e1726 100%);
+  color: var(--text);
 }
 
 .desktop-content {
@@ -621,8 +643,8 @@ html, body {
   overflow-y: auto;
   padding: 24px 32px 40px;
   background:
-    radial-gradient(circle at top center, rgba(45,82,130,0.06), transparent 40%),
-    linear-gradient(180deg, #f8fbff 0%, #f1f5f9 35%, #eef3f8 100%);
+    radial-gradient(circle at top center, rgba(79,140,255,0.08), transparent 34%),
+    linear-gradient(180deg, #0a1321 0%, #0b1220 40%, #0f1828 100%);
 }
 
 .desktop-sidebar {
@@ -632,11 +654,14 @@ html, body {
   top: 0;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, rgba(21,41,66,0.98) 0%, rgba(30,58,95,0.94) 100%);
+  background:
+    radial-gradient(circle at top left, rgba(79,140,255,0.18), transparent 32%),
+    linear-gradient(180deg, rgba(8,17,29,0.99) 0%, rgba(13,24,40,0.97) 100%);
   color: #fff;
-  border-right: 1px solid rgba(255,255,255,0.08);
+  border-right: 1px solid rgba(141,162,191,0.16);
   flex-shrink: 0;
   overflow-y: auto;
+  box-shadow: inset -1px 0 0 rgba(255,255,255,0.02);
 }
 
 .desktop-sidebar__brand {
@@ -679,13 +704,14 @@ html, body {
 }
 
 .desktop-sidebar__link:hover {
-  background: rgba(255,255,255,0.08);
+  background: rgba(79,140,255,0.12);
   color: #fff;
 }
 
 .desktop-sidebar__link.router-link-exact-active {
-  background: rgba(255,255,255,0.14);
+  background: linear-gradient(180deg, rgba(79,140,255,0.20), rgba(79,140,255,0.13));
   color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(118,166,255,0.18);
 }
 
 .desktop-sidebar__badge {
@@ -702,13 +728,137 @@ html, body {
 
 .desktop-sidebar__footer {
   padding: 14px 18px;
-  border-top: 1px solid rgba(255,255,255,0.08);
+  border-top: 1px solid rgba(141,162,191,0.14);
   font-size: 11px;
-  color: rgba(255,255,255,0.4);
+  color: rgba(237,244,255,0.54);
   font-weight: 600;
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.desktop-shell .month-label,
+.desktop-shell .section-hd,
+.desktop-shell .setting-title,
+.desktop-shell .desktop-sidebar__title {
+  color: var(--text);
+}
+
+.desktop-shell .card,
+.desktop-shell .summary-card,
+.desktop-shell .setting-card,
+.desktop-shell .tx-list,
+.desktop-shell .review-item,
+.desktop-shell .fx-table,
+.desktop-shell .dt-table-wrap,
+.desktop-shell .rw-list,
+.desktop-shell .rw-detail {
+  background: linear-gradient(180deg, rgba(17,27,44,0.98), rgba(14,23,37,0.98));
+  border-color: rgba(141,162,191,0.14);
+  box-shadow: var(--shadow);
+}
+
+.desktop-shell .nav-btn,
+.desktop-shell .owner-tab,
+.desktop-shell .form-input,
+.desktop-shell .filter-bar select,
+.desktop-shell .filter-bar input,
+.desktop-shell .result-box,
+.desktop-shell .alias-form,
+.desktop-shell .tx-detail-panel,
+.desktop-shell .fx-group-hd {
+  background: rgba(15,23,38,0.92);
+  border-color: rgba(141,162,191,0.18);
+  color: var(--text);
+}
+
+.desktop-shell .filter-bar select,
+.desktop-shell .filter-bar input {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+}
+
+.desktop-shell .btn-ghost {
+  border-color: rgba(141,162,191,0.22);
+  color: var(--text);
+}
+
+.desktop-shell .btn-ghost:hover:not(:disabled),
+.desktop-shell .nav-btn:hover,
+.desktop-shell .tx-row:hover,
+.desktop-shell .tx-row.expanded,
+.desktop-shell .review-header:hover,
+.desktop-shell .dt-table tbody tr:hover,
+.desktop-shell .rw-item:hover,
+.desktop-shell .cat-row-tappable:hover {
+  background: rgba(79,140,255,0.10);
+}
+
+.desktop-shell .owner-tab.active {
+  background: linear-gradient(180deg, rgba(79,140,255,0.92), rgba(63,122,230,0.92));
+  border-color: rgba(118,166,255,0.56);
+}
+
+.desktop-shell .grp-cat-chip,
+.desktop-shell .trend-suggestion-chip,
+.desktop-shell .trend-qa-item {
+  background: rgba(15,23,38,0.88);
+  border-color: rgba(141,162,191,0.18);
+  color: var(--text);
+}
+
+.desktop-shell .trend-explanation,
+.desktop-shell .trend-explanation-loading {
+  background: linear-gradient(180deg, rgba(79,140,255,0.10), rgba(15,23,38,0.88));
+  border-color: rgba(118,166,255,0.14);
+}
+
+.desktop-shell .trend-explanation-headline,
+.desktop-shell .trend-qa-question {
+  color: #c9dcff;
+}
+
+.desktop-shell .dt-table th,
+.desktop-shell .rw-list-hd {
+  background: rgba(10,19,33,0.98);
+}
+
+.desktop-shell .alert-warning {
+  background: rgba(251,191,36,0.12);
+  border-color: rgba(251,191,36,0.28);
+  color: #fcd34d;
+}
+
+.desktop-shell .alert-info {
+  background: rgba(79,140,255,0.12);
+  border-color: rgba(118,166,255,0.26);
+  color: #bfd5ff;
+}
+
+.desktop-shell .alert-success {
+  background: rgba(74,222,128,0.12);
+  border-color: rgba(74,222,128,0.28);
+  color: #86efac;
+}
+
+.desktop-shell .alert-error {
+  background: rgba(248,113,113,0.12);
+  border-color: rgba(248,113,113,0.28);
+  color: #fca5a5;
+}
+
+.desktop-shell .modal-overlay {
+  background: rgba(2,6,12,0.68);
+}
+
+.desktop-shell .modal-sheet {
+  background: linear-gradient(180deg, rgba(17,27,44,0.98), rgba(14,23,37,0.98));
+  border: 1px solid rgba(141,162,191,0.14);
+  box-shadow: var(--shadow-md);
+}
+
+.desktop-shell .pdf-embed {
+  border-color: rgba(141,162,191,0.14);
+  background: rgba(8,17,29,0.72);
 }
 
 @media (min-width: 1024px) {

@@ -2364,6 +2364,30 @@ async def pdf_local_status(job_id: str, _auth=Depends(require_api_key)):
         raise HTTPException(502, f"Bridge unreachable: {e}")
 
 
+@app.get("/api/pipeline/status", dependencies=[Depends(require_api_key)])
+async def pipeline_status():
+    token = _read_bridge_token()
+    try:
+        return await _asyncio.to_thread(_bridge_get, "/pipeline/status", token)
+    except _urllib_err.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise HTTPException(502, f"Bridge status error {e.code}: {body}")
+    except Exception as e:
+        raise HTTPException(502, f"Bridge unreachable: {e}")
+
+
+@app.post("/api/pipeline/run", dependencies=[Depends(require_api_key)])
+async def pipeline_run():
+    token = _read_bridge_token()
+    try:
+        return await _asyncio.to_thread(_bridge_post_json, "/pipeline/run", {}, token)
+    except _urllib_err.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise HTTPException(502, f"Bridge run error {e.code}: {body}")
+    except Exception as e:
+        raise HTTPException(502, f"Bridge unreachable: {e}")
+
+
 # ── PWA static files (must be last — mounted after all /api/* routes) ─────────
 # Serves pwa/dist/ at "/" so the dashboard is accessible at the same origin.
 # In dev: run `npm run dev` in pwa/ instead (uses Vite proxy to :8090).

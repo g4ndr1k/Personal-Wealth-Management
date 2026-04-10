@@ -169,11 +169,13 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import Chart from 'chart.js/auto'
 import { api } from '../api/client.js'
+import { useLayout } from '../composables/useLayout.js'
 import { useFinanceStore } from '../stores/finance.js'
 import { formatIDR } from '../utils/currency.js'
 
 const router = useRouter()
 const store  = useFinanceStore()
+const { isDesktop } = useLayout()
 const trendRef = ref(null)
 let trendChart = null
 
@@ -355,6 +357,8 @@ async function load() {
 function renderChart() {
   if (!yearData.value || !trendRef.value) return
   if (trendChart) { trendChart.destroy(); trendChart = null }
+  const tickColor = isDesktop.value ? '#9db0c9' : '#64748b'
+  const gridColor = isDesktop.value ? 'rgba(141,162,191,0.12)' : 'rgba(0,0,0,0.04)'
 
   const months = yearData.value.by_month || []
   const labels = months.map(m => MONTHS_SHORT[m.month - 1])
@@ -382,7 +386,7 @@ function renderChart() {
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
-        legend: { position: 'bottom', labels: { font: { size: 10 }, boxWidth: 10, padding: 10 } },
+        legend: { position: 'bottom', labels: { color: tickColor, font: { size: 10 }, boxWidth: 10, padding: 10 } },
         tooltip: {
           callbacks: {
             label: ctx => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
@@ -391,11 +395,11 @@ function renderChart() {
       },
       scales: {
         y: {
-          ticks: { callback: v => fmtShort(v), font: { size: 9 }, maxTicksLimit: 5 },
-          grid: { color: 'rgba(0,0,0,0.04)' },
+          ticks: { color: tickColor, callback: v => fmtShort(v), font: { size: 9 }, maxTicksLimit: 5 },
+          grid: { color: gridColor },
         },
         x: {
-          ticks: { font: { size: 10 } },
+          ticks: { color: tickColor, font: { size: 10 } },
           grid: { display: false },
         },
       },
