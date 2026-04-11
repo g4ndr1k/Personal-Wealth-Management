@@ -28,6 +28,7 @@ import logging
 import os
 import sqlite3
 import json
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Generator, NamedTuple, Optional
@@ -2508,6 +2509,7 @@ _PDF_FOLDERS: dict[str, _pl.Path] = {
     "pdf_inbox":    _DATA_DIR / "pdf_inbox",
     "pdf_unlocked": _DATA_DIR / "pdf_unlocked",
 }
+_PDF_REGISTRY_DB = _DATA_DIR / "processed_files.db"
 
 def _read_bridge_token() -> str:
     """Read the bridge bearer token from the secrets mount (best-effort)."""
@@ -2518,6 +2520,26 @@ def _read_bridge_token() -> str:
         if candidate.exists():
             return candidate.read_text().strip()
     return ""
+
+
+def _sha256_file(path: _pl.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_registry_status(status: str, error: str = "") -> str | None:
+    normalized = str(status or "").strip().lower()
+    error_text = str(error or "").lower()
+    if normalized == "error" and "no such file or directory" in error_text:
+        return "done"
+    if normalized == "ok":
+        return "done"
+    if normalized == "error":
+        return "error"
+    return None
 
 def _bridge_headers(token: str) -> dict:
     h = {"Content-Type": "application/json"}
@@ -2570,23 +2592,27 @@ def _bridge_upload(path: str, filename: str, file_bytes: bytes, token: str) -> d
 @app.get("/api/pdf/local-files")
 async def pdf_local_files(_auth=Depends(require_api_key)):
     """
-    List all PDF files found in pdf_inbox and pdf_unlocked under the data directory.
-    Returns a list of { folder, filename, size_kb, mtime } objects sorted by mtime desc.
+    List all PDF files found recursively in pdf_inbox and pdf_unlocked under the
+    data directory.
+
+    Returns a list of { folder, filename, relative_path, size_kb, mtime } objects
+    sorted by relative path so nested folders remain predictable in the workspace.
     """
     results = []
     for folder, dir_path in _PDF_FOLDERS.items():
         if not dir_path.is_dir():
             continue
-        for f in dir_path.iterdir():
+        for f in dir_path.rglob("*"):
             if f.is_file() and f.suffix.lower() == ".pdf":
                 stat = f.stat()
                 results.append({
-                    "folder":   folder,
+                    "folder": folder,
                     "filename": f.name,
-                    "size_kb":  round(stat.st_size / 1024, 1),
-                    "mtime":    stat.st_mtime,
+                    "relative_path": f.relative_to(dir_path).as_posix(),
+                    "size_kb": round(stat.st_size / 1024, 1),
+                    "mtime": stat.st_mtime,
                 })
-    results.sort(key=lambda x: x["mtime"], reverse=True)
+    results.sort(key=lambda x: (x["folder"], x["relative_path"].lower()))
     return results
 
 
@@ -2620,39 +2646,86 @@ async def pdf_local_workspace(_auth=Depends(require_api_key)):
         log.warning("Could not load bridge PDF job history: %s", exc)
         jobs = []
 
+    registry_by_hash: dict[str, sqlite3.Row] = {}
+    if _PDF_REGISTRY_DB.exists():
+        try:
+            con = sqlite3.connect(_PDF_REGISTRY_DB)
+            con.row_factory = sqlite3.Row
+            rows = con.execute("""
+                SELECT sha256, processed_at, status, error
+                FROM processed_files
+            """).fetchall()
+            con.close()
+            registry_by_hash = {str(row["sha256"]): row for row in rows}
+        except Exception as exc:
+            log.warning("Could not load PDF registry: %s", exc)
+
     latest_by_key: dict[tuple[str, str], dict] = {}
     for job in jobs:
         folder = str(job.get("folder", "")).strip()
-        filename = str(job.get("filename", "")).strip()
+        relative_path = str(job.get("relative_path") or job.get("filename", "")).strip()
         created_at = str(job.get("created_at", "")).strip()
-        if not folder or not filename or not created_at:
+        if not folder or not relative_path or not created_at:
             continue
-        key = (folder, filename)
+        key = (folder, relative_path)
         current = latest_by_key.get(key)
         if current is None or created_at > str(current.get("created_at", "")):
             latest_by_key[key] = job
 
     merged = []
     for item in files:
-        job = latest_by_key.get((item["folder"], item["filename"]))
+        file_path = _PDF_FOLDERS[item["folder"]] / item["relative_path"]
+        file_hash = ""
+        try:
+            file_hash = _sha256_file(file_path)
+        except Exception as exc:
+            log.warning("Could not hash local PDF %s: %s", file_path, exc)
+
+        job = latest_by_key.get((item["folder"], item["relative_path"]))
+        registry = registry_by_hash.get(file_hash) if file_hash else None
+
+        job_time = str(job.get("created_at", "")) if job else ""
+        registry_time = str(registry["processed_at"]) if registry else ""
+        use_registry = bool(registry and registry_time and registry_time >= job_time)
+
         merged.append({
             **item,
-            "last_processed_at": job.get("created_at") if job else None,
-            "last_status": job.get("status") if job else None,
-            "last_error": job.get("error", "") if job else "",
+            "sha256": file_hash,
+            "last_processed_at": (
+                registry["processed_at"] if use_registry
+                else (job.get("created_at") if job else (registry["processed_at"] if registry else None))
+            ),
+            "last_status": (
+                _normalize_registry_status(registry["status"], registry["error"]) if use_registry
+                else (job.get("status") if job else _normalize_registry_status(registry["status"], registry["error"]) if registry else None)
+            ),
+            "last_error": (
+                (
+                    "" if _normalize_registry_status(registry["status"], registry["error"]) == "done"
+                    else str(registry["error"] or "")
+                ) if use_registry
+                else (
+                    job.get("error", "") if job
+                    else (
+                        "" if registry and _normalize_registry_status(registry["status"], registry["error"]) == "done"
+                        else str(registry["error"] or "") if registry else ""
+                    )
+                )
+            ),
         })
 
     return {"files": merged}
 
 
 class _ProcessLocalReq(BaseModel):
-    folder:   str   # "pdf_inbox" or "pdf_unlocked"
-    filename: str
+    folder: str   # "pdf_inbox" or "pdf_unlocked"
+    filename: str | None = None
+    relative_path: str | None = None
 
 @app.post("/api/pdf/process-local")
 async def pdf_process_local(req: _ProcessLocalReq, _auth=Depends(require_api_key)):
     """
-    Ask the bridge to process a PDF by folder+filename — no byte upload needed.
+    Ask the bridge to process a PDF by folder+relative path — no byte upload needed.
     Both the bridge (Mac host) and this container share the ./data volume, so the
     bridge can read the file directly from its own configured inbox/unlocked dirs.
     Returns { job_id } — poll /api/pdf/local-status/<job_id> for progress.
@@ -2661,10 +2734,20 @@ async def pdf_process_local(req: _ProcessLocalReq, _auth=Depends(require_api_key
     if not dir_path:
         raise HTTPException(400, f"Unknown folder '{req.folder}'. Use pdf_inbox or pdf_unlocked.")
 
-    if not (dir_path / req.filename).is_file():
-        raise HTTPException(404, f"File not found: {req.folder}/{req.filename}")
-    if not req.filename.lower().endswith(".pdf"):
+    relative_path = str(req.relative_path or req.filename or "").strip()
+    if not relative_path:
+        raise HTTPException(400, "relative_path is required.")
+    if not relative_path.lower().endswith(".pdf"):
         raise HTTPException(400, "Only .pdf files are supported.")
+    if relative_path.startswith("/") or any(part == ".." for part in _pl.Path(relative_path).parts):
+        raise HTTPException(400, "Invalid relative_path.")
+
+    file_path = (dir_path / relative_path).resolve()
+    root_path = dir_path.resolve()
+    if file_path != root_path and root_path not in file_path.parents:
+        raise HTTPException(400, "relative_path escapes the allowed folder.")
+    if not file_path.is_file():
+        raise HTTPException(404, f"File not found: {req.folder}/{relative_path}")
 
     token = _read_bridge_token()
 
@@ -2673,7 +2756,7 @@ async def pdf_process_local(req: _ProcessLocalReq, _auth=Depends(require_api_key
         result = await _asyncio.to_thread(
             _bridge_post_json,
             "/pdf/process-file",
-            {"folder": req.folder, "filename": req.filename},
+            {"folder": req.folder, "relative_path": relative_path},
             token,
         )
     except _urllib_err.HTTPError as e:

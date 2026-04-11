@@ -164,10 +164,10 @@ class PipelineRunner:
     def _scan_candidates(self, inbox_dir: Path) -> tuple[list[CandidateFile], int]:
         candidates: list[CandidateFile] = []
         skipped = 0
-        pdf_sources = sorted(inbox_dir.glob("*.pdf"))
-        extracted_dir = inbox_dir / "_extracted"
-        if extracted_dir.exists():
-            pdf_sources.extend(sorted(extracted_dir.glob("*.pdf")))
+        pdf_sources = sorted(
+            path for path in inbox_dir.rglob("*.pdf")
+            if path.is_file()
+        )
 
         for pdf_path in pdf_sources:
             if not is_stable(pdf_path, 5):

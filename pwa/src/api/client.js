@@ -113,10 +113,10 @@ export const api = {
   //
   //   pdfLocalFiles()              GET  /api/pdf/local-files
   //   pdfLocalWorkspace()          GET  /api/pdf/local-workspace
-  //   processLocalPdf(folder, fn)  POST /api/pdf/process-local
+  //   processLocalPdf(folder, path) POST /api/pdf/process-local
   //   pdfLocalStatus(jobId)        GET  /api/pdf/local-status/:id
   pdfLocalFiles:     ()                    => get('/pdf/local-files'),
   pdfLocalWorkspace: ()                    => get('/pdf/local-workspace'),
-  processLocalPdf:   (folder, filename)    => post('/pdf/process-local', { folder, filename }),
+  processLocalPdf:   (folder, relativePath) => post('/pdf/process-local', { folder, relative_path: relativePath }),
   pdfLocalStatus:    (jobId)               => get(`/pdf/local-status/${jobId}`),
 }

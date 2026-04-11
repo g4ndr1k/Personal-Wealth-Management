@@ -119,7 +119,7 @@ The system alerts on:
 │  │ · HTTP API with bearer auth               │  │
 │  │ · PDF processor endpoints (/pdf/*)        │  │
 │  │ · Pipeline orchestrator (/pipeline/*)     │  │
-│  │ · Web UI served at /pdf/ui                │  │
+│  │ · PWA-backed PDF workspace via finance    │  │
 │  └───────────────────────────────────────────┘  │
 │                                                 │
 │  ┌───────────────────────────────────────────┐  │
@@ -188,10 +188,9 @@ The system alerts on:
   - 3-layer parsing: pdfplumber tables → Python regex → Ollama LLM fallback
   - Multi-owner XLS export: `{Bank}_{Owner}.xlsx` per bank/owner pair + flat `ALL_TRANSACTIONS.xlsx` with Owner column
   - Mail.app attachment auto-scanner for bank PDFs
-  - Web UI at `http://127.0.0.1:9100/pdf/ui`
   - Auto-upsert pipeline in `bridge/pdf_handler.py` after every portfolio parse: savings/consol closing balance → `account_balances`; bond holdings → `holdings`; mutual-fund holdings → `holdings`; equity/fund holdings with month-end gap-fill → `holdings`; RDN cash balance → `account_balances`
   - Gap-fill logic — carries the most recent brokerage holdings forward month-by-month (INSERT OR IGNORE) until either the current month or the first month that already has data for that institution, preventing dashboard gaps between monthly PDFs
-  - End-to-end bridge pipeline orchestrator (`bridge/pipeline.py`) with scheduled runs, manual trigger/status endpoints, import/sync chaining, and month-complete notification tracking
+  - End-to-end bridge pipeline orchestrator (`bridge/pipeline.py`) with scheduled runs, manual trigger/status endpoints, import/sync chaining, month-complete notification tracking, and recursive scanning of nested folders inside `data/pdf_inbox/`
 - Stage 2 finance package (`finance/`) — see §24–32
   - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation, XLSX date parser
@@ -212,7 +211,7 @@ The system alerts on:
   - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), mobile expandable detail rows, desktop sortable table + detail panel
   - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback
   - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
-  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, PDF processing tools, desktop-only embedded bridge PDF workspace
+  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support
   - `pwa/src/composables/useLayout.js` — responsive layout detection + persisted manual `Desktop View` override
   - `pwa/src/components/` + `pwa/src/layouts/` — extracted shell pieces for mobile header/nav, desktop sidebar, desktop transactions table, and desktop review workspace
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month, reviewCount badge
@@ -382,7 +381,6 @@ agentic-ai/
 │   ├── gold_price.py             # IDR/gram gold price via XAU/IDR from fx_rate (historical-capable)
 │   ├── attachment_scanner.py     # Mail.app attachment watcher
 │   └── static/
-│       └── pdf_ui.html           # Web UI for PDF upload/processing/download
 ├── parsers/                      # Bank statement parsers (host Python)
 │   ├── __init__.py
 │   ├── base.py                   # Transaction, AccountSummary, StatementResult dataclasses
@@ -449,7 +447,7 @@ agentic-ai/
 │           ├── Transactions.vue      # Mobile expandable list + desktop table/detail workspace
 │           ├── ReviewQueue.vue       # Mobile inline form + desktop review workspace + toast
 │           ├── ForeignSpend.vue      # Grouped by currency, per-currency subtotals
-│           └── Settings.vue          # Sync, Import, pipeline controls, health status, PDF tools, desktop-only bridge PDF UI
+│           └── Settings.vue          # Sync, Import, pipeline controls, health status, grouped PDF workspace with subfolder support
 ├── config/
 │   └── settings.toml             # All runtime configuration (Stage 1 + Stage 2 sections)
 ├── data/                         # Runtime SQLite DBs (gitignored)
@@ -619,7 +617,7 @@ chmod 600 secrets/banks.toml
 nano secrets/banks.toml   # fill in your bank PDF passwords
 ```
 
-Then open the PDF UI at: **http://127.0.0.1:9100/pdf/ui**
+Then open the Settings page in the PWA and use the PDF workspace there. The current flow is PWA-first rather than a separate bridge-hosted PDF UI.
 
 ---
 
@@ -1461,8 +1459,8 @@ curl -s -X POST \
   -d '{"text":"Bridge test alert from curl"}' \
   http://127.0.0.1:9100/alerts/send | python3 -m json.tool
 
-# Open the PDF UI
-open http://127.0.0.1:9100/pdf/ui
+# Open the PWA Settings page instead
+open http://127.0.0.1:8090/settings
 ```
 
 ### Test Ollama
@@ -1562,7 +1560,7 @@ TOKEN=$(cat ~/agentic-ai/secrets/bridge.token)
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/pdf/jobs | python3 -m json.tool
 ```
 
-Or open the web UI: **http://127.0.0.1:9100/pdf/ui**
+Or open the PWA Settings page: **http://127.0.0.1:8090/settings**
 
 ### Batch processor operations
 
@@ -1619,15 +1617,11 @@ The token is the contents of `secrets/bridge.token`.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/pdf/upload` | ✓ | Upload PDF file (multipart/form-data, fields: `file`, `password`) |
-| POST | `/pdf/process` | ✓ | Process a queued job: `{"job_id": "...", "password": "..."}` |
+| POST | `/pdf/process-file` | ✓ | Queue a local PDF from `pdf_inbox` or `pdf_unlocked`: `{"folder":"pdf_inbox","relative_path":"BCA Gandrik/file.pdf"}` |
 | GET | `/pdf/status/<job_id>` | ✓ | Job progress and result |
-| GET | `/pdf/download/<job_id>` | ✓ | Download produced XLS file |
 | GET | `/pdf/jobs?limit=N` | ✓ | List recent jobs |
-| GET | `/pdf/attachments` | ✓ | List auto-detected bank PDFs from Mail.app |
 | POST | `/pipeline/run` | ✓ | Trigger a manual end-to-end pipeline cycle |
 | GET | `/pipeline/status` | ✓ | Current pipeline state, last result, next scheduled run |
-| GET | `/pdf/ui` | None | Web UI (HTML) |
 
 ### ACK payload
 
@@ -1657,7 +1651,7 @@ The PDF processor is built into the bridge (runs on the Mac host, not in Docker)
 
 The bridge now also includes `bridge/pipeline.py`, an opt-in orchestrator that connects the deterministic monthly workflow into one host-local loop:
 
-1. Scan `data/pdf_inbox/` and `data/pdf_inbox/_extracted/`
+1. Recursively scan `data/pdf_inbox/` for PDFs in the root or any nested subfolder
 2. Compute SHA-256 for each PDF and consult `data/processed_files.db`
 3. Skip files already recorded with `status='ok'`; retry prior `status='error'`
 4. Reuse the shared PDF-processing flow from `bridge/pdf_handler.py`
@@ -1801,12 +1795,11 @@ Recommended rollout: keep `warn` mode enabled until the verifier has been calibr
 
 ### PDF upload reuse behavior
 
-`POST /pdf/upload` always stages the uploaded PDF into `pdf_inbox_dir` first.
+The current manual flow is local-file based rather than upload based.
 
-- If no file with that name exists, the upload is written normally.
-- If a file with the same name already exists, the bridge **reuses it as-is** and does not overwrite or create a copy.
-
-This avoids duplicate hash-suffixed copies that would appear when the same PDF is uploaded more than once (e.g. retried after a parse error or reprocessed for a different month).
+- PDFs are discovered directly from `pdf_inbox_dir` and `pdf_unlocked_dir`
+- The PWA passes `folder + relative_path` to the bridge via `POST /pdf/process-file`
+- Relative paths are validated so processing stays inside the configured root folders
 
 ### PDF unlocking
 
@@ -1827,7 +1820,7 @@ permata_bank = ""
 bca         = ""
 ```
 
-Keys are lowercase bank names matching what the parser router returns. The password can also be supplied per-upload via the web UI or the `/pdf/upload` API — this takes precedence over `banks.toml`.
+Keys are lowercase bank names matching what the parser router returns. A password can also be supplied per processing request; when omitted, the bridge falls back to `banks.toml`.
 
 ### Owner detection
 
@@ -1867,14 +1860,14 @@ The `Owner` column is first, making it easy to filter by account holder. Multi-c
 
 ### Batch processor (`scripts/batch_process.py`)
 
-The batch processor is a standalone Python script that watches `data/pdf_inbox/` and converts every new bank statement PDF into XLS output. It runs without the bridge HTTP server.
+The batch processor is a standalone Python script that watches `data/pdf_inbox/` recursively and converts every new bank statement PDF into XLS output. It runs without the bridge HTTP server.
 
 #### Two operating modes
 
 | Mode | Command | When to use |
 |---|---|---|
 | One-shot | `python3 scripts/batch_process.py` | Process the current inbox contents and exit |
-| Watch | `python3 scripts/batch_process.py --watch` | Drop files into pdf_inbox at any time; they are processed automatically |
+| Watch | `python3 scripts/batch_process.py --watch` | Drop files into `pdf_inbox` or its subfolders at any time; they are processed automatically |
 
 #### Idempotency — SHA-256 deduplication
 
@@ -1964,18 +1957,18 @@ sqlite3 data/processed_files.db \
 
 All runs append to `logs/batch_process.log` (DEBUG level). Console output is INFO level. Use `-v` to promote DEBUG to the console as well.
 
-### Web UI
+### PWA PDF workspace
 
-Access at **http://127.0.0.1:9100/pdf/ui** (localhost only; SSH tunnel for remote access).
+Manual PDF operations now live in the PWA Settings page rather than a separate bridge-served HTML app.
 
-Three tabs:
-- **Upload** — drag-and-drop or file picker, optional per-file password field, processes all files in one click
-- **Jobs** — lists all processing jobs with status badges, download button for completed XLS
-- **Mail Attachments** — scans Mail.app attachments folder for new bank PDFs, lets you queue them for processing with one click
+Current behavior:
+- Lists local PDFs from `pdf_inbox` and `pdf_unlocked`
+- Scans subfolders recursively and keeps the relative path visible in the UI
+- Groups files by institution and inferred month/year from the filename
+- Retains processing state by SHA-256 content hash, so moved files do not revert to `Ready to process`
+- Queues only the selected PDFs via `POST /pdf/process-file`
 
-The UI uses the same bearer token as the rest of the bridge API. On first load it prompts for the token and stores it in `localStorage`.
-
-> **Note:** The web UI and batch processor use separate job-tracking databases (`pdf_jobs.db` vs `processed_files.db`) and are independent. The batch processor does not require the bridge to be running.
+The bridge still owns the job queue and status endpoints, while the finance API exposes the single-origin PWA-friendly workspace endpoints.
 
 ### Attachment scanner
 
@@ -2066,15 +2059,15 @@ Deliberate non-changes:
 
 ##### 5. Keep the web UI as an override path, not the primary control plane
 
-**Current behavior:** the PDF UI mixes primary operations and recovery operations.
+**Current behavior:** the PWA Settings workspace and the background pipeline are the primary control surface.
 
 **Proposal:**
-- keep `/pdf/ui` for upload, manual queueing, retries, password entry, and diagnostics
+- keep the PWA Settings workspace for manual selection, retries, and diagnostics
 - treat background orchestration as the primary happy path
 - do not force a risky merge of `pdf_jobs.db` and `processed_files.db` in the first iteration
 
 **Why this matters:**
-- preserves current tools and operator habits
+- preserves the active tools and operator habits
 - reduces migration risk
 - lets automation prove itself before deeper consolidation work
 
@@ -3088,7 +3081,7 @@ AI narrative (via Ollama `gemma4:e4b`) runs after the deterministic summary and 
 | `/transactions` | Transactions | Year/month/owner/category/search filters; paginated list (50/page); mobile expandable detail rows; desktop sortable table with separate detail/editor pane |
 | `/review` | Review Queue | Mobile accordion review flow plus desktop two-pane workspace; alias form writes via `POST /api/alias`; removes affected rows locally and decrements badge |
 | `/foreign` | Foreign Spend | Year/month/owner filters; transactions grouped by `original_currency`; per-group subtotal row; summary cards (unique currencies, total IDR equivalent) |
-| `/settings` | Settings | API health, sync/import actions, pipeline run/status card, local PDF processing controls, desktop-only embedded bridge PDF workspace (`/pdf/ui`) |
+| `/settings` | Settings | API health, sync/import actions, pipeline run/status card, grouped local PDF workspace, hash-retained status, and recursive subfolder-aware PDF controls |
 | `/group-drilldown` | Group Drilldown | Group → categories breakdown for the selected month |
 | `/category-drilldown` | Category Drilldown | Category → transactions with inline edit flow |
 | `/wealth` | Wealth | Net worth dashboard, MoM movement, AI explanation panel, trend chart, snapshot refresh |

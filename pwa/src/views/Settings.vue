@@ -216,15 +216,6 @@
               {{ showPdfWorkspace ? 'Hide PDF Workspace' : 'Open PDF Workspace' }}
             </button>
           </span>
-          <a
-            v-if="isDesktopMac"
-            class="btn btn-ghost btn-sm"
-            :href="bridgePdfUiUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open Legacy Workspace
-          </a>
         </div>
 
         <div v-if="showPdfWorkspace" class="pdf-workspace">
@@ -287,55 +278,106 @@
               {{ pdfWorkspace.files.length === 0 ? 'No PDF files found in pdf_inbox or pdf_unlocked.' : 'No PDFs match the current search or folder filter.' }}
             </div>
 
-            <div v-else class="pdf-table-wrap">
-              <table class="pdf-table">
-                <thead>
-                  <tr>
-                    <th class="pdf-checkbox-col">
-                      <input
-                        type="checkbox"
-                        :checked="allVisibleSelected"
-                        :disabled="pdf.phase === 'processing'"
-                        @change="toggleVisibleSelection($event.target.checked)"
-                      />
-                    </th>
-                    <th>PDF File</th>
-                    <th>Folder</th>
-                    <th>Last Processed</th>
-                    <th>Status</th>
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="file in visiblePdfFiles" :key="file.key">
-                    <td class="pdf-checkbox-col">
-                      <input
-                        v-model="file.selected"
-                        type="checkbox"
-                        :disabled="pdf.phase === 'processing'"
-                      />
-                    </td>
-                    <td>
-                      <div class="pdf-name-cell">
-                        <div class="pdf-name-main">{{ file.filename }}</div>
-                        <div class="pdf-name-sub">
-                          {{ formatPdfSize(file.sizeKb) }} · Modified {{ formatPdfDate(file.mtime) }}
-                        </div>
+            <div v-else class="pdf-groups">
+              <div class="pdf-groups-toolbar">
+                <label class="pdf-master-toggle">
+                  <input
+                    type="checkbox"
+                    :checked="allVisibleSelected"
+                    :disabled="pdf.phase === 'processing'"
+                    @change="toggleVisibleSelection($event.target.checked)"
+                  />
+                  <span>Select all matching PDFs</span>
+                </label>
+              </div>
+
+              <section
+                v-for="institution in groupedPdfFiles"
+                :key="institution.key"
+                class="pdf-group-card"
+              >
+                <button
+                  class="pdf-group-header"
+                  type="button"
+                  @click="toggleInstitutionGroup(institution.key)"
+                >
+                  <div class="pdf-group-title">
+                    <span class="pdf-group-chevron">{{ isInstitutionExpanded(institution.key) ? '▾' : '▸' }}</span>
+                    <span>{{ institution.label }}</span>
+                  </div>
+                  <div class="pdf-group-meta">
+                    <span>{{ institution.fileCount }} PDFs</span>
+                    <span>{{ institution.months.length }} months</span>
+                  </div>
+                </button>
+
+                <div v-if="isInstitutionExpanded(institution.key)" class="pdf-month-list">
+                  <section
+                    v-for="month in institution.months"
+                    :key="month.key"
+                    class="pdf-month-card"
+                  >
+                    <button
+                      class="pdf-month-header"
+                      type="button"
+                      @click="toggleMonthGroup(month.key)"
+                    >
+                      <div class="pdf-group-title">
+                        <span class="pdf-group-chevron">{{ isMonthExpanded(month.key) ? '▾' : '▸' }}</span>
+                        <span>{{ month.label }}</span>
                       </div>
-                    </td>
-                    <td>
-                      <span class="pdf-folder-pill">{{ file.folder }}</span>
-                    </td>
-                    <td>{{ formatPdfDate(file.lastProcessedAt, true) }}</td>
-                    <td>
-                      <span :class="['pdf-status-chip', `pdf-status-${getPdfStatusClass(file)}`]">
-                        {{ getPdfStatusLabel(file) }}
-                      </span>
-                    </td>
-                    <td class="pdf-detail-cell">{{ getPdfDetail(file) }}</td>
-                  </tr>
-                </tbody>
-              </table>
+                      <div class="pdf-group-meta">
+                        <span>{{ month.files.length }} PDFs</span>
+                      </div>
+                    </button>
+
+                    <div v-if="isMonthExpanded(month.key)" class="pdf-table-wrap">
+                      <table class="pdf-table">
+                        <thead>
+                          <tr>
+                            <th class="pdf-checkbox-col"></th>
+                            <th>PDF File</th>
+                            <th>Folder</th>
+                            <th>Last Processed</th>
+                            <th>Status</th>
+                            <th>Details</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="file in month.files" :key="file.key">
+                            <td class="pdf-checkbox-col">
+                              <input
+                                v-model="file.selected"
+                                type="checkbox"
+                                :disabled="pdf.phase === 'processing'"
+                              />
+                            </td>
+                            <td>
+                              <div class="pdf-name-cell">
+                                <div class="pdf-name-main">{{ file.filename }}</div>
+                                <div class="pdf-name-sub">
+                                  <span v-if="file.relativeDir">{{ file.relativeDir }} · </span>
+                                  {{ formatPdfSize(file.sizeKb) }} · Modified {{ formatPdfDate(file.mtime) }}
+                                </div>
+                              </div>
+                            </td>
+                            <td>
+                              <span class="pdf-folder-pill">{{ file.folder }}</span>
+                            </td>
+                            <td>{{ formatPdfDate(file.lastProcessedAt, true) }}</td>
+                            <td>
+                              <span :class="['pdf-status-chip', `pdf-status-${getPdfStatusClass(file)}`]">
+                                {{ getPdfStatusLabel(file) }}
+                              </span>
+                            </td>
+                            <td class="pdf-detail-cell">{{ getPdfDetail(file) }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                </div>
+              </section>
             </div>
           </template>
 
@@ -408,10 +450,6 @@ const isDesktopMac = computed(() => {
   return looksLikeMac && !isTouch
 })
 
-const bridgePdfUiUrl = computed(() =>
-  `${window.location.protocol}//${window.location.hostname}:9100/pdf/ui`
-)
-
 // ── PDF processing state ─────────────────────────────────────────────────────
 const EMPTY_PDF_STATE = () => ({
   phase: 'idle',   // 'idle' | 'processing'
@@ -429,19 +467,26 @@ const pdfWorkspace = ref({
   folder: 'all',
   files: [],
 })
+const pdfExpanded = ref({
+  institutions: {},
+  months: {},
+})
+
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 const visiblePdfFiles = computed(() => {
   const q = pdfWorkspace.value.search.trim().toLowerCase()
   return pdfWorkspace.value.files
     .filter((file) => {
       const matchesFolder = pdfWorkspace.value.folder === 'all' || file.folder === pdfWorkspace.value.folder
-      const matchesSearch = !q || file.filename.toLowerCase().includes(q)
+      const haystack = `${file.filename} ${file.relativePath} ${file.institutionLabel}`.toLowerCase()
+      const matchesSearch = !q || haystack.includes(q)
       return matchesFolder && matchesSearch
     })
     .slice()
     .sort((a, b) => {
-      const byName = a.filename.localeCompare(b.filename, undefined, { numeric: true, sensitivity: 'base' })
-      if (byName !== 0) return byName
+      const byPath = a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true, sensitivity: 'base' })
+      if (byPath !== 0) return byPath
       return a.folder.localeCompare(b.folder, undefined, { sensitivity: 'base' })
     })
 })
@@ -453,6 +498,50 @@ const selectedPdfCount = computed(() =>
 const allVisibleSelected = computed(() =>
   visiblePdfFiles.value.length > 0 && visiblePdfFiles.value.every(file => file.selected)
 )
+
+const groupedPdfFiles = computed(() => {
+  const groups = new Map()
+
+  for (const file of visiblePdfFiles.value) {
+    const institutionKey = file.institutionKey
+    if (!groups.has(institutionKey)) {
+      groups.set(institutionKey, {
+        key: institutionKey,
+        label: file.institutionLabel,
+        months: new Map(),
+        fileCount: 0,
+      })
+    }
+
+    const institution = groups.get(institutionKey)
+    institution.fileCount += 1
+
+    if (!institution.months.has(file.monthKey)) {
+      institution.months.set(file.monthKey, {
+        key: file.monthKey,
+        label: file.monthLabel,
+        sortKey: file.monthSortKey,
+        files: [],
+      })
+    }
+
+    institution.months.get(file.monthKey).files.push(file)
+  }
+
+  return Array.from(groups.values())
+    .map((institution) => ({
+      ...institution,
+      months: Array.from(institution.months.values())
+        .sort((a, b) => b.sortKey.localeCompare(a.sortKey))
+        .map((month) => ({
+          ...month,
+          files: month.files.slice().sort((a, b) =>
+            a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true, sensitivity: 'base' })
+          ),
+        })),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+})
 
 const pdfCounts = computed(() => {
   const counts = { ok: 0, skipped: 0, error: 0 }
@@ -509,11 +598,81 @@ function truncateText(text, max = 80) {
   return text && text.length > max ? `${text.slice(0, max - 1)}…` : (text || '')
 }
 
-function mapWorkspaceFile(file, previous) {
+function inferInstitution(filename) {
+  const upper = filename.toUpperCase()
+  if (upper.includes('BNI_SEKURITAS')) return { key: 'bni-sekuritas', label: 'BNI Sekuritas' }
+  if (upper.startsWith('BCA') || upper.includes('BCA_')) return { key: 'bca', label: 'BCA' }
+  if (upper.includes('CIMB')) return { key: 'cimb-niaga', label: 'CIMB Niaga' }
+  if (upper.includes('MAYBANK')) return { key: 'maybank', label: 'Maybank' }
+  if (upper.includes('PERMATA')) return { key: 'permata', label: 'Permata' }
+  if (upper.includes('IPOT') || upper.includes('INDO PREMIER')) return { key: 'ipot', label: 'IPOT' }
+  if (upper.includes('STOCKBIT')) return { key: 'stockbit', label: 'Stockbit' }
+  if (upper.includes('BNI')) return { key: 'bni', label: 'BNI' }
+  if (upper.includes('SEKURITAS')) return { key: 'sekuritas', label: 'Sekuritas' }
+  return { key: 'other', label: 'Other' }
+}
+
+function inferMonthBucket(filename) {
+  const name = filename.toUpperCase()
+  const monthNameMap = {
+    JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
+    JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
+  }
+
+  const candidates = [
+    name.match(/(?:^|_)(\d{2})_(20\d{2})(?=\.|_|$)/),
+    name.match(/(?:^|_)(20\d{2})_(\d{2})(?=\.|_|$)/),
+    name.match(/(20\d{2})-(\d{2})-(\d{2})/),
+    name.match(/(20\d{2})(\d{2})(\d{2})/),
+    name.match(/(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(20\d{2})/),
+  ].filter(Boolean)
+
+  for (const match of candidates) {
+    let year = ''
+    let month = ''
+
+    if (match[0].includes('-')) {
+      year = match[1]
+      month = match[2]
+    } else if (monthNameMap[match[1]]) {
+      month = monthNameMap[match[1]]
+      year = match[2]
+    } else if (match[1].length === 2 && match[2].length === 4) {
+      month = match[1]
+      year = match[2]
+    } else {
+      year = match[1]
+      month = match[2]
+    }
+
+    if (/^20\d{2}$/.test(year) && Number(month) >= 1 && Number(month) <= 12) {
+      return {
+        key: `${year}-${month}`,
+        label: `${MONTH_LABELS[Number(month) - 1]} ${year}`,
+        sortKey: `${year}-${month}`,
+      }
+    }
+  }
+
   return {
-    key: `${file.folder}/${file.filename}`,
+    key: 'unknown-period',
+    label: 'Unknown Period',
+    sortKey: '0000-00',
+  }
+}
+
+function mapWorkspaceFile(file, previous) {
+  const institution = inferInstitution(file.filename)
+  const monthBucket = inferMonthBucket(file.filename)
+  const relativePath = file.relative_path || file.filename
+  const lastSlash = relativePath.lastIndexOf('/')
+  const relativeDir = lastSlash >= 0 ? relativePath.slice(0, lastSlash) : ''
+  return {
+    key: `${file.folder}/${relativePath}`,
     folder: file.folder,
     filename: file.filename,
+    relativePath,
+    relativeDir,
     sizeKb: file.size_kb,
     mtime: file.mtime,
     lastProcessedAt: file.last_processed_at,
@@ -522,6 +681,11 @@ function mapWorkspaceFile(file, previous) {
     selected: previous?.selected || false,
     processingState: previous?.processingState || null,
     processingMeta: previous?.processingMeta || '',
+    institutionKey: institution.key,
+    institutionLabel: institution.label,
+    monthKey: `${institution.key}:${monthBucket.key}`,
+    monthLabel: monthBucket.label,
+    monthSortKey: monthBucket.sortKey,
   }
 }
 
@@ -533,7 +697,7 @@ async function loadPdfWorkspace() {
     const res = await api.pdfLocalWorkspace()
     const previousByKey = new Map(pdfWorkspace.value.files.map(file => [file.key, file]))
     pdfWorkspace.value.files = (res.files || []).map(file =>
-      mapWorkspaceFile(file, previousByKey.get(`${file.folder}/${file.filename}`))
+      mapWorkspaceFile(file, previousByKey.get(`${file.folder}/${file.relative_path || file.filename}`))
     )
     pdfWorkspace.value.loaded = true
   } catch (err) {
@@ -556,6 +720,22 @@ function clearPdfSelection() {
 
 function toggleVisibleSelection(checked) {
   visiblePdfFiles.value.forEach(file => { file.selected = checked })
+}
+
+function isInstitutionExpanded(key) {
+  return pdfWorkspace.value.search.trim() !== '' || Boolean(pdfExpanded.value.institutions[key])
+}
+
+function isMonthExpanded(key) {
+  return pdfWorkspace.value.search.trim() !== '' || Boolean(pdfExpanded.value.months[key])
+}
+
+function toggleInstitutionGroup(key) {
+  pdfExpanded.value.institutions[key] = !pdfExpanded.value.institutions[key]
+}
+
+function toggleMonthGroup(key) {
+  pdfExpanded.value.months[key] = !pdfExpanded.value.months[key]
 }
 
 function getPdfStatusClass(file) {
@@ -626,7 +806,7 @@ async function processSelectedPdfs() {
     pdf.value.current = file.filename
 
     try {
-      const res = await api.processLocalPdf(file.folder, file.filename)
+      const res = await api.processLocalPdf(file.folder, file.relativePath)
       const jobId = res.job_id
       if (!jobId) throw new Error('No job_id returned')
       const final = await pollStatus(jobId)
@@ -853,8 +1033,94 @@ onMounted(async () => {
   text-align: center;
 }
 
-.pdf-table-wrap {
+.pdf-groups {
   margin-top: 12px;
+}
+
+.pdf-groups-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pdf-master-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.72);
+}
+
+.pdf-group-card,
+.pdf-month-card {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+}
+
+.pdf-group-card + .pdf-group-card {
+  margin-top: 12px;
+}
+
+.pdf-month-list {
+  padding: 0 10px 10px;
+}
+
+.pdf-month-card + .pdf-month-card {
+  margin-top: 8px;
+}
+
+.pdf-group-header,
+.pdf-month-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: transparent;
+  border: 0;
+  color: rgba(255,255,255,0.94);
+  cursor: pointer;
+  text-align: left;
+}
+
+.pdf-month-header {
+  padding: 12px 14px;
+}
+
+.pdf-group-header:hover,
+.pdf-month-header:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+.pdf-group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-weight: 700;
+}
+
+.pdf-group-chevron {
+  width: 12px;
+  color: rgba(147,197,253,0.9);
+  flex: 0 0 auto;
+}
+
+.pdf-group-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: rgba(255,255,255,0.56);
+}
+
+.pdf-table-wrap {
+  margin: 0 10px 10px;
   overflow: auto;
   border: 1px solid rgba(255,255,255,0.10);
   border-radius: 8px;
@@ -985,9 +1251,16 @@ onMounted(async () => {
   }
 
   .pdf-workspace-toolbar,
-  .pdf-workspace-footer {
+  .pdf-workspace-footer,
+  .pdf-groups-toolbar,
+  .pdf-group-header,
+  .pdf-month-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .pdf-group-meta {
+    justify-content: space-between;
   }
 
   .pdf-workspace-footer-actions {

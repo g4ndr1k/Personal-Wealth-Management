@@ -16,7 +16,6 @@ then poll /pdf/status for progress instead of blocking the HTTP request until
 PDF parsing/export completes.
 """
 import os
-import json
 import uuid
 import queue
 import logging
@@ -26,17 +25,12 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
 log = logging.getLogger(__name__)
 
 # These are set by init_pdf_handler() called from bridge/server.py
 _config = {}
 _db_path = ""
 
-# Short-lived map of opaque attachment_id → absolute file path.
-# Populated by handle_attachments(); consumed by handle_process().
-_attachment_paths: dict[str, str] = {}
-_attachment_paths_lock = threading.Lock()
 _running_jobs: set[str] = set()
 _running_jobs_lock = threading.Lock()
 _queued_jobs: set[str] = set()
@@ -53,19 +47,6 @@ def init_pdf_handler(config: dict, db_path: str):
     _db_path = db_path
     _init_jobs_db()
     _ensure_job_worker()
-
-
-def _get_attachment_path(attachment_id: str) -> Optional[str]:
-    with _attachment_paths_lock:
-        return _attachment_paths.get(attachment_id)
-
-
-def _replace_attachment_paths(paths: dict[str, str]) -> None:
-    global _attachment_paths
-    with _attachment_paths_lock:
-        _attachment_paths = paths
-
-
 def _mark_job_running(job_id: str) -> bool:
     with _running_jobs_lock:
         if job_id in _running_jobs:
@@ -118,21 +99,49 @@ def _job_worker_loop() -> None:
             _job_queue.task_done()
 
 
+def _pdf_folder_map() -> dict[str, str]:
+    return {
+        "pdf_inbox": _config.get("pdf_inbox_dir", ""),
+        "pdf_unlocked": _config.get("pdf_unlocked_dir", ""),
+    }
+
+
+def _resolve_pdf_relative_path(folder: str, relative_path: str) -> tuple[str, str]:
+    folder_map = _pdf_folder_map()
+    root_dir = folder_map.get(folder, "")
+    if not root_dir:
+        raise ValueError(f"Unknown or unconfigured folder '{folder}'. Use pdf_inbox or pdf_unlocked.")
+    if not relative_path:
+        raise ValueError("relative_path is required")
+    if relative_path.startswith("/"):
+        raise ValueError("relative_path must stay inside the configured folder")
+
+    relative = Path(relative_path)
+    if any(part == ".." for part in relative.parts):
+        raise ValueError("relative_path must stay inside the configured folder")
+
+    root_real = os.path.realpath(root_dir)
+    file_real = os.path.realpath(os.path.join(root_real, *relative.parts))
+    if file_real != root_real and not file_real.startswith(root_real + os.sep):
+        raise ValueError("relative_path must stay inside the configured folder")
+
+    return root_real, file_real
+
+
+def _describe_pdf_source(source_path: str) -> tuple[str, str, str]:
+    source_real = os.path.realpath(source_path or "")
+    for folder, root_dir in _pdf_folder_map().items():
+        if not root_dir:
+            continue
+        root_real = os.path.realpath(root_dir)
+        if source_real == root_real or source_real.startswith(root_real + os.sep):
+            relative = os.path.relpath(source_real, root_real).replace(os.sep, "/")
+            return folder, relative, Path(source_real).name
+    return "", Path(source_real).name, Path(source_real).name
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _resolve_upload_dest(inbox_dir: str, filename: str, file_bytes: bytes) -> str:
-    """Save file_bytes to inbox and return the dest path.
-    If a file with the same name already exists, reuse it as-is (no duplicate)."""
-    safe_name = Path(filename).name
-    dest = os.path.join(inbox_dir, safe_name)
-    if not os.path.exists(dest):
-        with open(dest, "wb") as f:
-            f.write(file_bytes)
-    return dest
-
-
 def _run_verification(pdf_path: str, result, logs: list[str]) -> None:
     if not _config.get("verify_enabled", True):
         return
@@ -338,133 +347,25 @@ def _list_jobs(limit: int = 50) -> list[dict]:
             "period","output_path","error","log"]
     return [dict(zip(cols, r)) for r in rows]
 
-
-# ── Endpoint handlers (called by bridge/server.py router) ───────────────────
-def handle_upload(request_body: bytes, content_type: str) -> tuple[int, dict]:
-    """
-    POST /pdf/upload
-    Saves uploaded PDF to inbox dir, auto-detects bank, creates job.
-    Returns job_id for subsequent /pdf/process call.
-    """
-    # Parse multipart — minimal implementation without external deps
-    try:
-        file_bytes, filename, password = _parse_multipart(request_body, content_type)
-    except Exception as e:
-        return 400, {"error": f"Multipart parse failed: {e}"}
-
-    if not file_bytes:
-        return 400, {"error": "No file field in request"}
-
-    # Save to inbox
-    inbox_dir = _config.get("pdf_inbox_dir", "data/pdf_inbox")
-    os.makedirs(inbox_dir, exist_ok=True)
-    safe_name = Path(filename).name  # strip any path components
-    dest = _resolve_upload_dest(inbox_dir, safe_name, file_bytes)
-
-    # Auto-detect bank/type
-    bank, stmt_type = "Unknown", "unknown"
-    try:
-        from parsers.router import detect_bank_and_type
-        bank, stmt_type = detect_bank_and_type(dest)
-    except Exception as e:
-        log.warning(f"Could not detect bank/type for {safe_name}: {e}")
-
-    job_id = str(uuid.uuid4())[:8]
-    job = {
-        "job_id": job_id,
-        "created_at": _utc_now_iso(),
-        "status": "pending",
-        "source_path": dest,
-        "bank": bank,
-        "stmt_type": stmt_type,
-        "period": "",
-        "output_path": "",
-        "error": "",
-        "log": "",
-    }
-    _upsert_job(job)
-
-    # If password provided at upload time, queue processing immediately.
-    if password:
-        _queue_job(job_id, password)
-        job = _get_job(job_id)
-
-    return 200, {
-        "job_id": job_id,
-        "filename": safe_name,
-        "bank": bank,
-        "stmt_type": stmt_type,
-        "status": job["status"],
-    }
-
-
-def handle_process(body: dict) -> tuple[int, dict]:
-    """
-    POST /pdf/process  {"job_id": "abc123", "password": "secret"}
-                    OR {"attachment_id": "opaque", "password": "secret"}
-    Triggers processing of an already-uploaded job or a scanned attachment.
-    """
-    password = body.get("password", "")
-
-    attachment_id = body.get("attachment_id", "")
-    if attachment_id:
-        file_path = _get_attachment_path(attachment_id)
-        if not file_path:
-            return 404, {"error": "attachment not found or scan expired; re-scan and try again"}
-        job_id = str(uuid.uuid4())
-        job = {
-            "job_id": job_id,
-            "created_at": _utc_now_iso(),
-            "status": "pending",
-            "source_path": file_path,
-            "bank": "", "stmt_type": "", "period": "",
-            "output_path": "", "error": "", "log": "",
-        }
-        _upsert_job(job)
-        _queue_job(job_id, password)
-        job = _get_job(job_id)
-        return 200, {"job_id": job_id, "status": job["status"], "error": job.get("error", "")}
-
-    job_id = body.get("job_id", "")
-    if not job_id:
-        return 400, {"error": "job_id or attachment_id required"}
-
-    job = _get_job(job_id)
-    if not job:
-        return 404, {"error": "job not found"}
-    if job["status"] == "done":
-        return 200, {"job_id": job_id, "status": "done", "output_path": job["output_path"]}
-
-    _queue_job(job_id, password)
-    job = _get_job(job_id)
-    return 200, {"job_id": job_id, "status": job["status"], "error": job.get("error", "")}
-
-
 def handle_process_file(body: dict) -> tuple[int, dict]:
     """
-    POST /pdf/process-file  {"folder": "pdf_inbox", "filename": "foo.pdf", "password": ""}
+    POST /pdf/process-file  {"folder": "pdf_inbox", "relative_path": "foo.pdf", "password": ""}
     Resolves the file from the configured inbox/unlocked directories — no upload needed.
     Queues the job for background execution; returns {job_id, status}.
     """
-    folder   = body.get("folder", "").strip()
-    filename = body.get("filename", "").strip()
+    folder = body.get("folder", "").strip()
+    relative_path = str(body.get("relative_path") or body.get("filename") or "").strip()
     password = body.get("password", "")
 
-    if not filename:
-        return 400, {"error": "filename is required"}
-
-    # Resolve the directory from config
-    folder_map = {
-        "pdf_inbox":    _config.get("pdf_inbox_dir", ""),
-        "pdf_unlocked": _config.get("pdf_unlocked_dir", ""),
-    }
-    if folder not in folder_map or not folder_map[folder]:
-        return 400, {"error": f"Unknown or unconfigured folder '{folder}'. Use pdf_inbox or pdf_unlocked."}
-
-    file_path = os.path.join(folder_map[folder], os.path.basename(filename))
+    if not relative_path:
+        return 400, {"error": "relative_path is required"}
+    try:
+        _, file_path = _resolve_pdf_relative_path(folder, relative_path)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
     if not os.path.isfile(file_path):
-        return 404, {"error": f"File not found: {folder}/{filename}"}
-    if not filename.lower().endswith(".pdf"):
+        return 404, {"error": f"File not found: {folder}/{relative_path}"}
+    if not relative_path.lower().endswith(".pdf"):
         return 400, {"error": "Only .pdf files are supported"}
 
     # Auto-detect bank/type
@@ -473,7 +374,7 @@ def handle_process_file(body: dict) -> tuple[int, dict]:
         from parsers.router import detect_bank_and_type
         bank, stmt_type = detect_bank_and_type(file_path)
     except Exception as e:
-        log.warning("Could not detect bank/type for %s: %s", filename, e)
+        log.warning("Could not detect bank/type for %s: %s", relative_path, e)
 
     job_id = str(uuid.uuid4())[:8]
     job = {
@@ -493,7 +394,8 @@ def handle_process_file(body: dict) -> tuple[int, dict]:
     job = _get_job(job_id)
     return 200, {
         "job_id":   job_id,
-        "filename": filename,
+        "filename": Path(file_path).name,
+        "relative_path": relative_path,
         "folder":   folder,
         "status":   job["status"],
         "error":    job.get("error", ""),
@@ -509,29 +411,7 @@ def handle_status(job_id: str) -> tuple[int, dict]:
         k: job[k]
         for k in ("job_id", "created_at", "status", "bank", "stmt_type", "period", "error", "log")
     }
-    if job["status"] == "done":
-        result["download_url"] = f"/pdf/download/{job_id}"
     return 200, result
-
-
-def handle_download(job_id: str) -> tuple[int, bytes, str]:
-    """GET /pdf/download/<job_id> — returns (status, bytes, filename)"""
-    job = _get_job(job_id)
-    if not job:
-        return 404, b'{"error":"not found"}', "application/json"
-    if job["status"] != "done" or not job["output_path"]:
-        return 400, b'{"error":"not ready"}', "application/json"
-    output_path = os.path.realpath(job["output_path"])
-    output_dir = _config.get("xls_output_dir", "output/xls")
-    allowed_dir = os.path.realpath(output_dir)
-    if output_path != allowed_dir and not output_path.startswith(allowed_dir + os.sep):
-        return 403, b'{"error":"access denied"}', "application/json"
-    if not os.path.exists(output_path):
-        return 404, b'{"error":"file missing"}', "application/json"
-    with open(output_path, "rb") as f:
-        data = f.read()
-    filename = Path(output_path).name
-    return 200, data, filename
 
 
 def handle_jobs(limit: int = 50) -> tuple[int, dict]:
@@ -540,6 +420,7 @@ def handle_jobs(limit: int = 50) -> tuple[int, dict]:
     # Don't expose full paths
     safe = []
     for j in jobs:
+        folder, relative_path, filename = _describe_pdf_source(j["source_path"] or "")
         safe.append({
             "job_id": j["job_id"],
             "created_at": j["created_at"],
@@ -547,39 +428,12 @@ def handle_jobs(limit: int = 50) -> tuple[int, dict]:
             "bank": j["bank"],
             "stmt_type": j["stmt_type"],
             "period": j["period"],
-            "folder": Path(j["source_path"] or "").parent.name,
-            "filename": Path(j["source_path"] or "").name,
+            "folder": folder,
+            "filename": filename,
+            "relative_path": relative_path,
             "error": j["error"],
         })
     return 200, {"jobs": safe}
-
-
-def handle_attachments() -> tuple[int, dict]:
-    """GET /pdf/attachments — list auto-detected bank PDFs from Mail.app"""
-    try:
-        from bridge.attachment_scanner import AttachmentScanner
-        scanner = AttachmentScanner(
-            mail_root="~/Library/Mail",
-            seen_db_path=_config.get("attachment_seen_db", "data/seen_attachments.db"),
-        )
-        pending = scanner.scan(lookback_days=_config.get("attachment_lookback_days", 60))
-        # Rebuild the opaque-ID map on every scan so stale IDs expire naturally.
-        attachment_paths: dict[str, str] = {}
-        result = []
-        for a in pending:
-            aid = str(uuid.uuid4())
-            attachment_paths[aid] = a.file_path
-            result.append({
-                "attachment_id": aid,
-                "filename": a.filename,
-                "bank": a.bank_name,
-                "received": a.received_date,
-                "size_kb": round(a.size_bytes / 1024, 1),
-            })
-        _replace_attachment_paths(attachment_paths)
-        return 200, {"attachments": result}
-    except Exception as e:
-        return 500, {"error": str(e)}
 
 
 # ── Job runner ────────────────────────────────────────────────────────────────
@@ -1433,55 +1287,3 @@ def _upsert_investment_holdings(result, logs: list):
 
     except Exception as exc:
         logs.append(f"Investment-holdings upsert warning: {exc}")
-
-
-def _get_bank_password(bank_name: str) -> str:
-    """Load bank PDF password from secrets/banks.toml."""
-    try:
-        import tomllib
-        secrets_path = _config.get("bank_passwords_file", "secrets/banks.toml")
-        with open(secrets_path, "rb") as f:
-            secrets = tomllib.load(f)
-        # Normalize bank name to a TOML key: "Maybank" → "maybank"
-        key = bank_name.lower().replace(" ", "_")
-        return secrets.get("passwords", {}).get(key, "")
-    except Exception as e:
-        log.warning(f"Could not load bank password for {bank_name}: {e}")
-        return ""
-
-
-# ── Multipart parser (no external deps) ──────────────────────────────────────
-def _parse_multipart(body: bytes, content_type: str) -> tuple[bytes, str, str]:
-    """
-    Minimal multipart/form-data parser.
-    Returns (file_bytes, filename, password).
-    """
-    import re as _re
-    boundary_match = _re.search(r"boundary=([^\s;]+)", content_type)
-    if not boundary_match:
-        raise ValueError("No boundary in Content-Type")
-    boundary = ("--" + boundary_match.group(1)).encode()
-
-    file_bytes = b""
-    filename = "upload.pdf"
-    password = ""
-
-    parts = body.split(boundary)
-    for part in parts:
-        if b"Content-Disposition" not in part:
-            continue
-        header, _, content = part.partition(b"\r\n\r\n")
-        content = content.rstrip(b"\r\n--")
-        header_str = header.decode("utf-8", errors="replace")
-
-        name_match = _re.search(r'name="([^"]+)"', header_str)
-        fname_match = _re.search(r'filename="([^"]+)"', header_str)
-        field_name = name_match.group(1) if name_match else ""
-
-        if field_name == "file" and fname_match:
-            filename = fname_match.group(1)
-            file_bytes = content
-        elif field_name == "password":
-            password = content.decode("utf-8", errors="replace").strip()
-
-    return file_bytes, filename, password
