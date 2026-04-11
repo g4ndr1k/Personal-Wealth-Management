@@ -14,7 +14,8 @@ const { setLayoutMode } = useLayout()
     </div>
 
     <div class="desktop-sidebar__nav">
-      <RouterLink to="/" class="desktop-sidebar__link">📊 <span>Flows</span></RouterLink>
+      <RouterLink to="/" class="desktop-sidebar__link">📊 <span>Dashboard</span></RouterLink>
+      <RouterLink to="/flows" class="desktop-sidebar__link">📈 <span>Flows</span></RouterLink>
       <RouterLink to="/wealth" class="desktop-sidebar__link">💰 <span>Wealth</span></RouterLink>
       <RouterLink to="/holdings" class="desktop-sidebar__link">🗂️ <span>Assets</span></RouterLink>
       <RouterLink to="/transactions" class="desktop-sidebar__link">🧾 <span>Transactions</span></RouterLink>

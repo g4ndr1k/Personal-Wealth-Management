@@ -205,13 +205,13 @@ The system alerts on:
   - `finance/Dockerfile` — `python:3.12-slim` image; installs google-auth, fastapi, uvicorn[standard], rapidfuzz, openpyxl; copies `pwa/dist/` for production static serving
   - `finance/requirements.txt` — Python dependencies: `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `rapidfuzz`, `fastapi`, `uvicorn[standard]`
 - Stage 2 Vue 3 PWA (`pwa/`) — see §29
-  - `pwa/src/views/Dashboard.vue` — month/owner navigation, summary cards, **spending by group** rollup with category chips, Chart.js 12-month trend, owner split table
+  - `pwa/src/views/Dashboard.vue` — restored Flows view: month/owner navigation, summary cards, **spending by group** rollup with category chips, Chart.js 12-month trend, owner split table
   - `pwa/src/views/GroupDrilldown.vue` — Level 1 drill-down: group → category list with amounts, tx counts, mini bar chart
   - `pwa/src/views/CategoryDrilldown.vue` — Level 2 drill-down: category → transaction list with inline edit (merchant, category, alias, notes, apply-to-similar); breadcrumb back to group
   - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), mobile expandable detail rows, desktop sortable table + detail panel
   - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback
   - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
-  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support
+  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support, and persisted dashboard month-range controls
   - `pwa/src/composables/useLayout.js` — responsive layout detection + persisted manual `Desktop View` override
   - `pwa/src/components/` + `pwa/src/layouts/` — extracted shell pieces for mobile header/nav, desktop sidebar, desktop transactions table, and desktop review workspace
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month, reviewCount badge
@@ -224,11 +224,12 @@ The system alerts on:
   - `bridge/gold_price.py` — fetches IDR price per gram of gold via the fawazahmed0 XAU/IDR API (same free no-key API as `bridge/fx_rate.py`; works for historical dates). Converts troy-ounce price to per-gram: `xau_idr / 31.1035`. Returns `None` on failure.
   - `scripts/seed_gold_holdings.py` — one-time (and repeatable) seeder for 14 Antam Logam Mulia gold bars in three weight classes (100 gr × 5, 50 gr × 5, 25 gr × 4). Fetches end-of-month XAU/IDR spot prices for every month from 2026-01 to today, inserts 3 `holdings` rows per month (`asset_class="gold"`, `institution="Physical"`), stores certificate numbers in `notes`. Supports `--dry-run`, `--owner`, `--from YYYY-MM`, `--db` flags. Re-running refreshes prices (ON CONFLICT DO UPDATE).
 - Stage 3 Vue 3 PWA additions (`pwa/`) — see §37
+  - `pwa/src/views/MainDashboard.vue` — root landing page (`/`): total net worth hero, 30-day change, wealth-over-time chart, asset-allocation donut, and cash-flow summary, all filtered by a user-selected month range (hard floor: Jan 2026)
   - `pwa/src/views/Wealth.vue` — net worth dashboard: arrow month navigation, hero net-worth card with MoM change, asset-group breakdown bars with sub-category chips, month-over-month movement card, AI explanation panel, Chart.js trend, "Refresh Snapshot" button, FAB to Assets
   - `pwa/src/views/Holdings.vue` — asset manager: group filter tabs (All/Cash/Investments/Real Estate/Physical), snapshot date picker, per-item delete, FAB → bottom-sheet modal with 2-mode entry form (Balance / Holding), "Save Snapshot" button; ↺ inline refresh button in month-nav bar
   - `pwa/src/api/client.js` — extended with 13 new wealth API calls + `del()` helper
-  - `pwa/src/router/index.js` — 2 new routes: `/wealth`, `/holdings`
-  - `pwa/src/App.vue` — shell switcher between mobile and desktop layouts; route-aware title; 6-tab mobile nav and desktop sidebar
+  - `pwa/src/router/index.js` — root dashboard at `/`, restored Flows view at `/flows`, plus `/wealth` and `/holdings`
+  - `pwa/src/App.vue` — shell switcher between mobile and desktop layouts; route-aware title; mobile bottom nav and desktop sidebar expose Dashboard, Flows, Wealth, Assets, Transactions, Review, and Settings/More
 
 ### Present but NOT integrated
 
@@ -424,14 +425,14 @@ agentic-ai/
 │       ├── main.js
 │       ├── App.vue               # Shell switcher: mobile shell vs desktop shell
 │       ├── style.css             # CSS variables, cards, buttons, forms, toast, desktop shell rules
-│       ├── router/index.js       # 9 routes: /, /wealth, /holdings, /transactions, /review, /foreign, /settings, /group-drilldown, /category-drilldown
+│       ├── router/index.js       # 10 routes: /, /flows, /wealth, /holdings, /transactions, /review, /foreign, /settings, /group-drilldown, /category-drilldown
 │       ├── api/client.js         # fetch wrapper for all 25 /api/* endpoints + del() helper
-│       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month, reviewCount
+│       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month, reviewCount, dashboard month range
 │       ├── composables/
 │       │   └── useLayout.js      # Breakpoint detection + persisted Desktop View override
 │       ├── components/
 │       │   ├── AppHeader.vue         # Route-aware mobile header + Desktop View toggle
-│       │   ├── BottomNav.vue         # 6-tab mobile nav
+│       │   ├── BottomNav.vue         # Mobile nav: Dashboard, Flows, Wealth, Assets, Txns, Review, More
 │       │   ├── DesktopSidebar.vue    # Desktop navigation + Auto Layout button
 │       │   ├── TransactionTable.vue  # Desktop transactions table
 │       │   └── ReviewWorkspace.vue   # Desktop review queue two-pane workspace
@@ -439,7 +440,8 @@ agentic-ai/
 │       │   ├── MobileShell.vue       # Mobile chrome wrapper
 │       │   └── DesktopShell.vue      # Sidebar + full-width desktop content
 │       └── views/
-│           ├── Dashboard.vue         # Month nav, summary cards, spending-by-group, Chart.js trend, owner table
+│           ├── MainDashboard.vue     # Root dashboard: net worth hero, wealth/allocation/cash-flow charts, range-aware
+│           ├── Dashboard.vue         # Restored Flows view: month nav, summary cards, spending-by-group, trend chart
 │           ├── Wealth.vue            # Net worth dashboard: arrow month nav, hero card, movement card, AI explanation, trend chart
 │           ├── Holdings.vue          # Asset manager: group tabs, snapshot date, FAB → 2-mode entry form (Balance/Holding)
 │           ├── GroupDrilldown.vue    # Level 1 drill-down: group → categories (amounts, tx count, mini bars)
@@ -447,7 +449,7 @@ agentic-ai/
 │           ├── Transactions.vue      # Mobile expandable list + desktop table/detail workspace
 │           ├── ReviewQueue.vue       # Mobile inline form + desktop review workspace + toast
 │           ├── ForeignSpend.vue      # Grouped by currency, per-currency subtotals
-│           └── Settings.vue          # Sync, Import, pipeline controls, health status, grouped PDF workspace with subfolder support
+│           └── Settings.vue          # Sync, Import, pipeline controls, health status, dashboard range selector, grouped PDF workspace
 ├── config/
 │   └── settings.toml             # All runtime configuration (Stage 1 + Stage 2 sections)
 ├── data/                         # Runtime SQLite DBs (gitignored)
@@ -1140,7 +1142,7 @@ npm run build --prefix pwa
 docker compose up -d --build finance-api
 ```
 
-If the browser still shows old UI after redeploy, clear the site data or unregister the service worker because the PWA may still be serving cached assets.
+If the browser still shows old UI after redeploy, clear the site data or unregister the service worker because the PWA may still be serving cached assets. The current app also registers the service worker with an immediate update flow so newly deployed bundles should replace stale UI more aggressively after refresh.
 
 ### Stop
 
@@ -2332,7 +2334,7 @@ Stage 2 adds a personal finance dashboard on top of the existing PDF parsing pip
 | Google Sheets source of truth | ✅ Live | All enriched transaction data; user edits freely on phone or desktop |
 | SQLite read cache | ✅ Built | `data/finance.db` — atomic sync via `finance.sync`; 415 unique transactions on first run |
 | FastAPI backend | ✅ Built | Core finance API plus `/api/pdf/*` and `/api/wealth/*`; monthly/annual summaries, review actions, AI explanations; serves PWA at `/` |
-| Vue 3 PWA | ✅ Built | Responsive shell with mobile and desktop layouts: Flows, Transactions, Review, Foreign Spend, Settings, Wealth, Holdings |
+| Vue 3 PWA | ✅ Built | Responsive shell with mobile and desktop layouts: Dashboard, Flows, Transactions, Review, Foreign Spend, Settings, Wealth, Holdings |
 | Docker service | ✅ Built | `finance-api` service in `docker-compose.yml`; port 8090; healthcheck configured |
 
 ### What Stage 2 does NOT do (deferred)
@@ -3077,17 +3079,18 @@ AI narrative (via Ollama `gemma4:e4b`) runs after the deterministic summary and 
 
 | Route | View | Key features |
 |---|---|---|
-| `/` | Dashboard / Flows | Month/year navigation clamped to Jan 2026+, owner toggle, summary cards, spending-by-group rollup, trend explanation panel, Chart.js monthly trend, owner split table |
+| `/` | Main Dashboard | Wealth-management landing page: total net worth hero, 30-day change, wealth-over-time chart, asset-allocation donut, and cash-flow summary. All dashboard widgets respect the Settings month range and never show data before Jan 2026. |
+| `/flows` | Flows | Original flows view: month/year navigation clamped to Jan 2026+, owner toggle, summary cards, spending-by-group rollup, trend explanation panel, Chart.js monthly trend, owner split table |
 | `/transactions` | Transactions | Year/month/owner/category/search filters; paginated list (50/page); mobile expandable detail rows; desktop sortable table with separate detail/editor pane |
 | `/review` | Review Queue | Mobile accordion review flow plus desktop two-pane workspace; alias form writes via `POST /api/alias`; removes affected rows locally and decrements badge |
 | `/foreign` | Foreign Spend | Year/month/owner filters; transactions grouped by `original_currency`; per-group subtotal row; summary cards (unique currencies, total IDR equivalent) |
-| `/settings` | Settings | API health, sync/import actions, pipeline run/status card, grouped local PDF workspace, hash-retained status, and recursive subfolder-aware PDF controls |
+| `/settings` | Settings | API health, sync/import actions, pipeline run/status card, grouped local PDF workspace, hash-retained status, recursive subfolder-aware PDF controls, and dashboard month-range selection |
 | `/group-drilldown` | Group Drilldown | Group → categories breakdown for the selected month |
 | `/category-drilldown` | Category Drilldown | Category → transactions with inline edit flow |
 | `/wealth` | Wealth | Net worth dashboard, MoM movement, AI explanation panel, trend chart, snapshot refresh |
 | `/holdings` | Holdings / Assets | Holdings manager, month navigation, group tabs, edit/delete flows, snapshot generation |
 
-**Navigation and layout:** the PWA now has both a mobile shell and a desktop shell. Mobile keeps the dark navy top bar plus 6-tab bottom nav. Desktop switches to a sidebar layout with wider content areas, desktop transaction/review workspaces, and a manual `Desktop View` toggle persisted in local storage.
+**Navigation and layout:** the PWA now has both a mobile shell and a desktop shell. Mobile keeps the dark navy top bar plus a bottom nav exposing Dashboard, Flows, Wealth, Assets, Transactions, Review, and More. Desktop switches to a sidebar layout with wider content areas, the same primary destinations, desktop transaction/review workspaces, and a manual `Desktop View` toggle persisted in local storage.
 
 **IDR formatting:** PWA views render full Rupiah amounts such as `Rp 92,600,000` using comma thousand separators (`en-US` style). Negative values do not show a leading minus sign; income remains green (`#22c55e`), expense red (`#ef4444`).
 

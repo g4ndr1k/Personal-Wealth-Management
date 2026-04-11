@@ -8,6 +8,10 @@ const store = useFinanceStore()
   <nav class="bottom-nav">
     <RouterLink to="/" class="nav-item">
       <span class="nav-icon">📊</span>
+      <span class="nav-label">Dashboard</span>
+    </RouterLink>
+    <RouterLink to="/flows" class="nav-item">
+      <span class="nav-icon">📈</span>
       <span class="nav-label">Flows</span>
     </RouterLink>
     <RouterLink to="/wealth" class="nav-item">

@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import MainDashboard      from '../views/MainDashboard.vue'
 import Dashboard          from '../views/Dashboard.vue'
 import Transactions       from '../views/Transactions.vue'
 import ReviewQueue        from '../views/ReviewQueue.vue'
@@ -12,7 +13,8 @@ import Holdings           from '../views/Holdings.vue'
 export default createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/',                    component: Dashboard,         meta: { title: 'Flows' } },
+    { path: '/',                    component: MainDashboard,     meta: { title: 'Dashboard' } },
+    { path: '/flows',               component: Dashboard,         meta: { title: 'Flows' } },
     { path: '/wealth',              component: Wealth,            meta: { title: 'Wealth' } },
     { path: '/holdings',            component: Holdings,          meta: { title: 'Assets' } },
     { path: '/transactions',        component: Transactions,      meta: { title: 'Txns' } },

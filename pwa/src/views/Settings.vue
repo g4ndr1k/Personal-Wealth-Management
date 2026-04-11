@@ -3,6 +3,50 @@
     <div class="section-hd">⚙️ Settings</div>
     <div class="settings-grid">
 
+    <div class="setting-card">
+      <div class="setting-title">📊 Dashboard Range</div>
+      <div class="setting-desc">
+        Choose which months appear on the main dashboard. Months before Jan 2026 are always hidden.
+      </div>
+      <div class="setting-row setting-row-range">
+        <div class="range-field">
+          <label class="range-label">Start Month</label>
+          <select
+            class="range-select"
+            :value="store.dashboardStartMonth"
+            @change="store.setDashboardRange($event.target.value, store.dashboardEndMonth)"
+          >
+            <option
+              v-for="option in store.dashboardMonthOptions.filter(option => option.value <= store.dashboardEndMonth)"
+              :key="`start-${option.value}`"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
+        <div class="range-field">
+          <label class="range-label">End Month</label>
+          <select
+            class="range-select"
+            :value="store.dashboardEndMonth"
+            @change="store.setDashboardRange(store.dashboardStartMonth, $event.target.value)"
+          >
+            <option
+              v-for="option in store.dashboardMonthOptions.filter(option => option.value >= store.dashboardStartMonth)"
+              :key="`end-${option.value}`"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-desc" style="margin-top:10px">
+        Active range: <strong>{{ store.dashboardRangeLabel }}</strong>
+      </div>
+    </div>
+
     <!-- Health status -->
     <div class="setting-card">
       <div class="setting-title">📡 API Status</div>
@@ -910,6 +954,43 @@ onMounted(async () => {
 .pipeline-grid {
   display: grid;
   gap: 12px;
+}
+
+.setting-row-range {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.range-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.range-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.range-select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+}
+
+@media (max-width: 640px) {
+  .setting-row-range {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Visual greyed-out look for non-Mac (disabled button already prevents clicks) */
