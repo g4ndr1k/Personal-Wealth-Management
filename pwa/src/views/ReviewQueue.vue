@@ -95,6 +95,7 @@
                 <span v-if="saving"><span class="spinner" style="width:12px;height:12px;border-width:2px"></span></span>
                 <span v-else>💾 Save</span>
               </button>
+              <button class="btn btn-ghost" :disabled="saving" @click="ignoreItem(selectedItem)">🚫 Ignore</button>
               <button class="btn btn-ghost" @click="expandedHash = null">Cancel</button>
             </div>
           </div>
@@ -170,6 +171,7 @@
                   <span v-if="saving"><span class="spinner" style="width:12px;height:12px;border-width:2px"></span></span>
                   <span v-else>💾 Save</span>
                 </button>
+                <button class="btn btn-ghost" :disabled="saving" @click="ignoreItem(item)">🚫 Ignore</button>
                 <button class="btn btn-ghost" @click="expandedHash = null">Cancel</button>
               </div>
             </div>
@@ -290,6 +292,30 @@ async function save(item) {
 
     const n = result.updated_count ?? removed
     showToast(`✅ Saved! Updated ${n} row${n !== 1 ? 's' : ''}`)
+  } catch (e) {
+    showToast(`❌ Error: ${e.message}`)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function ignoreItem(item) {
+  saving.value = true
+  try {
+    const similar = items.value.filter(x => x.raw_description === item.raw_description)
+    await Promise.all(similar.map(tx =>
+      api.patchCategory(tx.hash, {
+        category: 'Ignored',
+        notes: 'Ignored by user from review queue',
+        update_alias: false,
+      })
+    ))
+
+    const removed = similar.length || 1
+    items.value = items.value.filter(x => x.raw_description !== item.raw_description)
+    expandedHash.value = null
+    store.decrementReviewCount(removed)
+    showToast(`🚫 Ignored ${removed} row${removed !== 1 ? 's' : ''}`)
   } catch (e) {
     showToast(`❌ Error: ${e.message}`)
   } finally {

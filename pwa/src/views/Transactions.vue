@@ -336,7 +336,7 @@ async function load() {
     transactions.value = res.transactions || []
     totalCount.value = res.total_count || 0
 
-    const excludeCats = new Set(['Transfer', 'Adjustment'])
+    const excludeCats = new Set(['Transfer', 'Adjustment', 'Ignored'])
     let inc = 0
     let exp = 0
     for (const tx of transactions.value) {

@@ -248,10 +248,10 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
         SELECT
             owner,
             SUM(CASE WHEN amount > 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                       THEN amount ELSE 0 END) AS income,
             SUM(CASE WHEN amount < 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                       THEN amount ELSE 0 END) AS expense,
             COUNT(*) AS tx_count
         FROM transactions
@@ -266,10 +266,10 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
         """
         SELECT
             SUM(CASE WHEN amount > 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                       THEN amount ELSE 0 END) AS income,
             SUM(CASE WHEN amount < 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                       THEN amount ELSE 0 END) AS expense,
             COUNT(*) AS tx_count
         FROM transactions
@@ -290,7 +290,7 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
     total_income = totals["income"] or 0.0
     total_expense = totals["expense"] or 0.0
 
-    transfer_cats = {"Transfer", "Adjustment"}
+    transfer_cats = {"Transfer", "Adjustment", "Ignored"}
     by_category = []
     for r in cat_rows:
         amt = r["total_amount"] or 0.0
@@ -364,7 +364,7 @@ def _monthly_flow_delta_rows(curr: dict, prev: dict) -> list[dict]:
 
 
 def _monthly_flow_category_deltas(curr: dict, prev: dict) -> list[dict]:
-    excluded = {"Transfer", "Adjustment", "Uncategorised"}
+    excluded = {"Transfer", "Adjustment", "Ignored", "Uncategorised"}
     curr_map = {
         row["category"]: abs(row["amount"])
         for row in curr["by_category"]
@@ -402,7 +402,7 @@ def _monthly_flow_explanation_fallback(curr: dict, prev: dict) -> dict:
     top_spend_up = next((row for row in category_deltas if row["delta"] > 0), None)
     top_spend_down = next((row for row in category_deltas if row["delta"] < 0), None)
     current_spending = sorted(
-        [row for row in curr["by_category"] if row["amount"] < 0 and row["category"] not in {"Transfer", "Adjustment"}],
+        [row for row in curr["by_category"] if row["amount"] < 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored"}],
         key=lambda row: abs(row["amount"]),
         reverse=True,
     )
@@ -555,7 +555,7 @@ def _fetch_monthly_label_amounts(
         WHERE strftime('%Y', date) = ?
           AND strftime('%m', date) = ?
           AND amount {comparator} 0
-          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
         GROUP BY label
         HAVING ABS(total_amount) >= 0.5
         ORDER BY total_amount DESC, label
@@ -607,12 +607,12 @@ def _build_monthly_flow_question_context(conn: sqlite3.Connection, year: int, mo
     income_categories_curr = [
         {"label": row["category"], "amount": float(row["amount"] or 0)}
         for row in curr["by_category"]
-        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Uncategorised"}
+        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Uncategorised"}
     ]
     income_categories_prev = [
         {"label": row["category"], "amount": float(row["amount"] or 0)}
         for row in prev["by_category"]
-        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Uncategorised"}
+        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Uncategorised"}
     ]
     income_category_deltas = _diff_monthly_amount_maps(income_categories_curr, income_categories_prev)
 
@@ -1362,10 +1362,10 @@ def get_annual_summary(year: int):
             SELECT
                 CAST(strftime('%m', date) AS INTEGER) AS month,
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                           THEN amount ELSE 0 END)      AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                           THEN amount ELSE 0 END)      AS expense,
                 COUNT(*)                               AS tx_count
             FROM transactions
@@ -1380,10 +1380,10 @@ def get_annual_summary(year: int):
             """
             SELECT
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions
@@ -1708,13 +1708,14 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
     2. Updates the transaction in SQLite immediately (no sync needed)
     3. Returns the updated transaction row
     """
-    # Validate category exists
+    # Validate category exists (special-case system category: Ignored)
     with _db() as conn:
-        cat_row = conn.execute(
-            "SELECT category FROM categories WHERE category = ?", (req.category,)
-        ).fetchone()
-        if not cat_row:
-            raise HTTPException(400, f"Unknown category: {req.category!r}")
+        if req.category != "Ignored":
+            cat_row = conn.execute(
+                "SELECT category FROM categories WHERE category = ?", (req.category,)
+            ).fetchone()
+            if not cat_row:
+                raise HTTPException(400, f"Unknown category: {req.category!r}")
 
         # Verify transaction exists
         tx = conn.execute(
