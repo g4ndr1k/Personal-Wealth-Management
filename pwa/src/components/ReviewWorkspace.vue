@@ -78,6 +78,7 @@ function fmt(n) {
   border: none;
   border-bottom: 1px solid var(--border);
   background: transparent;
+  color: var(--text);
   cursor: pointer;
   transition: background 0.1s;
 }
@@ -94,6 +95,7 @@ function fmt(n) {
 .rw-item-desc {
   font-weight: 700;
   font-size: 13px;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -117,5 +119,6 @@ function fmt(n) {
   box-shadow: var(--shadow);
   padding: 20px;
   min-height: 300px;
+  color: var(--text);
 }
 </style>

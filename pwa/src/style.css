@@ -386,7 +386,7 @@ html, body {
 }
 .review-header:hover { background: var(--bg); }
 .review-meta { flex: 1; min-width: 0; }
-.review-desc { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.review-desc { font-weight: 700; font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .review-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .review-amount { font-weight: 800; font-size: 14px; white-space: nowrap; }
 .review-body { padding: 0 12px 12px; }
@@ -421,7 +421,7 @@ html, body {
   cursor: pointer; color: var(--text);
   text-transform: none; letter-spacing: 0;
 }
-.check-label { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.check-label { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: var(--text); }
 .form-actions { display: flex; gap: 8px; margin-top: 12px; }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
@@ -769,6 +769,11 @@ html, body {
 .desktop-shell .fx-group-hd {
   background: rgba(15,23,38,0.92);
   border-color: rgba(141,162,191,0.18);
+  color: var(--text);
+}
+
+.desktop-shell .form-input option {
+  background: #111b2c;
   color: var(--text);
 }
 

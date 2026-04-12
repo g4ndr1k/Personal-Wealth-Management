@@ -38,7 +38,7 @@
         @select="toggle"
       >
         <div v-if="selectedItem">
-          <div class="review-desc" style="font-weight:700;font-size:15px;margin-bottom:12px">
+          <div class="review-desc" style="font-weight:700;font-size:15px;margin-bottom:12px;color:var(--text)">
             {{ selectedItem.raw_description }}
           </div>
           <div class="review-sub" style="margin-bottom:14px">
