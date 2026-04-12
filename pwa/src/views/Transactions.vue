@@ -2,7 +2,7 @@
   <div>
     <div class="section-hd">📋 Transactions</div>
 
-    <div class="filter-bar">
+    <div class="filter-bar" :class="{ 'filters-muted': aiFilters }">
       <select v-model="filters.year" @change="onFilterChange">
         <option value="">All Years</option>
         <option v-for="y in store.years" :key="y" :value="y">{{ y }}</option>
@@ -12,7 +12,7 @@
         <option v-for="m in 12" :key="m" :value="m">{{ monthName(m) }}</option>
       </select>
     </div>
-    <div class="filter-bar">
+    <div class="filter-bar" :class="{ 'filters-muted': aiFilters }">
       <select v-model="filters.owner" @change="onFilterChange">
         <option value="">All Owners</option>
         <option v-for="o in store.owners" :key="o" :value="o">{{ o }}</option>
@@ -22,13 +22,46 @@
         <option v-for="c in store.categoryNames" :key="c" :value="c">{{ c }}</option>
       </select>
     </div>
-    <div class="filter-bar">
+    <div class="filter-bar" :class="{ 'filters-muted': aiFilters }">
       <input
         v-model="filters.q"
         placeholder="🔍 Search description or merchant…"
         @input="debouncedSearch"
       />
     </div>
+
+    <!-- AI AMA box -->
+    <div class="filter-bar ai-ama-bar">
+      <div class="ai-ama-wrap" :class="{ loading: aiLoading }">
+        <span class="ai-ama-label">✨ AI</span>
+        <input
+          v-model="aiQuery"
+          class="ai-ama-input"
+          placeholder="Ask anything: '3 biggest spendings in Jan 2026'…"
+          :disabled="aiLoading"
+          @keydown.enter.prevent="askAi"
+        />
+        <span v-if="aiLoading" class="spinner spinner-sm"></span>
+      </div>
+    </div>
+
+    <!-- Exclude toggle — shown only while AI mode is active -->
+    <div v-if="aiFilters" class="filter-bar" style="padding-top:0">
+      <label class="ai-exclude-toggle">
+        <input type="checkbox" v-model="aiExcludeSystem" @change="load" />
+        <span>Exclude transfers &amp; adjustments</span>
+      </label>
+    </div>
+
+    <!-- AI mode active banner -->
+    <div v-if="aiFilters" class="ai-active-banner">
+      <span class="ai-active-icon">✨</span>
+      <span class="ai-active-query">"{{ aiLabel }}"</span>
+      <button class="btn btn-ghost btn-sm ai-clear-btn" @click="clearAi">✕ Clear</button>
+    </div>
+
+    <!-- AI error toast -->
+    <div v-if="aiError" class="alert alert-error ai-error-toast">{{ aiError }}</div>
 
     <div v-if="loading" class="loading"><div class="spinner"></div> Loading…</div>
 
@@ -209,7 +242,7 @@
         </div>
       </template>
 
-      <div v-if="totalCount > pageSize" class="pagination">
+      <div v-if="totalCount > pageSize && !aiFilters" class="pagination">
         <button class="btn btn-ghost btn-sm" :disabled="page === 0" @click="goPage(page - 1)">‹ Prev</button>
         <span>{{ page + 1 }} / {{ totalPages }}</span>
         <button class="btn btn-ghost btn-sm" :disabled="page >= totalPages - 1" @click="goPage(page + 1)">Next ›</button>
@@ -225,6 +258,7 @@ import { useFinanceStore } from '../stores/finance.js'
 import { formatIDR } from '../utils/currency.js'
 import { useLayout } from '../composables/useLayout.js'
 import TransactionTable from '../components/TransactionTable.vue'
+
 
 const store = useFinanceStore()
 const { isDesktop } = useLayout()
@@ -251,6 +285,13 @@ const editCategory = ref('')
 const saving = ref(false)
 const saveError = ref(null)
 const saveSuccess = ref(false)
+
+const aiQuery         = ref('')
+const aiLoading       = ref(false)
+const aiError         = ref(null)
+const aiFilters       = ref(null)
+const aiLabel         = ref('')
+const aiExcludeSystem = ref(true)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
 const selectedTx = computed(() =>
@@ -322,19 +363,46 @@ async function load() {
   error.value = null
   expandedHash.value = null
   try {
-    const params = {
-      limit: pageSize,
-      offset: page.value * pageSize,
+    const params = {}
+    if (aiFilters.value) {
+      const af = aiFilters.value
+      if (af.year)     params.year     = af.year
+      if (af.month)    params.month    = af.month
+      if (af.owner)    params.owner    = af.owner
+      if (af.category) params.category = af.category
+      if (af.q)        params.q        = af.q
+      params.limit  = 500
+      params.offset = 0
+    } else {
+      params.limit  = pageSize
+      params.offset = page.value * pageSize
+      if (filters.value.year)     params.year     = filters.value.year
+      if (filters.value.month)    params.month    = filters.value.month
+      if (filters.value.owner)    params.owner    = filters.value.owner
+      if (filters.value.category) params.category = filters.value.category
+      if (filters.value.q)        params.q        = filters.value.q
     }
-    if (filters.value.year) params.year = filters.value.year
-    if (filters.value.month) params.month = filters.value.month
-    if (filters.value.owner) params.owner = filters.value.owner
-    if (filters.value.category) params.category = filters.value.category
-    if (filters.value.q) params.q = filters.value.q
 
     const res = await api.transactions(params)
-    transactions.value = res.transactions || []
-    totalCount.value = res.total_count || 0
+    let txs = res.transactions || []
+
+    if (aiFilters.value) {
+      const { sort, limit, income_only, expense_only } = aiFilters.value
+      const SYSTEM_CATS = new Set(['Transfer', 'Adjustment', 'Ignored', 'Cash Withdrawal'])
+      if (aiExcludeSystem.value) txs = txs.filter(tx => !SYSTEM_CATS.has(tx.category))
+      if (income_only) txs = txs.filter(tx => tx.amount >= 0 && !SYSTEM_CATS.has(tx.category))
+      if (expense_only) txs = txs.filter(tx => tx.amount < 0 && !SYSTEM_CATS.has(tx.category))
+      if (sort === 'amount_asc')  txs.sort((a, b) => a.amount - b.amount)
+      if (sort === 'amount_desc') txs.sort((a, b) => b.amount - a.amount)
+      if (sort === 'date_asc')    txs.sort((a, b) => a.date.localeCompare(b.date))
+      if (sort === 'date_desc')   txs.sort((a, b) => b.date.localeCompare(a.date))
+      if (limit > 0) txs = txs.slice(0, limit)
+      totalCount.value = txs.length
+    } else {
+      totalCount.value = res.total_count || 0
+    }
+
+    transactions.value = txs
 
     const excludeCats = new Set(['Transfer', 'Adjustment', 'Ignored'])
     let inc = 0
@@ -350,6 +418,34 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+async function askAi() {
+  const query = aiQuery.value.trim()
+  if (!query || aiLoading.value) return
+  aiLoading.value = true
+  aiError.value = null
+  try {
+    const res = await api.aiQuery(query)
+    aiFilters.value = res
+    aiLabel.value = query
+    page.value = 0
+    load()
+  } catch (e) {
+    console.error('[AI AMA]', e)
+    aiError.value = e?.message || 'Could not parse request'
+    setTimeout(() => { aiError.value = null }, 6000)
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+function clearAi() {
+  aiFilters.value = null
+  aiLabel.value = ''
+  aiQuery.value = ''
+  aiError.value = null
+  load()
 }
 
 onMounted(load)
@@ -428,5 +524,89 @@ onMounted(load)
 .dt-detail-body .cat-editor {
   margin-top: 16px;
   border-radius: var(--radius-sm);
+}
+
+/* ── AI AMA ──────────────────────────────────────────────────────────────── */
+.ai-ama-bar { margin-top: 2px; }
+
+.ai-ama-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  padding: 0 10px;
+  border: 1.5px solid var(--primary);
+  border-radius: 8px;
+  background: var(--card);
+  transition: opacity 0.15s;
+}
+.ai-ama-wrap.loading { opacity: 0.6; }
+
+.ai-ama-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary);
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
+.ai-ama-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 8px 0;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+  min-width: 0;
+}
+.ai-ama-input::placeholder { color: var(--text-muted); }
+.ai-ama-input:disabled { cursor: not-allowed; }
+
+.ai-active-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 4px;
+  padding: 6px 12px;
+  background: linear-gradient(90deg, rgba(30,58,95,0.07), rgba(30,58,95,0.03));
+  border-left: 3px solid var(--primary);
+  border-radius: 0 8px 8px 0;
+  font-size: 13px;
+}
+.ai-active-icon { font-size: 14px; flex-shrink: 0; }
+.ai-active-query { flex: 1; font-style: italic; color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-clear-btn { margin-left: auto; flex-shrink: 0; }
+
+.ai-error-toast {
+  margin: 4px 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.filters-muted {
+  opacity: 0.4;
+  pointer-events: none;
+  user-select: none;
+}
+
+.ai-exclude-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 10px;
+  user-select: none;
+}
+.ai-exclude-toggle input { cursor: pointer; accent-color: var(--primary); }
+
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  flex-shrink: 0;
 }
 </style>

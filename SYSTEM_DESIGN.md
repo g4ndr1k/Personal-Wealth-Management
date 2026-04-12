@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.9.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
+**Version:** 3.10.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-04-11
+**Last validated against:** checked-in codebase 2026-04-12
 
 ---
 
@@ -197,10 +197,10 @@ The system alerts on:
 - Stage 2 finance package (`finance/`) — see §25–33
   - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation (`date|amount|description|institution|owner|account`), XLSX date parser with calendar validation and DD-MM-YY century heuristic
-  - `finance/sheets.py` — Google Sheets API v4 client: service-account auth (preferred) with personal OAuth fallback; read/write transactions, aliases, categories, currency hints, import log; 401-triggered service cache invalidation
+  - `finance/sheets.py` — Google Sheets API v4 client: service-account auth (preferred) with personal OAuth fallback; read/write transactions, aliases, categories, currency hints, import log; 401-triggered service cache invalidation; Category Overrides tab expanded to 10 columns (A:J) — includes txn_date, txn_amount, txn_description, txn_institution, txn_account, txn_owner alongside hash/category/notes/updated_at
   - `finance/categorizer.py` — account-aware categorization engine: exact alias → contains alias (specificity-sorted by length) → regex → Ollama AI suggestion (retry wrapper) → review queue flag, plus cross-account internal transfer matching; filtered rules (owner/account) are sorted before generic rules so they always win on conflict
   - `finance/importer.py` — CLI entry point: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, batch-appends to Google Sheets; `--dry-run`, `--overwrite`, `--file`, `-v`
-  - `finance/ollama_utils.py` — shared Ollama retry wrapper with exponential backoff (1s, 2s, 4s); retries on `URLError`, `TimeoutError`, `ConnectionError`; used by categorizer and API AI endpoints
+  - `finance/ollama_utils.py` — shared Ollama retry wrapper with exponential backoff (1s, 2s, 4s); retries on `URLError`, `TimeoutError`, `ConnectionError`; optional `format_json=True` forces Ollama JSON-mode output (`"format": "json"` in payload); used by categorizer and API AI endpoints
   - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 22 default categories and 18 currency codes
   - `finance/db.py` — SQLite schema (5 tables + 6 indexes), WAL mode with `busy_timeout=5000`, `open_db()` connection helper, schema version tracking, 90-day sync_log retention; `merchant_aliases` table includes `owner_filter`/`account_filter` with UNIQUE constraint
   - `finance/sync.py` — Sheets → SQLite sync engine: atomic DELETE + INSERT per table, hash deduplication, auto-rehash with account field (writes updated hashes back to Sheets), connection leak-safe (try/finally), sync_log, `--status` CLI flag; reads Merchant Aliases columns A:G (including `owner_filter`/`account_filter`)
@@ -212,7 +212,7 @@ The system alerts on:
   - `pwa/src/views/Dashboard.vue` — restored Flows view: month/owner navigation, summary cards, **spending by group** rollup with category chips, Chart.js 12-month trend, owner split table
   - `pwa/src/views/GroupDrilldown.vue` — Level 1 drill-down: group → category list with amounts, tx counts, mini bar chart
   - `pwa/src/views/CategoryDrilldown.vue` — Level 2 drill-down: category → transaction list with inline edit (merchant, category, alias, notes, apply-to-similar); breadcrumb back to group
-  - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), mobile expandable detail rows, desktop sortable table + detail panel
+  - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), mobile expandable detail rows, desktop sortable table + detail panel; AI AMA input box (natural-language query → `POST /api/ai/query` → applies filters client-side); AI mode active banner with clear button; standard filter bars muted while AI mode active
   - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback
   - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
   - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support, and persisted dashboard month-range controls
@@ -2479,7 +2479,7 @@ docker compose up -d
 
 This document now describes the current architecture and operating model rather than maintaining a long in-file changelog. Historical implementation details that no longer affect how the system is built, deployed, or operated have been removed.
 
-### What is current as of 2026-04-11
+### What is current as of 2026-04-12
 
 - Stage 1 mail alerting, bridge services, PDF processing, and launchd automation are fully operational.
 - Stage 2 finance import, categorisation, FastAPI backend, and Vue PWA are fully operational.
@@ -2489,6 +2489,7 @@ This document now describes the current architecture and operating model rather 
 - **Cloud LLM providers removed** — Anthropic, OpenAI, and Gemini fallbacks disabled; classifier is Ollama-primary.
 - **Stable TCC identity** — Bridge runs via `/Applications/AgenticAI.app` bundle; FDA grant survives Homebrew Python upgrades.
 - **v3.9.0 audit hardening (2026-04-11)** — 43 findings addressed across 13 files: new `finance/ollama_utils.py` retry wrapper, hash formula extended with `account` field, auto-rehash during sync with write-back to Sheets, SQLite `busy_timeout`, schema versioning, 90-day sync_log retention, merchant_aliases UNIQUE constraint, CORS hardened with explicit methods/headers, in-memory rate limiting (60 req/min), Transfer/Adjustment filtered from category breakdowns, liabilities delta sign correction, carry-forward zeros stale market values, contains-match specificity sorting, bridge input validation + Content-Type enforcement, error sanitization, reactive `currentMonthKey` in PWA store, dashboard month upper-bound validation.
+- **v3.10.0 AI AMA + overrides enrichment (2026-04-12)** — `POST /api/ai/query` endpoint translates natural-language queries to transaction filter criteria via Ollama JSON-mode; Transactions view adds AI AMA input bar with active-mode banner and clear flow; Category Overrides tab widened to 10 columns — override rows now record full transaction context (date, amount, description, institution, account, owner); `ollama_generate()` gains `format_json` flag; Ollama finance timeout raised to 60 s; GoPay Top-Up alias added.
 - `SYSTEM_DESIGN.md` should be treated as the current-state reference document; commit-level history belongs in git, not here.
 
 ## 25. Stage 2 Overview & Scope
@@ -3139,6 +3140,7 @@ Six tabs (created once during setup):
 | Import new transactions | `finance.importer` | Transactions tab (append) |
 | Auto-categorize (Layers 1–2) | `finance.importer` | `merchant` + `category` columns in-place |
 | Confirm review queue item | PWA → FastAPI → Sheets API | `merchant` + `category` columns in-place; new row in Merchant Aliases tab |
+| Manual category override | PWA → `PATCH /api/transaction/{hash}/category` → Sheets API | Upserts row in Category Overrides tab (10 cols A:J: hash, category, notes, updated_at, txn_date, txn_amount, txn_description, txn_institution, txn_account, txn_owner) |
 | User manual edits | User directly in Google Sheets app | Any cell |
 | SQLite sync | SQLite **never** writes to Sheets | — |
 
@@ -3226,6 +3228,7 @@ Port `8090` (from `[fastapi]` in `settings.toml`). All read endpoints query SQLi
 | `POST` | `/api/import` | — | Body: `{ dry_run, overwrite }` → run importer; auto-syncs on success |
 | `POST` | `/api/pipeline/run` | — | Proxy to bridge manual pipeline trigger |
 | `GET` | `/api/pipeline/status` | — | Proxy to bridge pipeline status |
+| `POST` | `/api/ai/query` | — | Body: `{ query }` → Ollama JSON-mode → returns filter object `{ year?, month?, owner?, category?, q?, sort?, limit?, income_only?, expense_only? }`; client applies filters + sorting |
 
 Additional operational endpoints are also live for PDF processing (`/api/pdf/*`) and wealth management (`/api/wealth/*`), covered later in this document.
 
@@ -3266,7 +3269,7 @@ AI narrative (via Ollama `gemma4:e4b`) runs after the deterministic summary and 
 |---|---|---|
 | `/` | Main Dashboard | Wealth-management landing page: total net worth hero, 30-day change, wealth-over-time chart, asset-allocation donut, and cash-flow summary. All dashboard widgets respect the Settings month range and never show data before Jan 2026. |
 | `/flows` | Flows | Original flows view: month/year navigation clamped to Jan 2026+, owner toggle, summary cards, spending-by-group rollup, trend explanation panel, Chart.js monthly trend, owner split table |
-| `/transactions` | Transactions | Year/month/owner/category/search filters; paginated list (50/page); mobile expandable detail rows; desktop sortable table with separate detail/editor pane |
+| `/transactions` | Transactions | Year/month/owner/category/search filters; paginated list (50/page); mobile expandable detail rows; desktop sortable table with separate detail/editor pane; AI AMA bar for natural-language queries (active mode disables pagination and mutes standard filters) |
 | `/review` | Review Queue | Mobile accordion review flow plus desktop two-pane workspace; alias form writes via `POST /api/alias`; duplicate / zero-sum rows can be marked `Ignored` via category override (no alias write); removes affected rows locally and decrements badge |
 | `/foreign` | Foreign Spend | Year/month/owner filters; transactions grouped by `original_currency`; per-group subtotal row; summary cards (unique currencies, total IDR equivalent) |
 | `/settings` | Settings | API health, sync/import actions, pipeline run/status card, grouped local PDF workspace, hash-retained status, recursive subfolder-aware PDF controls, and dashboard month-range selection |
@@ -3839,7 +3842,7 @@ Monthly wealth management cycle (1st–5th of each month):
 - [x] `finance/ollama_utils.py` (NEW) — shared Ollama retry wrapper with exponential backoff (1s, 2s, 4s) on URLError/TimeoutError/ConnectionError
 - [x] `finance/db.py` — removed redundant `idx_tx_hash` index; added `idx_tx_institution` and `idx_tx_account` indexes; added `PRAGMA busy_timeout=5000`; added `UNIQUE(alias, owner_filter, account_filter)` on merchant_aliases; added `schema_version` table for migration tracking; added 90-day sync_log retention; documented REAL precision and FK pragma
 - [x] `finance/models.py` — hash formula extended with `account` field (`date|amount|description|institution|owner|account`); added calendar validation to `parse_xlsx_date()` (rejects Feb 30 etc.); DD-MM-YY century heuristic: `yr >= 80` → "19" prefix
-- [x] `finance/sheets.py` — `_invalidate_service()` method clears cached Google credentials on 401; `_get()`, `_append()`, `_update()` auto-retry after invalidation; `write_override()` TOCTOU race documented
+- [x] `finance/sheets.py` — `_invalidate_service()` method clears cached Google credentials on 401; `_get()`, `_append()`, `_update()` auto-retry after invalidation; `write_override()` TOCTOU race documented; Category Overrides tab widened to 10 columns (A:J) — records hash, category, notes, updated_at + txn_date, txn_amount, txn_description, txn_institution, txn_account, txn_owner
 - [x] `finance/sync.py` — all Sheets reads moved before `open_db()` (prevents connection leak); DB operations wrapped in `try/finally`; auto-rehash: recomputes hashes with account field, batch-writes updated hashes to Sheets column M; applies category overrides and legacy migration during sync
 - [x] `finance/api.py` — CORS hardened (explicit `allow_methods`/`allow_headers`, no wildcards); in-memory rate limiter (60 req/min per endpoint, HTTP 429); Transfer/Adjustment filtered from `by_category`; liabilities delta negated in `_wealth_delta_rows()` (debt decrease = positive contributor); carry-forward zeros `market_value`/`market_value_idr`/`unrealised_pnl_idr`; 4 Ollama call sites refactored to use retry wrapper; `_row()` type guard; `_get_sheets()` consistency fix; docstring corrected; sanitized error messages in exception handlers; LLM prompt inputs truncated
 - [x] `finance/categorizer.py` — contains-match sort includes alias string length (longer = more specific); `_ollama_suggest()` uses `ollama_utils.ollama_generate()` retry wrapper
@@ -3850,6 +3853,17 @@ Monthly wealth management cycle (1st–5th of each month):
 - [x] `pwa/src/stores/finance.js` — `currentMonthKey` converted to reactive computed property; `normalizeDashboardMonth()` checks `value <= currentMonthKey`
 - [x] `pwa/src/api/client.js` — `console.warn` when `VITE_FINANCE_API_KEY` is not set
 
+### AI AMA + overrides enrichment — v3.10.0 (2026-04-12)
+
+- [x] `finance/api.py` — `POST /api/ai/query`: translates natural-language queries to a filter object using Ollama JSON-mode; builds live category context from SQLite so the model knows the exact income/system/expense taxonomy; returns `{ year?, month?, owner?, category?, q?, sort?, limit?, income_only?, expense_only? }` which the PWA applies client-side
+- [x] `finance/api.py` — `PATCH /api/transaction/{hash}/category` passes full transaction context (date, amount, raw_description, institution, account, owner) to `write_override()` so each override row is self-documenting in Sheets
+- [x] `finance/sheets.py` — `write_override()` accepts six new keyword args (`txn_date`, `txn_amount`, `txn_description`, `txn_institution`, `txn_account`, `txn_owner`); Category Overrides tab widened from 4 (A:D) to 10 (A:J) columns; `read_overrides()`, `ensure_overrides_tab()`, and all range refs updated accordingly
+- [x] `finance/ollama_utils.py` — `ollama_generate()` gains `format_json: bool = False`; when `True`, adds `"format": "json"` to the Ollama payload for guaranteed JSON output (supported by gemma4 and most modern models)
+- [x] `config/settings.toml` — `[ollama_finance] timeout_seconds` raised from 5 → 60 to accommodate slower AI-query calls
+- [x] `finance/_seed_aliases.py` — added `("GOPAY TOPUP", "GoPay Top-Up", "Household")` to permanent alias list
+- [x] `pwa/src/api/client.js` — `aiQuery(query)` helper: `POST /ai/query`
+- [x] `pwa/src/views/Transactions.vue` — AI AMA input bar (✨ AI label + enter-to-submit); AI active banner with query label and ✕ Clear button; standard filter bars gain `filters-muted` class while AI mode is active; pagination suppressed during AI mode; client-side `income_only`/`expense_only`/`sort`/`limit` post-processing applied to the 500-row fetch; exclude-system toggle (transfers & adjustments)
+
 ### Deferred to future phase
 
 - [ ] Google Sheets pull-back sync (Sheets → SQLite for holdings, balances, liabilities)
@@ -3857,4 +3871,4 @@ Monthly wealth management cycle (1st–5th of each month):
 - [ ] Multi-owner net worth split (currently shown per-item via `owner` field; aggregated snapshot is household total)
 
 
-*Guide last updated 2026-04-11 · v3.9.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*
+*Guide last updated 2026-04-12 · v3.10.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*

@@ -173,4 +173,4 @@ cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 # Docker overrides this via OLLAMA_FINANCE_HOST env var (host.docker.internal).
 host            = "http://localhost:11434"
 model           = "gemma4:e4b"
-timeout_seconds = 5
+timeout_seconds = 60

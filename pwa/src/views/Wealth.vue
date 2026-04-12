@@ -151,13 +151,17 @@
       <!-- 12-month trend chart -->
       <div class="card">
         <div class="card-title">Net Worth Trend</div>
-        <div v-if="explanationLoading" class="trend-explanation-loading">
-          <span class="spinner spinner-sm"></span>
-          Generating trend analysis…
-        </div>
-        <div v-else-if="explanation?.available" class="trend-explanation">
-          <div v-if="explanationPeriodLabel" class="trend-explanation-period">{{ explanationPeriodLabel }}</div>
-          <div class="trend-explanation-headline">{{ explanation.headline }}</div>
+        <div v-if="explanation?.available" class="trend-explanation">
+          <div class="trend-explanation-topline">
+            <div>
+              <div v-if="explanationPeriodLabel" class="trend-explanation-period">{{ explanationPeriodLabel }}</div>
+              <div class="trend-explanation-headline">{{ explanation.headline }}</div>
+            </div>
+            <div v-if="explanationLoading" class="trend-explanation-status">
+              <span class="spinner spinner-sm"></span>
+              Refining with AI…
+            </div>
+          </div>
           <div class="trend-explanation-summary">{{ explanation.summary }}</div>
           <div v-if="explanation.drivers?.length" class="trend-driver-list">
             <div v-for="driver in explanation.drivers" :key="driver" class="trend-driver-item">
@@ -202,6 +206,10 @@
               </div>
             </div>
           </div>
+        </div>
+        <div v-else-if="explanationLoading" class="trend-explanation-loading">
+          <span class="spinner spinner-sm"></span>
+          Generating trend analysis…
         </div>
         <div v-else-if="explanationEmptyMessage" class="trend-explanation trend-explanation-empty">
           <div class="trend-explanation-headline">{{ explanationEmptyTitle }}</div>
@@ -826,6 +834,23 @@ onUnmounted(destroyChart)
   border: 1px solid rgba(30, 58, 95, 0.1);
   border-radius: 14px;
   background: linear-gradient(180deg, rgba(30, 58, 95, 0.04), rgba(30, 58, 95, 0.02));
+}
+.trend-explanation-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.trend-explanation-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding-top: 2px;
 }
 .trend-explanation-period {
   margin-bottom: 6px;

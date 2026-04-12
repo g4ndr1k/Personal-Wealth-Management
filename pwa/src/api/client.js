@@ -116,6 +116,9 @@ export const api = {
   //   pdfLocalWorkspace()          GET  /api/pdf/local-workspace
   //   processLocalPdf(folder, path) POST /api/pdf/process-local
   //   pdfLocalStatus(jobId)        GET  /api/pdf/local-status/:id
+  // ── AI AMA ─────────────────────────────────────────────────────────────────
+  aiQuery:           (query)               => post('/ai/query', { query }),
+
   pdfLocalFiles:     ()                    => get('/pdf/local-files'),
   pdfLocalWorkspace: ()                    => get('/pdf/local-workspace'),
   processLocalPdf:   (folder, relativePath) => post('/pdf/process-local', { folder, relative_path: relativePath }),

@@ -20,6 +20,7 @@ def ollama_generate(
     num_predict: int = 300,
     max_retries: int = 3,
     backoff_base: float = 2.0,
+    format_json: bool = False,
 ) -> dict:
     """POST to Ollama ``/api/generate`` with exponential-backoff retry.
 
@@ -27,10 +28,14 @@ def ollama_generate(
     ``TimeoutError``, ``ConnectionError``).  Non-transient failures
     (bad JSON, unexpected status) are raised immediately.
 
+    Set ``format_json=True`` to pass ``"format": "json"`` in the payload,
+    which forces Ollama to return valid JSON (supported by gemma4 and most
+    modern models).
+
     Returns the parsed JSON response dict.
     """
     url = f"{host.rstrip('/')}/api/generate"
-    payload = json.dumps({
+    body: dict = {
         "model": model,
         "prompt": prompt,
         "stream": False,
@@ -38,7 +43,10 @@ def ollama_generate(
             "temperature": temperature,
             "num_predict": num_predict,
         },
-    }).encode()
+    }
+    if format_json:
+        body["format"] = "json"
+    payload = json.dumps(body).encode()
 
     req = urllib.request.Request(
         url, data=payload, headers={"Content-Type": "application/json"}

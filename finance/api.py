@@ -1725,7 +1725,15 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
             raise HTTPException(404, f"Transaction not found: {tx_hash}")
 
     # Write override to Google Sheets (persistent, survives re-sync)
-    _get_sheets().write_override(tx_hash, req.category, req.notes)
+    _get_sheets().write_override(
+        tx_hash, req.category, req.notes,
+        txn_date=tx["date"] or "",
+        txn_amount=str(tx["amount"]) if tx["amount"] else "",
+        txn_description=tx["raw_description"] or "",
+        txn_institution=tx["institution"] or "",
+        txn_account=tx["account"] or "",
+        txn_owner=tx["owner"] or "",
+    )
 
     # Update SQLite immediately so the dashboard reflects it now
     also_updated = 0
@@ -2980,6 +2988,114 @@ async def pipeline_run():
         raise HTTPException(502, f"Bridge run error {e.code}: {body}")
     except Exception as e:
         raise HTTPException(502, f"Bridge unreachable: {e}")
+
+
+# ── AI AMA — natural-language transaction filter ──────────────────────────────
+
+_AI_QUERY_SYSTEM = """You are a transaction filter assistant for a personal finance app. Given a natural language query, return ONLY a JSON object.
+
+RULES:
+- The `category` field already assigned to each transaction is the authoritative source — rely on it, not the amount or description.
+- A transfer from a family member is NOT income, even if the amount is large.
+- "Opening Balance", "Saldo Awal", and similar entries are Adjustments — NOT income.
+- SYSTEM categories (Transfer, Adjustment, Cash Withdrawal, etc.) are NEVER income and NEVER expenses. The DATA CONTEXT block below lists them exactly.
+- income_only: true is MANDATORY whenever the user asks about income, earnings, salary, or money received.
+- expense_only: true is MANDATORY whenever the user asks about spending, expenses, or costs.
+- "biggest income" → sort: "amount_desc", income_only: true
+- "biggest spending" or "biggest expense" → sort: "amount_asc", expense_only: true
+- Owners in this dataset: "Gandrik" or "Helen"
+
+Return a JSON object with any applicable fields:
+- year: integer (e.g. 2026)
+- month: integer 1-12
+- owner: "Gandrik" or "Helen"
+- category: exact category name (only if targeting one specific category)
+- q: string (text search in description/merchant)
+- sort: "amount_asc" (biggest expenses first) | "amount_desc" (highest income first) | "date_asc" | "date_desc"
+- limit: integer (max rows to return)
+- income_only: true — keep ONLY income categories; exclude all SYSTEM categories
+- expense_only: true — keep ONLY expense categories; exclude all SYSTEM categories
+
+Return only valid JSON with no explanation."""
+
+
+class _AiQueryRequest(BaseModel):
+    query: str
+
+
+@app.post("/api/ai/query", dependencies=[Depends(require_api_key)])
+async def ai_query(body: _AiQueryRequest):
+    """Translate a natural-language query into transaction filter criteria via Ollama."""
+    import asyncio as _asyncio_local
+    import json as _json
+    from finance.ollama_utils import ollama_generate
+
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(400, "query must not be empty")
+
+    # Build live category context from SQLite so the model knows exact taxonomy
+    _INCOME_SUBCATS = {
+        "Earned Income", "Investment Income", "Interest Income",
+        "Capital Gains", "Passive Income", "Other Income",
+    }
+    try:
+        with get_conn(_db_path) as conn:
+            cat_rows = conn.execute(
+                "SELECT category, category_group, subcategory FROM categories ORDER BY sort_order"
+            ).fetchall()
+        income_cats, system_cats, expense_cats = [], [], []
+        for row in cat_rows:
+            cat = row["category"]
+            sub = row["subcategory"] or ""
+            grp = row["category_group"] or ""
+            if sub in _INCOME_SUBCATS:
+                income_cats.append(cat)
+            elif grp == "System / Tracking":
+                system_cats.append(cat)
+            else:
+                expense_cats.append(cat)
+        category_context = (
+            "DATA CONTEXT — categories in this database:\n"
+            f"INCOME (set income_only: true): {', '.join(income_cats) or 'Earned Income, Investment Income, Interest Income'}\n"
+            f"SYSTEM — NOT income or expense (always excluded by income_only/expense_only): "
+            f"{', '.join(system_cats) or 'Transfer, Adjustment, Ignored, Cash Withdrawal'}\n"
+            f"EXPENSE (set expense_only: true): {', '.join(expense_cats[:20])}"
+        )
+    except Exception:
+        category_context = ""
+
+    system_block = _AI_QUERY_SYSTEM
+    if category_context:
+        system_block = f"{_AI_QUERY_SYSTEM}\n\n{category_context}"
+
+    prompt = f"<system>\n{system_block}\n</system>\n\nQuery: {query}"
+
+    try:
+        data = await _asyncio_local.to_thread(
+            ollama_generate,
+            _ollama_cfg.host,
+            _ollama_cfg.model,
+            prompt,
+            _ollama_cfg.timeout_seconds,
+            format_json=True,
+            num_predict=150,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Ollama unavailable: {e}")
+
+    raw = data.get("response", "")
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        raise HTTPException(502, f"Ollama returned non-JSON: {raw[:200]}")
+
+    known_keys = {"year", "month", "owner", "category", "q", "sort", "limit", "income_only", "expense_only"}
+    filtered = {k: v for k, v in parsed.items() if k in known_keys and v is not None}
+    if not filtered:
+        raise HTTPException(422, f"No usable filters in response: {raw[:200]}")
+
+    return filtered
 
 
 # ── PWA static files (must be last — mounted after all /api/* routes) ─────────

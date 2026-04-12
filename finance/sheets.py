@@ -44,7 +44,11 @@ IMPORT_LOG_HEADERS = [
     "import_date", "import_file", "rows_added",
     "rows_skipped", "rows_total", "duration_s", "notes",
 ]
-OVERRIDES_HEADERS = ["hash", "category", "notes", "updated_at"]
+OVERRIDES_HEADERS = [
+    "hash", "category", "notes", "updated_at",
+    "txn_date", "txn_amount", "txn_description",
+    "txn_institution", "txn_account", "txn_owner",
+]
 PDF_IMPORT_LOG_HEADERS = [
     "month", "label", "expected", "actual", "status", "files", "last_processed",
 ]
@@ -241,12 +245,12 @@ class SheetsClient:
         """Return {hash: {"category": ..., "notes": ..., "updated_at": ...}}
         from the Category Overrides tab."""
         qtab = f"'{self.cfg.overrides_tab}'"
-        rows = self._get(f"{qtab}!A:D")
+        rows = self._get(f"{qtab}!A:J")
         result: dict[str, dict] = {}
         if len(rows) < 2:
             return result
         for row in rows[1:]:
-            r = list(row) + [""] * (4 - len(row))
+            r = list(row) + [""] * (10 - len(row))
             h = (r[0] or "").strip()
             cat = (r[1] or "").strip()
             if h and cat:
@@ -254,14 +258,36 @@ class SheetsClient:
                     "category":   cat,
                     "notes":      (r[2] or "").strip(),
                     "updated_at": (r[3] or "").strip(),
+                    "txn_date":        (r[4] or "").strip(),
+                    "txn_amount":      (r[5] or "").strip(),
+                    "txn_description": (r[6] or "").strip(),
+                    "txn_institution": (r[7] or "").strip(),
+                    "txn_account":     (r[8] or "").strip(),
+                    "txn_owner":       (r[9] or "").strip(),
                 }
         return result
 
-    def write_override(self, tx_hash: str, category: str, notes: str = ""):
+    def write_override(
+        self,
+        tx_hash: str,
+        category: str,
+        notes: str = "",
+        *,
+        txn_date: str = "",
+        txn_amount: str = "",
+        txn_description: str = "",
+        txn_institution: str = "",
+        txn_account: str = "",
+        txn_owner: str = "",
+    ):
         """Append or update one row in the Category Overrides tab.
 
         If the hash already exists, overwrites that row in-place.
         Otherwise appends a new row.
+
+        Columns A–J: hash, category, notes, updated_at,
+                     txn_date, txn_amount, txn_description,
+                     txn_institution, txn_account, txn_owner.
 
         KNOWN LIMITATION: Read-then-write race condition.  Two concurrent
         requests for the same hash could both see "not found" and both
@@ -271,7 +297,11 @@ class SheetsClient:
         """
         qtab = f"'{self.cfg.overrides_tab}'"
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        new_row = [tx_hash, category, notes, now]
+        new_row = [
+            tx_hash, category, notes, now,
+            txn_date, txn_amount, txn_description,
+            txn_institution, txn_account, txn_owner,
+        ]
 
         # Check if hash already exists so we can overwrite instead of duplicating
         rows = self._get(f"{qtab}!A:A")
@@ -281,14 +311,14 @@ class SheetsClient:
             if row and row[0].strip() == tx_hash:
                 # Overwrite existing row
                 self._update(
-                    f"{qtab}!A{i + 1}:D{i + 1}",
+                    f"{qtab}!A{i + 1}:J{i + 1}",
                     [new_row],
                 )
                 log.info("Override updated: %s → %s", tx_hash[:16], category)
                 return
 
         # Hash not found — append new row
-        self._append(f"{qtab}!A:D", [new_row])
+        self._append(f"{qtab}!A:J", [new_row])
         log.info("Override added: %s → %s", tx_hash[:16], category)
 
     def ensure_overrides_tab(self):
@@ -310,9 +340,9 @@ class SheetsClient:
 
         # Write headers if row 1 is empty
         qtab = f"'{tab}'"
-        existing = self._get(f"{qtab}!A1:D1")
+        existing = self._get(f"{qtab}!A1:J1")
         if not existing or not existing[0]:
-            self._update(f"{qtab}!A1:D1", [OVERRIDES_HEADERS])
+            self._update(f"{qtab}!A1:J1", [OVERRIDES_HEADERS])
             log.info("Wrote headers to %s", tab)
 
     def append_alias(

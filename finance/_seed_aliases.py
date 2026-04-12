@@ -23,6 +23,7 @@ PERMANENT_ALIASES: list[tuple[str, str, str]] = [
     ("ACE HARDWARE",   "ACE Hardware",   "Household"),
     ("INFORMA",        "Informa",        "Household"),
     ("COURTS",         "Courts",         "Household"),
+    ("GOPAY TOPUP",    "GoPay Top-Up",   "Household"),
     # Travel — airlines
     ("CATHAY",         "Cathay Pacific", "Travel"),
     ("GARUDA",         "Garuda Indonesia","Travel"),
