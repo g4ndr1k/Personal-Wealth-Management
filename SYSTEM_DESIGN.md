@@ -218,6 +218,7 @@ The system alerts on:
   - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support, and persisted dashboard month-range controls
   - `pwa/src/composables/useLayout.js` — responsive layout detection + persisted manual desktop override for wide-screen use
   - `pwa/src/components/` + `pwa/src/layouts/` — extracted shell pieces for mobile header/nav, desktop sidebar, desktop transactions table, and desktop review workspace; mobile offline state is indicated by the header status dot turning red instead of showing a blocking banner
+  - `pwa/src/composables/useOfflineSync.js` — connectivity detection via periodic heartbeat (`GET /ping`, 30 s interval, 5 s `AbortController` timeout); catches `TypeError` (ERR_CONNECTION_REFUSED) and `AbortError` (ETIMEDOUT); probes immediately on mount and on tab foreground; browser `offline` event triggers immediate offline transition; `online` event triggers a probe rather than blindly trusting the OS signal; on recovery drains IndexedDB sync queue then calls the `onReconnect` callback
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month (initialized to `dashboardEndMonth` so Flows/Wealth/Assets open on the configured range end, not the current calendar month), reviewCount badge, reactive `currentMonthKey` computed property, dashboard month range with upper-bound validation
   - `pwa/src/api/client.js` — thin `fetch` wrapper for all 25+ API endpoints; successful GETs are persisted to IndexedDB and offline GETs fall back to cached responses; mutation endpoints queue offline writes; `console.warn` when API key is not configured
   - `pwa/vite.config.js` — @vitejs/plugin-vue + vite-plugin-pwa (`injectManifest`) + `/api` proxy to `:8090`
@@ -457,7 +458,8 @@ agentic-ai/
 │       ├── api/client.js         # fetch wrapper for all 25 /api/* endpoints + IndexedDB GET fallback + queued offline mutations
 │       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month (clamped to dashboardEndMonth), reviewCount, reactive dashboard month range
 │       ├── composables/
-│       │   └── useLayout.js      # Breakpoint detection + persisted desktop override
+│       │   ├── useLayout.js      # Breakpoint detection + persisted desktop override
+│       │   └── useOfflineSync.js # Heartbeat-based connectivity: periodic /ping probe, AbortController timeout, drain sync queue on recovery
 │       ├── components/
 │       │   ├── AppHeader.vue         # Route-aware mobile header + sync status pill (red dot when offline)
 │       │   ├── BottomNav.vue         # Mobile nav: Dashboard, Flows, Wealth, Assets, Txns, Review, More
@@ -3952,6 +3954,11 @@ Monthly wealth management cycle (1st–5th of each month):
 - [x] `pwa/src/api/client.js` — `aiQuery(query)` helper: `POST /ai/query`
 - [x] `pwa/src/views/Transactions.vue` — AI AMA input bar (✨ AI label + enter-to-submit); AI active banner with query label and ✕ Clear button; standard filter bars gain `filters-muted` class while AI mode is active; pagination suppressed during AI mode; client-side `income_only`/`expense_only`/`sort`/`limit` post-processing applied to the 500-row fetch; exclude-system toggle (transfers & adjustments)
 
+### Heartbeat connectivity — v3.11.0 (2026-04-14)
+
+- [x] `finance/api.py` — `GET /ping` unauthenticated liveness probe: returns `{"ok": true}` with `Cache-Control: no-store`, no DB access; used exclusively by the PWA heartbeat
+- [x] `pwa/src/composables/useOfflineSync.js` — replaced `navigator.onLine` event-only detection with active heartbeat: 30 s `setInterval` + immediate probe on mount; 5 s `AbortController` timeout handles ETIMEDOUT; `TypeError` catch handles ERR_CONNECTION_REFUSED; `visibilitychange` re-probes on tab foreground (browser throttles intervals in background tabs); browser `offline` event still triggers immediate transition; browser `online` event now verifies reachability via probe before declaring online; guard clauses prevent duplicate state transitions and redundant sync-queue drains
+
 ### Deferred to future phase
 
 - [ ] Google Sheets pull-back sync (Sheets → SQLite for holdings, balances, liabilities)
@@ -3959,4 +3966,4 @@ Monthly wealth management cycle (1st–5th of each month):
 - [ ] Multi-owner net worth split (currently shown per-item via `owner` field; aggregated snapshot is household total)
 
 
-*Guide last updated 2026-04-12 · v3.10.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*
+*Guide last updated 2026-04-14 · v3.11.0 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅*

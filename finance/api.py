@@ -1200,6 +1200,14 @@ class MonthlyFlowQuestionRequest(BaseModel):
     history: list[dict] = []
 
 
+# ── /ping  (unauthenticated liveness probe for PWA heartbeat) ────────────────
+
+@app.get("/ping")
+def ping():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
 # ── /api/health ───────────────────────────────────────────────────────────────
 
 @app.get("/api/health", dependencies=[Depends(require_api_key)])
