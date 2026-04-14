@@ -6,7 +6,7 @@ import { useOfflineSync } from '../composables/useOfflineSync.js'
 
 const store = useFinanceStore()
 const route = useRoute()
-const { isOnline } = useOfflineSync(() => store.bootstrap())
+const { isOnline } = useOfflineSync(() => store.loadHealth({ forceFresh: true }))
 const pageTitle = computed(() => route.meta?.title || 'Personal Finance')
 </script>
 

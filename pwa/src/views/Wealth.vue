@@ -573,7 +573,7 @@ function buildChart() {
 // ── Data loading ──────────────────────────────────────────────────────────────
 async function load() {
   const token = ++loadToken
-  loading.value            = true
+  loading.value            = !snap.value && history.value.length === 0
   explanationLoading.value = true
   error.value              = null
   try {

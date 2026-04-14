@@ -72,9 +72,33 @@
             <div class="sv" style="font-size:13px">{{ store.health.last_sync || 'Never' }}</div>
           </div>
         </div>
-        <button class="btn btn-ghost btn-sm" style="margin-top:12px" @click="store.loadHealth">
+        <button class="btn btn-ghost btn-sm" style="margin-top:12px" @click="store.loadHealth({ forceFresh: true })">
           🔄 Refresh status
         </button>
+      </div>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-title">📱 Mobile Data Cache</div>
+      <div class="setting-desc">
+        iPhone PWA reads cached API data for up to 24 hours. Use this to pull fresh data immediately instead of waiting for the daily refresh window.
+      </div>
+      <button
+        class="btn btn-primary btn-block"
+        :disabled="refreshCacheState.loading"
+        @click="refreshMobileCache"
+      >
+        <span v-if="refreshCacheState.loading"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Refreshing cache…</span>
+        <span v-else>🔄 Refresh Mobile Data Now</span>
+      </button>
+      <div v-if="refreshCacheState.error" class="alert alert-error" style="margin-top:10px">
+        ❌ {{ refreshCacheState.error }}
+      </div>
+      <div v-else-if="refreshCacheState.doneAt" class="result-box">
+        <div class="result-row">
+          <span class="rk">Last manual refresh</span>
+          <span class="rv">{{ refreshCacheState.doneAt }}</span>
+        </div>
       </div>
     </div>
 
@@ -481,6 +505,7 @@ const store = useFinanceStore()
 const syncState   = ref({ loading: false, result: null, error: null })
 const importState = ref({ loading: false, result: null, error: null })
 const importOpts  = ref({ dry_run: false, overwrite: false })
+const refreshCacheState = ref({ loading: false, error: null, doneAt: '' })
 const pipelineState = ref({ loading: false, status: null, error: null })
 const showPdfWorkspace = ref(false)
 
@@ -882,8 +907,8 @@ async function doSync() {
     const res = await api.sync()
     syncState.value.result = res.queued ? { status: 'queued' } : res
     if (!res.queued) {
-      await store.loadHealth()
-      await store.loadCategories()
+      await store.loadHealth({ forceFresh: true })
+      await store.loadCategories({ forceFresh: true })
     }
   } catch (e) {
     syncState.value.error = e.message
@@ -900,7 +925,7 @@ async function doImport() {
       overwrite: importOpts.value.overwrite,
     })
     importState.value.result = res.queued ? { status: 'queued' } : res
-    if (!res.queued && !importOpts.value.dry_run) await store.loadHealth()
+    if (!res.queued && !importOpts.value.dry_run) await store.loadHealth({ forceFresh: true })
   } catch (e) {
     importState.value.error = e.message
   } finally {
@@ -913,9 +938,29 @@ function formatPipelineSummary(result) {
   return `${result.files_ok || 0} ok, ${result.files_failed || 0} failed, ${result.files_skipped || 0} skipped, ${result.import_new_tx || 0} imported`
 }
 
+async function refreshMobileCache() {
+  const previousDoneAt = refreshCacheState.value.doneAt
+  refreshCacheState.value = { loading: true, error: null, doneAt: previousDoneAt }
+  try {
+    await api.refreshReferenceData()
+    await store.bootstrap({ forceFresh: true })
+    refreshCacheState.value = {
+      loading: false,
+      error: null,
+      doneAt: new Date().toLocaleString(),
+    }
+  } catch (e) {
+    refreshCacheState.value = {
+      loading: false,
+      error: e.message,
+      doneAt: previousDoneAt,
+    }
+  }
+}
+
 async function loadPipelineStatus() {
   try {
-    pipelineState.value.status = await api.pipelineStatus()
+    pipelineState.value.status = await api.pipelineStatus({ forceFresh: true })
     pipelineState.value.error = null
   } catch (e) {
     pipelineState.value.error = e.message
@@ -936,7 +981,7 @@ async function runPipeline() {
       return
     }
     await loadPipelineStatus()
-    if (!importOpts.value.dry_run) await store.loadHealth()
+    if (!importOpts.value.dry_run) await store.loadHealth({ forceFresh: true })
   } catch (e) {
     pipelineState.value.error = e.message
   } finally {
@@ -945,7 +990,7 @@ async function runPipeline() {
 }
 
 onMounted(async () => {
-  await store.loadHealth()
+  await store.loadHealth({ forceFresh: true })
   await loadPipelineStatus()
 })
 </script>

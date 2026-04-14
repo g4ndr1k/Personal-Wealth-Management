@@ -1,30 +1,31 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import MainDashboard      from '../views/MainDashboard.vue'
-import Dashboard          from '../views/Dashboard.vue'
-import Transactions       from '../views/Transactions.vue'
-import ReviewQueue        from '../views/ReviewQueue.vue'
-import ForeignSpend       from '../views/ForeignSpend.vue'
-import Settings           from '../views/Settings.vue'
-import CategoryDrilldown  from '../views/CategoryDrilldown.vue'
-import GroupDrilldown     from '../views/GroupDrilldown.vue'
-import Wealth             from '../views/Wealth.vue'
-import Holdings           from '../views/Holdings.vue'
-import AuditCompleteness  from '../views/AuditCompleteness.vue'
+
+const MainDashboard = () => import('../views/MainDashboard.vue')
+const Dashboard = () => import('../views/Dashboard.vue')
+const Transactions = () => import('../views/Transactions.vue')
+const ReviewQueue = () => import('../views/ReviewQueue.vue')
+const ForeignSpend = () => import('../views/ForeignSpend.vue')
+const Settings = () => import('../views/Settings.vue')
+const CategoryDrilldown = () => import('../views/CategoryDrilldown.vue')
+const GroupDrilldown = () => import('../views/GroupDrilldown.vue')
+const Wealth = () => import('../views/Wealth.vue')
+const Holdings = () => import('../views/Holdings.vue')
+const AuditCompleteness = () => import('../views/AuditCompleteness.vue')
 
 export default createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/',                    component: MainDashboard,     meta: { title: 'Dashboard' } },
-    { path: '/flows',               component: Dashboard,         meta: { title: 'Flows' } },
-    { path: '/wealth',              component: Wealth,            meta: { title: 'Wealth' } },
-    { path: '/holdings',            component: Holdings,          meta: { title: 'Assets' } },
-    { path: '/transactions',        component: Transactions,      meta: { title: 'Txns' } },
-    { path: '/review',              component: ReviewQueue,       meta: { title: 'Review' } },
-    { path: '/foreign',             component: ForeignSpend,      meta: { title: 'Foreign Spend' } },
-    { path: '/settings',            component: Settings,           meta: { title: 'More' } },
-    { path: '/audit',              component: AuditCompleteness,  meta: { title: 'Audit' } },
-    { path: '/group-drilldown',     component: GroupDrilldown,    meta: { title: 'Group Detail' } },
-    { path: '/category-drilldown',  component: CategoryDrilldown, meta: { title: 'Category Detail' } },
+    { path: '/', name: 'dashboard', component: MainDashboard, meta: { title: 'Dashboard', keepAlive: true } },
+    { path: '/flows', name: 'flows', component: Dashboard, meta: { title: 'Flows', keepAlive: true } },
+    { path: '/wealth', name: 'wealth', component: Wealth, meta: { title: 'Wealth', keepAlive: true } },
+    { path: '/holdings', name: 'holdings', component: Holdings, meta: { title: 'Assets', keepAlive: true } },
+    { path: '/transactions', name: 'transactions', component: Transactions, meta: { title: 'Txns', keepAlive: true } },
+    { path: '/review', name: 'review', component: ReviewQueue, meta: { title: 'Review', keepAlive: true } },
+    { path: '/foreign', name: 'foreign', component: ForeignSpend, meta: { title: 'Foreign Spend' } },
+    { path: '/settings', name: 'settings', component: Settings, meta: { title: 'More' } },
+    { path: '/audit', name: 'audit', component: AuditCompleteness, meta: { title: 'Audit' } },
+    { path: '/group-drilldown', name: 'group-drilldown', component: GroupDrilldown, meta: { title: 'Group Detail' } },
+    { path: '/category-drilldown', name: 'category-drilldown', component: CategoryDrilldown, meta: { title: 'Category Detail' } },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })

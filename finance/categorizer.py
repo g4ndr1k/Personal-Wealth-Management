@@ -73,6 +73,29 @@ def migrate_category(category: str | None) -> str | None:
     return category
 
 
+def alias_text_tokens(text: str | None) -> tuple[str, ...]:
+    """Tokenize text for alias matching, dropping volatile numeric fragments."""
+    return tuple(re.findall(r"[A-Z]+", (text or "").upper()))
+
+
+def normalize_alias_key(text: str | None) -> str:
+    """Normalized key used for exact alias matching."""
+    return " ".join(alias_text_tokens(text))
+
+
+def alias_tokens_match(needle_tokens: tuple[str, ...], haystack_tokens: tuple[str, ...]) -> bool:
+    """Ordered subsequence match so aliases survive inserted timestamps/codes."""
+    if not needle_tokens:
+        return False
+    pos = 0
+    for token in haystack_tokens:
+        if token == needle_tokens[pos]:
+            pos += 1
+            if pos == len(needle_tokens):
+                return True
+    return False
+
+
 @dataclass
 class CategorizationResult:
     merchant: Optional[str]   # None if not determined
@@ -149,10 +172,10 @@ class Categorizer:
                     log.warning("Invalid regex alias %r: %s", alias, e)
             elif mtype == "contains":
                 self._contains.append(
-                    (alias.upper(), merchant, category, owner_f, account_f)
+                    (alias_text_tokens(alias), merchant, category, owner_f, account_f)
                 )
             else:
-                self._exact.setdefault(alias.upper(), []).append(
+                self._exact.setdefault(normalize_alias_key(alias), []).append(
                     (merchant, category, owner_f, account_f)
                 )
 
@@ -217,9 +240,10 @@ class Categorizer:
         surface these in the PWA review queue for user confirmation.
         """
         desc = raw_description.strip()
+        desc_tokens = alias_text_tokens(desc)
 
         # ── Layer 1: exact match ──────────────────────────────────────────────
-        key = desc.upper()
+        key = normalize_alias_key(desc)
         if key in self._exact:
             for merchant, category, of, af in self._exact[key]:
                 if self._filters_match(of, af, owner, account):
@@ -227,8 +251,8 @@ class Categorizer:
                     return CategorizationResult(merchant, category, layer=1, confidence="auto")
 
         # ── Layer 1b: contains match ─────────────────────────────────────────
-        for substring, merchant, category, of, af in self._contains:
-            if substring in key and self._filters_match(of, af, owner, account):
+        for substring_tokens, merchant, category, of, af in self._contains:
+            if alias_tokens_match(substring_tokens, desc_tokens) and self._filters_match(of, af, owner, account):
                 log.debug("L1b contains: %r → %s / %s", desc, merchant, category)
                 return CategorizationResult(merchant, category, layer=1, confidence="auto")
 

@@ -330,7 +330,7 @@ async function load() {
   try {
     // Silently backfill aliases first to catch rows imported before alias existed
     try { await api.backfillAliases() } catch {}
-    const data = await api.reviewQueue(LIMIT)
+    const data = await api.reviewQueue(LIMIT, { forceFresh: true })
     items.value = data.pending ?? data
     hasMore.value = items.value.length === LIMIT
   } catch (e) {
@@ -343,7 +343,7 @@ async function load() {
 async function loadMore() {
   loadingMore.value = true
   try {
-    const data = await api.reviewQueue(LIMIT * 2)
+    const data = await api.reviewQueue(LIMIT * 2, { forceFresh: true })
     items.value = data.pending ?? data
     hasMore.value = false
   } catch (e) {

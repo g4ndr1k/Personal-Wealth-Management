@@ -429,7 +429,7 @@ function nextMonth() {
 async function load() {
   clampToFlowMinimum()
   const token = ++loadToken
-  loading.value = true
+  loading.value = !summary.value || !yearData.value
   error.value   = null
   trendExplanation.value = null
   trendExplanationLoading.value = true
@@ -813,6 +813,50 @@ onUnmounted(() => { if (trendChart) trendChart.destroy() })
 }
 
 @media (min-width: 1024px) {
+  .trend-explanation {
+    border-color: rgba(148, 163, 184, 0.18);
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(15, 23, 42, 0.86));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+
+  .trend-explanation-headline {
+    color: #f8fafc;
+  }
+
+  .trend-explanation-summary,
+  .trend-driver-item,
+  .trend-qa-answer,
+  .trend-qa-bullet {
+    color: #dbe7f5;
+  }
+
+  .trend-explanation-status,
+  .trend-ai-label,
+  .trend-qa-refs {
+    color: #9fb3c8;
+  }
+
+  .trend-driver-item::before,
+  .trend-qa-bullet::before,
+  .trend-qa-answer-title {
+    color: #5eead4;
+  }
+
+  .trend-ai {
+    border-top-color: rgba(148, 163, 184, 0.16);
+  }
+
+  .trend-suggestion-chip {
+    border-color: rgba(94, 234, 212, 0.22);
+    background: rgba(15, 118, 110, 0.14);
+    color: #ecfeff;
+  }
+
+  .trend-qa-item {
+    border-color: rgba(148, 163, 184, 0.16);
+    background: rgba(255, 255, 255, 0.04);
+  }
+
   .summary-grid {
     grid-template-columns: repeat(4, 1fr);
   }

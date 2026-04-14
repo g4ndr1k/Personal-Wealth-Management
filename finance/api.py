@@ -1174,7 +1174,7 @@ class AliasRequest(BaseModel):
     alias:            str   # raw_description pattern to match (written to Sheets)
     merchant:         str   # canonical merchant name
     category:         str
-    match_type:       str   = "exact"   # "exact" | "regex"
+    match_type:       str   = "exact"   # "exact" | "contains" | "regex"
     apply_to_similar: bool  = True      # also update uncategorised rows with same raw_desc
 
 
@@ -1634,6 +1634,7 @@ def backfill_aliases():
     Returns the number of transactions updated.
     """
     import re as _re
+    from finance.categorizer import alias_text_tokens, alias_tokens_match, normalize_alias_key
 
     # 1. Load aliases from Sheets
     aliases = _get_sheets().read_aliases()
@@ -1658,9 +1659,9 @@ def backfill_aliases():
             except _re.error:
                 pass
         elif mtype == "contains":
-            contains.append((alias_s.upper(), merchant, category))
+            contains.append((alias_text_tokens(alias_s), merchant, category))
         else:
-            exact.setdefault(alias_s.upper(), []).append((merchant, category))
+            exact.setdefault(normalize_alias_key(alias_s), []).append((merchant, category))
 
     # 2. Scan uncategorised transactions and apply matches
     updated = 0
@@ -1674,7 +1675,8 @@ def backfill_aliases():
 
         for r in rows:
             desc = r["raw_description"].strip()
-            key = desc.upper()
+            desc_tokens = alias_text_tokens(desc)
+            key = normalize_alias_key(desc)
             new_merchant = None
             new_category = None
 
@@ -1684,8 +1686,8 @@ def backfill_aliases():
 
             # Layer 1b: contains
             if not new_merchant:
-                for substr, m, c in contains:
-                    if substr in key:
+                for substr_tokens, m, c in contains:
+                    if alias_tokens_match(substr_tokens, desc_tokens):
                         new_merchant, new_category = m, c
                         break
 

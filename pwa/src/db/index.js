@@ -22,10 +22,24 @@ export async function cacheSet(key, value) {
   await conn.put('cache', { key, value, updatedAt: Date.now() })
 }
 
-export async function cacheGet(key) {
+export async function cacheGetEntry(key) {
   const conn = await db
-  const entry = await conn.get('cache', key)
+  return (await conn.get('cache', key)) || null
+}
+
+export async function cacheGet(key) {
+  const entry = await cacheGetEntry(key)
   return entry?.value ?? null
+}
+
+export async function cacheDelete(key) {
+  const conn = await db
+  await conn.delete('cache', key)
+}
+
+export async function cacheClearAll() {
+  const conn = await db
+  await conn.clear('cache')
 }
 
 export async function cacheClear(maxAgeMs = 24 * 60 * 60 * 1000) {

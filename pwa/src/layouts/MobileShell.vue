@@ -7,7 +7,20 @@ import BottomNav from '../components/BottomNav.vue'
   <div class="app">
     <AppHeader />
     <main class="content">
-      <RouterView />
+      <RouterView v-slot="{ Component, route }">
+        <KeepAlive>
+          <component
+            :is="Component"
+            v-if="route.meta?.keepAlive"
+            :key="route.name || route.path"
+          />
+        </KeepAlive>
+        <component
+          :is="Component"
+          v-if="!route.meta?.keepAlive"
+          :key="route.fullPath"
+        />
+      </RouterView>
     </main>
     <BottomNav />
   </div>

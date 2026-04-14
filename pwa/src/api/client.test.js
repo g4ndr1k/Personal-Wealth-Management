@@ -4,12 +4,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const queueMutation = vi.fn()
 const cacheGet = vi.fn()
+const cacheGetEntry = vi.fn()
 const cacheSet = vi.fn()
+const cacheClearAll = vi.fn()
 
 vi.mock('../db/index.js', () => ({
   queueMutation,
   cacheGet,
+  cacheGetEntry,
   cacheSet,
+  cacheClearAll,
 }))
 
 function jsonResponse(payload, init = {}) {
@@ -26,6 +30,7 @@ describe('api client offline GET fallback', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
+    cacheGetEntry.mockResolvedValue(null)
     Object.defineProperty(window.navigator, 'onLine', {
       configurable: true,
       value: true,
@@ -53,5 +58,17 @@ describe('api client offline GET fallback', () => {
 
     expect(result).toEqual(payload)
     expect(cacheSet).toHaveBeenCalledWith('GET:/api/health', payload)
+  })
+
+  it('returns fresh cached GET data without hitting the network', async () => {
+    const payload = { status: 'cached' }
+    cacheGetEntry.mockResolvedValueOnce({ value: payload, updatedAt: Date.now() })
+    global.fetch = vi.fn()
+
+    const { api } = await import('./client.js')
+    const result = await api.health()
+
+    expect(result).toEqual(payload)
+    expect(global.fetch).not.toHaveBeenCalled()
   })
 })

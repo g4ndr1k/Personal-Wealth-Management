@@ -94,9 +94,9 @@ export const useFinanceStore = defineStore('finance', () => {
     return `${lookup.get(dashboardStartMonth.value) || dashboardStartMonth.value} - ${lookup.get(dashboardEndMonth.value) || dashboardEndMonth.value}`
   })
 
-  async function loadCachedResource(cacheKey, fetcher, applyValue) {
+  async function loadCachedResource(cacheKey, fetcher, applyValue, options = {}) {
     try {
-      const fresh = await fetcher()
+      const fresh = await fetcher(options)
       applyValue(fresh)
       await cacheSet(cacheKey, fresh)
       return fresh
@@ -112,42 +112,42 @@ export const useFinanceStore = defineStore('finance', () => {
     }
   }
 
-  async function loadHealth() {
+  async function loadHealth(options = {}) {
     try {
-      await loadCachedResource(CACHE_KEYS.health, () => api.health(), (value) => {
+      await loadCachedResource(CACHE_KEYS.health, (requestOptions) => api.health(requestOptions), (value) => {
         health.value = value
         reviewCount.value = value?.needs_review ?? 0
-      })
+      }, options)
     } catch {
       // no cached fallback available
     }
   }
 
-  async function loadOwners() {
+  async function loadOwners(options = {}) {
     try {
-      await loadCachedResource(CACHE_KEYS.owners, () => api.owners(), (value) => {
+      await loadCachedResource(CACHE_KEYS.owners, (requestOptions) => api.owners(requestOptions), (value) => {
         owners.value = value
-      })
+      }, options)
     } catch {
       // no cached fallback available
     }
   }
 
-  async function loadCategories() {
+  async function loadCategories(options = {}) {
     try {
-      await loadCachedResource(CACHE_KEYS.categories, () => api.categories(), (value) => {
+      await loadCachedResource(CACHE_KEYS.categories, (requestOptions) => api.categories(requestOptions), (value) => {
         categories.value = [...value].sort((a, b) => a.sort_order - b.sort_order)
-      })
+      }, options)
     } catch {
       // no cached fallback available
     }
   }
 
-  async function loadYears() {
+  async function loadYears(options = {}) {
     try {
-      await loadCachedResource(CACHE_KEYS.years, () => api.summaryYears(), (value) => {
+      await loadCachedResource(CACHE_KEYS.years, (requestOptions) => api.summaryYears(requestOptions), (value) => {
         years.value = value
-      })
+      }, options)
     } catch {
       // no cached fallback available
     }
@@ -179,8 +179,8 @@ export const useFinanceStore = defineStore('finance', () => {
     if (value < dashboardStartMonth.value) dashboardStartMonth.value = value
   })
 
-  async function bootstrap() {
-    await Promise.all([loadHealth(), loadOwners(), loadCategories(), loadYears()])
+  async function bootstrap(options = {}) {
+    await Promise.all([loadHealth(options), loadOwners(options), loadCategories(options), loadYears(options)])
   }
 
   return {
