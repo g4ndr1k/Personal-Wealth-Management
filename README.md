@@ -1,6 +1,6 @@
-# Agentic AI
+# Personal Wealth Management
 
-Personal finance and mail-alert system for macOS.
+A personal finance, wealth tracking, and mail-alert system for macOS.
 
 This repo combines three production stages:
 - Stage 1: Apple Mail + iMessage bridge and mail alert agent
@@ -10,50 +10,39 @@ This repo combines three production stages:
 The system is built for a personal Apple-centric workflow:
 - macOS host services for Mail.app, Messages.app, and protected local databases
 - Dockerized agent and finance API services
-- Vue 3 PWA frontend for iPhone and desktop use
+- Vue 3 PWA frontend (mobile + desktop) with offline support
 - macOS Keychain as the preferred secret store
 
 ## What it does
 
-- Reads Apple Mail local data on macOS
-- Classifies financial emails with Ollama
+- Reads Apple Mail and Messages data on macOS
+- Classifies financial emails with Ollama (local) and Anthropic (cloud fallback)
 - Sends iMessage alerts through Messages.app
-- Accepts `agent:` commands from authorized iMessage senders
-- Parses password-protected bank and brokerage PDFs
-- Exports normalized XLSX transaction data
-- Imports and categorizes transactions into Google Sheets
+- Parses password-protected bank and brokerage PDFs (BCA, CIMB, Maybank, Permata, BNI Sekuritas, Stockbit, IPOT)
+- Imports and categorizes transactions into Google Sheets with a 4-layer categorization engine
 - Syncs Sheets data into SQLite for fast local reads
-- Serves a personal finance and wealth dashboard as a PWA
-- Supports offline PWA reads via service worker + IndexedDB cache
+- Tracks wealth: account balances, investment holdings, real estate, retirement, net-worth snapshots
+- Serves a personal finance and wealth dashboard as an offline-capable PWA
+- Provides an Audit view for call-over comparison and PDF completeness checks
 
 ## Architecture
 
-- bridge/ runs on the host Mac
-  - reads Mail.app and Messages.app SQLite databases
-  - sends iMessages via AppleScript
-  - exposes authenticated HTTP endpoints on localhost
-  - runs PDF processing and pipeline orchestration
-- agent/ runs in Docker
-  - polls the bridge
-  - classifies messages with Ollama
-  - sends alerts and handles commands
-- finance/ runs as a FastAPI backend
-  - exposes finance and wealth APIs
-  - serves the built PWA from pwa/dist/
-- pwa/ is a Vue 3 + Vite application
-  - mobile-first personal finance UI
-  - offline-capable with service worker and IndexedDB-backed GET fallback
+- bridge/ — macOS host bridge for Mail.app, Messages.app, PDF processing, and pipeline orchestration
+- agent/ — Dockerized mail agent that polls the bridge, classifies with Ollama, and sends iMessage alerts
+- finance/ — FastAPI backend: finance APIs, wealth APIs, Google Sheets sync/import, SQLite cache, serves PWA
+- pwa/ — Vue 3 + Vite + Pinia PWA: mobile-first finance dashboard with offline support
 
 ## Repository layout
 
 - agent/ — Dockerized mail agent
 - bridge/ — macOS host bridge for Mail, Messages, PDF processing, and orchestration
 - finance/ — FastAPI backend, Google Sheets sync/import, SQLite cache, wealth APIs
-- parsers/ — bank and brokerage PDF parsers
+- parsers/ — bank and brokerage PDF parsers (BCA, CIMB, Maybank, Permata, BNI Sekuritas, Stockbit, IPOT)
 - exporters/ — XLSX export pipeline
-- pwa/ — Vue 3 PWA frontend
+- pwa/ — Vue 3 + Vite + Pinia PWA frontend
 - config/settings.toml — runtime configuration
-- SYSTEM_DESIGN.md — full architecture and operations document
+- scripts/ — setup, maintenance, and utility scripts
+- SYSTEM_DESIGN.md — full architecture and operations document (canonical reference)
 
 ## Requirements
 
@@ -158,14 +147,14 @@ docker compose logs -f mail-agent
 
 ## Supported document sources
 
-The repo includes parsers for multiple institutions, including:
-- Maybank
-- BCA
-- Permata
-- CIMB Niaga
-- IPOT / Indo Premier
-- BNI Sekuritas
-- Stockbit Sekuritas
+Parsers cover multiple Indonesian institutions, including:
+- BCA (savings, credit card)
+- Maybank (savings)
+- Permata (savings, credit card)
+- CIMB Niaga (savings)
+- IPOT / Indo Premier (brokerage)
+- BNI Sekuritas (brokerage)
+- Stockbit Sekuritas (brokerage)
 
 Outputs feed both transaction workflows and wealth holdings/balance workflows.
 
