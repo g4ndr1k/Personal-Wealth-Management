@@ -152,6 +152,7 @@ export const api = {
   summaryExplanation: (y, m, p = {}, options = {}) => get(`/summary/${y}/${m}/explanation`, p, options),
   summaryExplanationQuery: (y, m, body) => post(`/summary/${y}/${m}/explanation/query`, body),
   reviewQueue: (limit = 100, options = {}) => get('/review-queue', { limit }, options),
+  enrichReviewQueue: () => post('/review-queue/suggest'),
   saveAlias: (body) => postQueued('/alias', body),
   backfillAliases: () => postQueued('/backfill-aliases'),
   sync: () => postQueued('/sync'),

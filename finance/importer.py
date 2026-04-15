@@ -27,10 +27,12 @@ Reimport safety
 """
 from __future__ import annotations
 import argparse
+import csv
 import logging
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Optional
 
 import openpyxl
@@ -134,16 +136,22 @@ def run(
     if not dry_run:
         if overwrite:
             log.info("--overwrite: fetching existing hashes + row numbers …")
+            _backup_transactions(sheets_client)
             hash_to_row = sheets_client.read_existing_hashes_with_rows()
             existing_hashes = set(hash_to_row.keys())
+            # Also read existing categories so --overwrite never replaces a
+            # manually-set category with null when the categorizer can't match.
+            hash_to_category = sheets_client.read_existing_categories()
         else:
             log.info("Fetching existing hashes …")
             existing_hashes = sheets_client.read_existing_hashes()
             hash_to_row = {}
+            hash_to_category = {}
         log.info("  %d hashes already in Sheets.", len(existing_hashes))
     else:
         existing_hashes = set()
         hash_to_row = {}
+        hash_to_category = {}
 
     # ── 3. Reload aliases + categories into the categorizer ───────────────────
     if not dry_run:
@@ -184,7 +192,13 @@ def run(
                     txn.raw_description, owner=txn.owner, account=txn.account,
                 )
                 txn.merchant = result.merchant
-                txn.category = result.category
+                # Never overwrite an existing non-null category with null (L4).
+                # This preserves manually-set categories when the categorizer
+                # can't find a match.
+                if result.category is None and hash_to_category.get(txn.hash):
+                    txn.category = hash_to_category[txn.hash]
+                else:
+                    txn.category = result.category
                 by_layer[result.layer] += 1
                 overwrite_txns.append(txn)
             else:
@@ -380,6 +394,32 @@ def _warn_if_header_mismatch(actual: list[str]):
             "\n".join(f"  col {i}: expected '{e}', got '{a}'"
                       for i, e, a in mismatches),
         )
+
+
+# ── Backup helper ─────────────────────────────────────────────────────────────
+
+def _backup_transactions(sheets_client) -> str:
+    """Write a timestamped CSV backup of the Transactions tab to data/backups/.
+    Called automatically before every --overwrite run.  Returns the file path.
+    """
+    try:
+        rows = sheets_client._get(
+            f"{sheets_client.cfg.transactions_tab}!A:O"
+        )
+        backup_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "backups",
+        )
+        os.makedirs(backup_dir, exist_ok=True)
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(backup_dir, f"transactions_{ts}.csv")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(rows)
+        log.info("Backup saved: %s  (%d rows)", path, len(rows) - 1)
+        return path
+    except Exception as exc:
+        log.warning("Backup failed (non-fatal): %s", exc)
+        return ""
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────

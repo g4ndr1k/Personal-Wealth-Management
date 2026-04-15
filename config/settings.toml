@@ -41,7 +41,7 @@ allowed_sender_domains = [
 
 [ollama]
 host = "http://host.docker.internal:11434"
-model_primary = "qwen2.5-coder:7b-64k"
+model_primary = "gemma4:e4b"
 timeout_seconds = 60
 
 [agent]
@@ -96,14 +96,14 @@ attachment_seen_db = "/Users/g4ndr1k/agentic-ai/data/seen_attachments.db"
 attachment_lookback_days = 60
 
 # Ollama model for Layer 3 LLM fallback parsing (same as mail agent)
-parser_llm_model = "qwen2.5-coder:7b-64k"
+parser_llm_model = "gemma4:e4b"
 
 # Parsed-PDF verification pass (warn-only by default)
 verify_enabled = true
 verify_mode = "warn"
 verify_ollama_host = "http://localhost:11434"
 verify_timeout_seconds = 120
-verify_model = "qwen2.5-coder:7b-64k"
+verify_model = "gemma4:e4b"
 
 [pipeline]
 enabled = true
@@ -172,5 +172,5 @@ cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 # Use localhost when running on the Mac host directly.
 # Docker overrides this via OLLAMA_FINANCE_HOST env var (host.docker.internal).
 host            = "http://localhost:11434"
-model           = "qwen2.5-coder:7b-64k"
+model           = "gemma4:e4b"
 timeout_seconds = 60

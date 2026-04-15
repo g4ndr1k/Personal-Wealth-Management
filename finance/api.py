@@ -1500,6 +1500,57 @@ def get_review_queue(limit: int = Query(50, ge=1, le=200)):
     }
 
 
+# ── /api/review-queue/suggest ────────────────────────────────────────────────
+
+@app.post("/api/review-queue/suggest", dependencies=[Depends(require_api_key)])
+def suggest_review_queue():
+    """
+    Run the full categorizer (L1→L3) on every null-category transaction
+    that doesn't already have an AI suggestion.
+
+    L1/L2 auto-match → apply category/merchant directly.
+    L3 Ollama match  → write ollama_suggestion + suggested_merchant (user must confirm).
+    L4               → no change.
+    """
+    from finance.categorizer import Categorizer
+
+    aliases = _get_sheets().read_aliases()
+    cat = Categorizer(
+        aliases=aliases,
+        categories=[],
+        ollama_host=_ollama_cfg.host,
+        ollama_model=_ollama_cfg.model,
+        ollama_timeout=_ollama_cfg.timeout_seconds,
+    )
+
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT hash, raw_description, owner, account FROM transactions "
+            "WHERE (category IS NULL OR category = '') AND ollama_suggestion IS NULL"
+        ).fetchall()
+
+    applied = 0
+    suggested = 0
+    with _db() as conn:
+        for row in rows:
+            result = cat.categorize(row["raw_description"], row["owner"] or "", row["account"] or "")
+            if result.confidence == "auto":   # L1/L2
+                conn.execute(
+                    "UPDATE transactions SET merchant=?, category=? WHERE hash=?",
+                    (result.merchant, result.category, row["hash"]),
+                )
+                applied += 1
+            elif result.confidence == "suggested":  # L3 Ollama
+                conn.execute(
+                    "UPDATE transactions SET ollama_suggestion=?, suggested_merchant=? WHERE hash=?",
+                    (result.category, result.merchant, row["hash"]),
+                )
+                suggested += 1
+        conn.commit()
+
+    return {"ok": True, "applied": applied, "suggested": suggested}
+
+
 # ── /api/alias ────────────────────────────────────────────────────────────────
 
 @app.post("/api/alias", dependencies=[Depends(require_api_key)])

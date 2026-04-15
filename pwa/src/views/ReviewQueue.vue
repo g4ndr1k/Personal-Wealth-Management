@@ -46,8 +46,12 @@
             <template v-if="countSimilar(selectedItem) > 1">
               · <strong>{{ countSimilar(selectedItem) }} similar</strong>
             </template>
+            <span v-if="selectedItem.ollama_suggestion" style="color:var(--accent);font-size:11px;margin-left:4px">🤖</span>
           </div>
           <div class="alias-form">
+            <div v-if="selectedItem.ollama_suggestion" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+              🤖 AI suggested: {{ selectedItem.suggested_merchant }} · {{ selectedItem.ollama_suggestion }}
+            </div>
             <div class="form-row">
               <label class="form-label">Merchant name</label>
               <input
@@ -117,6 +121,7 @@
                 <template v-if="countSimilar(item) > 1">
                   · <strong>{{ countSimilar(item) }} similar</strong>
                 </template>
+                <span v-if="item.ollama_suggestion" style="color:var(--accent);font-size:11px;margin-left:4px">🤖</span>
               </div>
             </div>
             <div class="review-amount" :class="item.amount >= 0 ? 'text-income' : 'text-expense'">{{ fmt(item.amount) }}</div>
@@ -124,6 +129,9 @@
 
           <div v-if="expandedHash === item.hash" class="review-body">
             <div class="alias-form">
+              <div v-if="item.ollama_suggestion" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+                🤖 AI suggested: {{ item.suggested_merchant }} · {{ item.ollama_suggestion }}
+              </div>
               <div class="form-row">
                 <label class="form-label">Merchant name</label>
                 <input
@@ -255,8 +263,8 @@ function toggle(item) {
   }
   expandedHash.value = item.hash
   form.value = {
-    merchant:        item.merchant || titleCase(item.raw_description),
-    category:        item.category || '',
+    merchant:        item.suggested_merchant || item.merchant || titleCase(item.raw_description),
+    category:        item.ollama_suggestion  || item.category || '',
     match_type:      'exact',
     apply_to_similar: true,
   }
@@ -333,6 +341,17 @@ async function load() {
     const data = await api.reviewQueue(LIMIT, { forceFresh: true })
     items.value = data.pending ?? data
     hasMore.value = items.value.length === LIMIT
+
+    // Fire enrichment in background — don't block render
+    api.enrichReviewQueue()
+      .then(result => {
+        if ((result.suggested ?? 0) + (result.applied ?? 0) > 0) {
+          showToast('🤖 AI suggestions ready — refreshing…')
+          return api.reviewQueue(LIMIT, { forceFresh: true })
+            .then(d => { items.value = d.pending ?? d })
+        }
+      })
+      .catch(() => {})
   } catch (e) {
     error.value = e.message
   } finally {

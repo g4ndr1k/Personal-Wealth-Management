@@ -6,22 +6,23 @@ Detection priority:
   1. Permata CC      — "Rekening Tagihan" + "Credit Card Billing"  (page 1 bilingual title)
   2. Permata Savings — "Permata" + "Rekening Koran"  (page 1)
   3. BCA CC          — "BCA"/"Bank Central Asia" + "KARTU KREDIT"  (page 1, case-insensitive)
-  4. BCA Savings     — "BCA"/"Bank Central Asia" + "TAHAPAN"  (page 1, case-insensitive)
-  5. Maybank CC      — "maybank" + "kartu kredit"  (page 1, case-insensitive)
-  6. CIMB Niaga CC   — "CIMB Niaga" + "Tgl. Statement"  (page 1+2 combined; on 2-page
+  4. BCA RDN         — "REKENING TAPRES"  (page 1; BCA's securities RDN product)
+  5. BCA Savings     — "BCA"/"Bank Central Asia" + "TAHAPAN"  (page 1, case-insensitive)
+  6. Maybank CC      — "maybank" + "kartu kredit"  (page 1, case-insensitive)
+  7. CIMB Niaga CC   — "CIMB Niaga" + "Tgl. Statement"  (page 1+2 combined; on 2-page
                        statements "CIMB Niaga" appears in the Poin Xtra footer on page 2)
-  7. CIMB Niaga Consol — "CIMB Niaga" + "COMBINE STATEMENT"  (page 1)
-  8. Maybank Consol  — "Maybank" + "PORTFOLIO"  (page 1+2 combined)
-  9. IPOT Portfolio  — "PT INDO PREMIER SEKURITAS" + "Client Portofolio"  (page 1)
- 10. IPOT Statement  — "PT INDO PREMIER SEKURITAS" + "Client Statement"  (page 1)
- 11. BNI Sekuritas (legacy) — "CONSOLIDATE ACCOUNT STATEMENT" + "CASH SUMMARY"  (page 1)
- 12. BNI Sekuritas   — "BNI Sekuritas" + "CLIENT STATEMENT"  (page 1, all-caps)
+  8. CIMB Niaga Consol — "CIMB Niaga" + "COMBINE STATEMENT"  (page 1)
+  9. Maybank Consol  — "Maybank" + "PORTFOLIO"  (page 1+2 combined)
+ 10. IPOT Portfolio  — "PT INDO PREMIER SEKURITAS" + "Client Portofolio"  (page 1)
+ 11. IPOT Statement  — "PT INDO PREMIER SEKURITAS" + "Client Statement"  (page 1)
+ 12. BNI Sekuritas (legacy) — "CONSOLIDATE ACCOUNT STATEMENT" + "CASH SUMMARY"  (page 1)
+ 13. BNI Sekuritas   — "BNI Sekuritas" + "CLIENT STATEMENT"  (page 1, all-caps)
 """
 import pdfplumber
 from .base import StatementResult
 from . import (
     maybank_cc, maybank_consol,
-    bca_cc, bca_savings,
+    bca_cc, bca_savings, bca_rdn,
     permata_cc, permata_savings,
     cimb_niaga_cc, cimb_niaga_consol,
     ipot_portfolio, ipot_statement,
@@ -56,6 +57,9 @@ def detect_and_parse(pdf_path: str, ollama_client=None,
     # BCA detection
     if bca_cc.can_parse(page1_text):
         return bca_cc.parse(pdf_path, ollama_client)
+
+    if bca_rdn.can_parse(page1_text):
+        return bca_rdn.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
 
     if bca_savings.can_parse(page1_text):
         return bca_savings.parse(pdf_path, ollama_client)
@@ -116,6 +120,8 @@ def detect_bank_and_type(pdf_path: str) -> tuple[str, str]:
         return "Permata", "savings"
     if bca_cc.can_parse(page1_text):
         return "BCA", "cc"
+    if bca_rdn.can_parse(page1_text):
+        return "BCA", "rdn"
     if bca_savings.can_parse(page1_text):
         return "BCA", "savings"
     if maybank_consol.can_parse(combined):

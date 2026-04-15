@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     hash              TEXT    UNIQUE NOT NULL,
     import_date       TEXT,
     import_file       TEXT,
-    synced_at         TEXT    NOT NULL
+    synced_at         TEXT    NOT NULL,
+    ollama_suggestion TEXT,
+    suggested_merchant TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tx_date        ON transactions(date);
@@ -380,6 +382,14 @@ def open_db(db_path: str) -> sqlite3.Connection:
     ]:
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE merchant_aliases ADD COLUMN {col} {definition}")
+    # Additive migration: AI suggestion columns on transactions
+    tx_cols = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+    for col, definition in [
+        ("ollama_suggestion",  "TEXT"),
+        ("suggested_merchant", "TEXT"),
+    ]:
+        if col not in tx_cols:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
     conn.commit()
     # Prune sync_log entries older than 90 days
     conn.execute(

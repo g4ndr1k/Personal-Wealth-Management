@@ -146,6 +146,22 @@ class SheetsClient:
                 result.setdefault(row[0], []).append(i + 1)  # Sheets rows are 1-indexed
         return result
 
+    def read_existing_categories(self) -> dict[str, str]:
+        """Return {hash: category} for all rows in the Transactions tab that
+        have a non-empty category. Used by --overwrite to avoid replacing
+        manually-set categories with null when the categorizer can't match."""
+        rows = self._get(f"{self.cfg.transactions_tab}!H:M")  # category(H) … hash(M)
+        result: dict[str, str] = {}
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue  # skip header
+            r = list(row) + [""] * (6 - len(row))
+            category = (r[0] or "").strip()   # col H
+            tx_hash  = (r[5] or "").strip()   # col M (H+5 = M)
+            if tx_hash and category:
+                result[tx_hash] = category
+        return result
+
     def read_aliases(self) -> list[dict]:
         """Return Merchant Aliases rows as list of dicts (columns A–G)."""
         rows = self._get(f"{self.cfg.aliases_tab}!A:G")
@@ -459,6 +475,66 @@ class SheetsClient:
             except HttpError as e:
                 log.error("Failed to write Holdings tab: %s", e)
                 raise
+
+    def delete_rows_by_institution(self, institution: str) -> int:
+        """Delete all rows in the Transactions tab where institution == institution.
+
+        Returns the number of rows deleted.
+        Uses batchUpdate deleteDimension (reverse order to preserve row indices).
+        Column I (index 8, 0-based) = institution.
+        """
+        rows = self._get(f"{self.cfg.transactions_tab}!A:O")
+        to_delete: list[int] = []
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue  # skip header
+            r = list(row) + [""] * (15 - len(row))
+            if r[8].strip() == institution:
+                to_delete.append(i + 1)  # 1-indexed sheet row
+
+        if not to_delete:
+            log.info("No rows found for institution='%s'", institution)
+            return 0
+
+        sheet_id = self._get_transactions_sheet_id()
+        # Build deleteDimension requests in REVERSE order so earlier row indices
+        # aren't shifted by deletions of earlier rows.
+        requests = []
+        for row_num in sorted(to_delete, reverse=True):
+            requests.append({
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": row_num - 1,  # 0-indexed inclusive
+                        "endIndex": row_num,         # 0-indexed exclusive
+                    }
+                }
+            })
+
+        CHUNK = 500
+        deleted = 0
+        for i in range(0, len(requests), CHUNK):
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=self.cfg.spreadsheet_id,
+                body={"requests": requests[i:i + CHUNK]},
+            ).execute()
+            deleted += len(requests[i:i + CHUNK])
+
+        log.info("Deleted %d rows where institution='%s'", deleted, institution)
+        return deleted
+
+    def _get_transactions_sheet_id(self) -> int:
+        """Return the numeric sheetId for the transactions tab."""
+        meta = self.service.spreadsheets().get(
+            spreadsheetId=self.cfg.spreadsheet_id,
+            fields="sheets.properties",
+        ).execute()
+        tab_name = self.cfg.transactions_tab
+        for sheet in meta.get("sheets", []):
+            if sheet["properties"]["title"] == tab_name:
+                return sheet["properties"]["sheetId"]
+        raise ValueError(f"Transactions tab not found: {tab_name}")
 
     def log_import(
         self,

@@ -124,6 +124,7 @@ class Categorizer:
         ollama_timeout: int = 60,
     ):
         self.categories = categories or DEFAULT_CATEGORIES[:]
+        self.ollama_host = ollama_host
         self.ollama_model = ollama_model
         self.ollama_timeout = ollama_timeout
 
@@ -363,6 +364,7 @@ class Categorizer:
             data = ollama_generate(
                 self.ollama_host, self.ollama_model, prompt,
                 self.ollama_timeout, temperature=0.1, num_predict=256,
+                format_json=True,
             )
             raw_response = data.get("response", "").strip()
             return self._parse_ollama_response(raw_response, desc)

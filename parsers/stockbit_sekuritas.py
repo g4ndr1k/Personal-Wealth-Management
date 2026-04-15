@@ -9,11 +9,10 @@ What is extracted:
                 → StatementResult.holdings
   accounts    — Cash Investor balance → StatementResult.accounts[0]
                 (account_number=client_code bypasses _is_savings_account filter)
-  transactions — cash ledger rows (dividends, payments) between dates
+  transactions — intentionally empty; cash ledger (dividends, interest, etc.) is ignored
 
 Number format: Western (commas = thousands separators, dots = decimals).
-  Use _parse_ipot_amount() for plain amounts; _parse_stockbit_amount() for
-  Ending Balance which may use parentheses for negatives: (3,460,000).
+  Use _parse_ipot_amount() for plain amounts.
 
 Date format: DD/MM/YYYY throughout — no conversion needed.
 """
@@ -61,41 +60,6 @@ _RE_STOCK_ROW = re.compile(
     r"(-?[\d,.]+)",                      # Unrealized %
     re.MULTILINE,
 )
-
-# Transaction row
-# "14/01/2026 14/01/2026 D973769 Dividend BMRI 34,600 @ 100.0000 0 3,460,000 (3,460,000) 13 0"
-# Payment rows omit the Interest column: "3,460,000 0 0 0" → Db Cr EndBal Days (no Interest)
-_RE_TX_ROW = re.compile(
-    r"^(\d{2}/\d{2}/\d{4})[ \t]+"       # Tr. Date  (already DD/MM/YYYY)
-    r"(\d{2}/\d{2}/\d{4})[ \t]+"        # Due Date
-    r"(.+?)[ \t]+"                       # Reference + Description (combined)
-    r"([\d,]+)[ \t]+"                    # Db Amount
-    r"([\d,]+)[ \t]+"                    # Cr Amount
-    r"(\(?[\d,]+\)?)[ \t]+"             # Ending Balance (may be parenthesised)
-    r"(\d+)"                             # Days
-    r"(?:[ \t]+(\d+))?",                 # Interest (optional — absent in payment rows)
-    re.MULTILINE,
-)
-
-# Rows to skip in the cash ledger
-_TX_SKIP = frozenset([
-    "beginning balance", "t o t a l", "estimated interest", "total - interest",
-])
-
-
-# ── Amount helpers ─────────────────────────────────────────────────────────────
-
-def _parse_stockbit_amount(s: str) -> Optional[float]:
-    """
-    Parse amounts that may use parentheses for negatives:
-      '(3,460,000)' → -3460000.0
-      '3,460,000'   →  3460000.0
-      '0'           →  0.0
-    """
-    s = s.strip()
-    if s.startswith("(") and s.endswith(")"):
-        return -(_parse_ipot_amount(s[1:-1]) or 0.0)
-    return _parse_ipot_amount(s)
 
 
 # ── Public interface ───────────────────────────────────────────────────────────
@@ -257,44 +221,9 @@ def _parse_stock_section(text: str, errors: list) -> list[InvestmentHolding]:
 def _parse_cash_transactions(
     text: str, account_number: str, owner: str, errors: list
 ) -> list[Transaction]:
-    """
-    Parse the cash ledger rows between the header and PORTFOLIO STATEMENT.
-    Skips synthetic rows (Beginning Balance, T O T A L, Estimated Interest).
-    """
-    # Restrict to the ledger section (header → PORTFOLIO STATEMENT)
-    end = text.find("PORTFOLIO STATEMENT")
-    section = text[:end] if end != -1 else text
-
-    transactions: list[Transaction] = []
-    for m in _RE_TX_ROW.finditer(section):
-        desc = m.group(3).strip()
-        if any(skip in desc.lower() for skip in _TX_SKIP):
-            continue
-
-        tr_date  = m.group(1)   # already DD/MM/YYYY
-        due_date = m.group(2)
-        debet    = _parse_ipot_amount(m.group(4)) or 0.0
-        credit   = _parse_ipot_amount(m.group(5)) or 0.0
-        balance  = _parse_stockbit_amount(m.group(6))
-
-        tx_type    = "Credit" if credit > 0 else "Debit"
-        amount_idr = credit if credit > 0 else debet
-
-        transactions.append(Transaction(
-            date_transaction=tr_date,
-            date_posted=due_date,
-            description=desc,
-            currency="IDR",
-            foreign_amount=None,
-            exchange_rate=None,
-            amount_idr=amount_idr,
-            tx_type=tx_type,
-            balance=balance,
-            account_number=account_number,
-            owner=owner,
-        ))
-
-    return transactions
+    # Stockbit cash ledger (dividends, interest, etc.) is intentionally ignored.
+    # Only holdings from PORTFOLIO STATEMENT are used.
+    return []
 
 
 # ── Ollama Layer 3 fallback ────────────────────────────────────────────────────

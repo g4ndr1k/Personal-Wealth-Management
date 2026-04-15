@@ -38,7 +38,7 @@ def ollama_generate(
     body: dict = {
         "model": model,
         "prompt": prompt,
-        "stream": False,
+        "stream": True,
         "options": {
             "temperature": temperature,
             "num_predict": num_predict,
@@ -56,7 +56,21 @@ def ollama_generate(
     for attempt in range(1, max_retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+                full_response = ""
+                for line in resp:
+                    chunk = json.loads(line)
+                    full_response += chunk.get("response", "")
+                    if chunk.get("done"):
+                        return {
+                            "model": chunk.get("model", model),
+                            "response": full_response,
+                            "done": True,
+                            "done_reason": chunk.get("done_reason", ""),
+                            "context": chunk.get("context", []),
+                            "total_duration": chunk.get("total_duration", 0),
+                            "eval_count": chunk.get("eval_count", 0),
+                        }
+                return {"response": full_response, "done": True}
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_err = exc
             if attempt < max_retries:
