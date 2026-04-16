@@ -260,7 +260,7 @@ The system alerts on:
 - NAS Read-Only Replica (`docker-compose.nas.yml`, `finance/backup.py`, `finance/api.py`, `pwa/`) — see §41
   - `FINANCE_READ_ONLY` env flag — when `true`, all write endpoints return 403; `GET /api/health` exposes `"read_only": true`
   - `require_writable` dependency guarded on 15+ write routes (aliases, backfill, category edits, import, wealth CRUD, review-queue suggest, nas-sync)
-  - `finance/backup.py` — `sync_to_nas()` function: rsync latest backup to `NAS_SYNC_TARGET` via SSH (dedicated key pair at `secrets/nas_sync_key`), 24h throttle on auto-sync, state tracked in `data/.nas_sync_state.json`; auto-called after every `backup_db()` (post-import); `POST /api/nas-sync` endpoint for manual trigger (force bypasses throttle); `GET /api/nas-sync/status` returns last sync time
+  - `finance/backup.py` — `sync_to_nas()` function: streams latest backup to `NAS_SYNC_TARGET` via `ssh cat` (rsync not supported on Synology); SSH port 68, dedicated key pair at `secrets/nas_sync_key`; 24h throttle on auto-sync, state tracked in `data/.nas_sync_state.json`; auto-called after every `backup_db()` (post-import); `POST /api/nas-sync` endpoint for manual trigger (force bypasses throttle); `GET /api/nas-sync/status` returns last sync time; local-path fallback via `shutil.copy2`
   - `docker-compose.nas.yml` — NAS overlay: `FINANCE_READ_ONLY=true`, SQLite DB at `/volume1/finance/finance_readonly.db` (read-only mount), Ollama host cleared (not needed on NAS), no XLS/secrets volumes
   - AMD64 Docker image built via `docker buildx build --platform linux/amd64` for Synology DS920+ Container Manager; loaded via `docker load`
   - PWA read-only detection: `financeStore.isReadOnly` set from `/api/health` response; blue `ReadOnlyBanner.vue` component (fixed top, shows "Read-only · NAS replica · Updated Xh ago"); all write controls hidden via `v-if="!store.isReadOnly"` across ReviewQueue, Transactions, Adjustment, Holdings, Wealth, Settings
@@ -2674,7 +2674,9 @@ finance-api :8090  (read+write)                finance-api-nas :8090 (read-only)
 NAS_SYNC_TARGET=g4ndr1k@192.168.1.44:/volume1/finance/finance_readonly.db
 ```
 
-**Auto-sync:** After every `backup_db()` call (which runs post-import), `sync_to_nas()` rsyncs the latest backup file to the NAS. A 24-hour throttle prevents redundant syncs. State is tracked in `data/.nas_sync_state.json`.
+**Transfer method:** `ssh + cat` pipe (`cat source | ssh -p 68 user@host "cat > /remote/path"`). Synology restricts the rsync protocol, so the traditional rsync approach was replaced with a simpler stream-over-SSH pattern. SSH port 68 (Synology default), `StrictHostKeyChecking=no`. Falls back to `shutil.copy2` for local paths (e.g. SMB mounts).
+
+**Auto-sync:** After every `backup_db()` call (which runs post-import), `sync_to_nas()` streams the latest backup file to the NAS. A 24-hour throttle prevents redundant syncs. State is tracked in `data/.nas_sync_state.json`.
 
 **Manual sync:** `POST /api/nas-sync` (force=True, bypasses throttle). Triggered from Settings → "Sync to NAS Now" button.
 
