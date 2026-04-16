@@ -678,8 +678,8 @@ async function loadItems() {
   loadError.value = null
   try {
     const [bals, holds] = await Promise.all([
-      api.getBalances({ snapshot_date: snapshotDate.value }),
-      api.getHoldings({ snapshot_date: snapshotDate.value }),
+      api.getBalances({ snapshot_date: snapshotDate.value }, { forceFresh: true }),
+      api.getHoldings({ snapshot_date: snapshotDate.value }, { forceFresh: true }),
     ])
     balances.value    = bals
     holdings.value    = holds
@@ -692,7 +692,7 @@ async function loadItems() {
     if (hasPrevMonth && missingCF) {
       const { carried } = await api.carryForwardHoldings({ snapshot_date: snapshotDate.value })
       if (carried > 0) {
-        holdings.value = await api.getHoldings({ snapshot_date: snapshotDate.value })
+        holdings.value = await api.getHoldings({ snapshot_date: snapshotDate.value }, { forceFresh: true })
       }
     }
   } catch (e) {

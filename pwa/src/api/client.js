@@ -2,6 +2,8 @@ import { queueMutation, cacheGet, cacheGetEntry, cacheSet, cacheClearAll } from 
 
 const BASE = '/api'
 const DEFAULT_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const DESKTOP_MIN_WIDTH_PX = 1024
+const LAYOUT_STORAGE_KEY = 'pwa_layout_mode'
 const API_KEY = import.meta.env.VITE_FINANCE_API_KEY || ''
 const AUTH_HEADERS = API_KEY
   ? { 'X-Api-Key': API_KEY }
@@ -15,6 +17,30 @@ function getCacheKey(url) {
   return `GET:${url.pathname}${url.search}`
 }
 
+function readLayoutMode() {
+  try {
+    const mode = window.localStorage.getItem(LAYOUT_STORAGE_KEY)
+    if (mode === 'desktop' || mode === 'mobile' || mode === 'auto') return mode
+  } catch {}
+  return 'auto'
+}
+
+function isDesktopLayout() {
+  if (typeof window === 'undefined') return false
+  const mode = readLayoutMode()
+  if (mode === 'desktop') return true
+  if (mode === 'mobile') return false
+  if (typeof window.matchMedia === 'function') {
+    return window.matchMedia(`(min-width: ${DESKTOP_MIN_WIDTH_PX}px)`).matches
+  }
+  return typeof window.innerWidth === 'number' && window.innerWidth >= DESKTOP_MIN_WIDTH_PX
+}
+
+function shouldUseLongLivedGetCache(options = {}) {
+  if ((options.maxAgeMs ?? DEFAULT_CACHE_MAX_AGE_MS) <= 0) return false
+  return !isDesktopLayout()
+}
+
 async function get(path, params = {}, options = {}) {
   const url = new URL(BASE + path, location.origin)
   for (const [k, v] of Object.entries(params)) {
@@ -25,8 +51,9 @@ async function get(path, params = {}, options = {}) {
   const cacheKey = getCacheKey(url)
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_CACHE_MAX_AGE_MS
   const forceFresh = options.forceFresh === true
+  const useLongLivedGetCache = shouldUseLongLivedGetCache(options)
 
-  if (!forceFresh) {
+  if (!forceFresh && useLongLivedGetCache) {
     const cachedEntry = await cacheGetEntry(cacheKey)
     if (cachedEntry && (Date.now() - cachedEntry.updatedAt) < maxAgeMs) {
       return cachedEntry.value

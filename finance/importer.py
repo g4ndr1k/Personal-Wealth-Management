@@ -28,6 +28,7 @@ Reimport safety
 """
 from __future__ import annotations
 import argparse
+import calendar
 import logging
 import os
 import sys
@@ -282,8 +283,118 @@ def direct_import(
     finally:
         conn.close()
 
+    sync_grogol_2_from_transactions(db_path)
     log.info("direct_import: wrote %d new rows to SQLite.", added)
     return _stats(added, skipped, total_valid, parse_errors, by_layer, time.time() - t0)
+
+
+def sync_grogol_2_from_transactions(db_path: str) -> int:
+    from finance.db import open_db
+
+    baseline_snapshot = "2026-01-31"
+    asset_class = "real_estate"
+    asset_group = "Real Estate"
+    asset_name = "Grogol 2"
+    notes = "Auto-synced from Teguh Pranoto Chen transfer transactions."
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    def month_end(date_s: str) -> str:
+        dt = datetime.strptime(date_s, "%Y-%m-%d")
+        return f"{dt.year:04d}-{dt.month:02d}-{calendar.monthrange(dt.year, dt.month)[1]:02d}"
+
+    def iter_month_ends(start_s: str, end_s: str):
+        start = datetime.strptime(start_s, "%Y-%m-%d")
+        end = datetime.strptime(end_s, "%Y-%m-%d")
+        year, month = start.year, start.month
+        while (year, month) <= (end.year, end.month):
+            yield f"{year:04d}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
+            month += 1
+            if month > 12:
+                year += 1
+                month = 1
+
+    conn = open_db(db_path)
+    try:
+        txns = conn.execute(
+            """
+            SELECT date, amount
+            FROM transactions
+            WHERE UPPER(raw_description) LIKE '%TEGUH PRANOTO CHEN%'
+              AND date >= ?
+            ORDER BY date
+            """,
+            (baseline_snapshot,),
+        ).fetchall()
+
+        candidate_dates = {baseline_snapshot}
+        for table in ("account_balances", "holdings", "liabilities", "net_worth_snapshots"):
+            candidate_dates.update(
+                row[0]
+                for row in conn.execute(f"SELECT DISTINCT snapshot_date FROM {table}").fetchall()
+                if row[0]
+            )
+        candidate_dates.update(month_end(row["date"]) for row in txns)
+        snapshot_dates = list(iter_month_ends(baseline_snapshot, max(candidate_dates)))
+
+        cumulative_value = 0.0
+        txn_list = [(row["date"], abs(float(row["amount"]))) for row in txns]
+        txn_idx = 0
+        last_appraised_date = baseline_snapshot
+
+        for snapshot_date in snapshot_dates:
+            while txn_idx < len(txn_list) and txn_list[txn_idx][0] <= snapshot_date:
+                last_appraised_date = txn_list[txn_idx][0]
+                cumulative_value += txn_list[txn_idx][1]
+                txn_idx += 1
+
+            conn.execute(
+                """
+                INSERT INTO holdings (
+                    snapshot_date, asset_class, asset_group, asset_name, isin_or_code,
+                    institution, account, owner, currency, quantity, unit_price,
+                    market_value, market_value_idr, cost_basis, cost_basis_idr,
+                    unrealised_pnl_idr, exchange_rate, maturity_date, coupon_rate,
+                    last_appraised_date, notes, import_date
+                ) VALUES (?, ?, ?, ?, '', '', '', '', 'IDR', 1, ?, ?, ?, ?, ?, 0, 1, '', 0, ?, ?, ?)
+                ON CONFLICT(snapshot_date, asset_class, asset_name, owner, institution)
+                DO UPDATE SET
+                    asset_group = excluded.asset_group,
+                    account = excluded.account,
+                    currency = excluded.currency,
+                    quantity = excluded.quantity,
+                    unit_price = excluded.unit_price,
+                    market_value = excluded.market_value,
+                    market_value_idr = excluded.market_value_idr,
+                    cost_basis = excluded.cost_basis,
+                    cost_basis_idr = excluded.cost_basis_idr,
+                    unrealised_pnl_idr = excluded.unrealised_pnl_idr,
+                    exchange_rate = excluded.exchange_rate,
+                    maturity_date = excluded.maturity_date,
+                    coupon_rate = excluded.coupon_rate,
+                    last_appraised_date = excluded.last_appraised_date,
+                    notes = excluded.notes,
+                    import_date = excluded.import_date
+                """,
+                (
+                    snapshot_date,
+                    asset_class,
+                    asset_group,
+                    asset_name,
+                    cumulative_value,
+                    cumulative_value,
+                    cumulative_value,
+                    cumulative_value,
+                    cumulative_value,
+                    last_appraised_date,
+                    notes,
+                    today,
+                ),
+            )
+
+        conn.commit()
+        return len(snapshot_dates)
+    finally:
+        conn.close()
 
 
 # ── Row parser ────────────────────────────────────────────────────────────────

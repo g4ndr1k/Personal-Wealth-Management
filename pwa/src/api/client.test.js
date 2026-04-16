@@ -35,6 +35,23 @@ describe('api client offline GET fallback', () => {
       configurable: true,
       value: true,
     })
+    try {
+      window.localStorage.removeItem('pwa_layout_mode')
+    } catch {}
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query) => ({
+        matches: query.includes('min-width') ? false : false,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
   })
 
   it('returns cached GET data when the network is unavailable', async () => {
@@ -60,7 +77,7 @@ describe('api client offline GET fallback', () => {
     expect(cacheSet).toHaveBeenCalledWith('GET:/api/health', payload)
   })
 
-  it('returns fresh cached GET data without hitting the network', async () => {
+  it('returns fresh cached GET data without hitting the network on mobile', async () => {
     const payload = { status: 'cached' }
     cacheGetEntry.mockResolvedValueOnce({ value: payload, updatedAt: Date.now() })
     global.fetch = vi.fn()
@@ -70,5 +87,28 @@ describe('api client offline GET fallback', () => {
 
     expect(result).toEqual(payload)
     expect(global.fetch).not.toHaveBeenCalled()
+  })
+
+  it('bypasses the 24-hour GET cache on desktop layouts', async () => {
+    const payload = { status: 'fresh-desktop' }
+    cacheGetEntry.mockResolvedValueOnce({ value: { status: 'cached-desktop' }, updatedAt: Date.now() })
+    window.matchMedia = vi.fn().mockImplementation((query) => ({
+      matches: query === '(min-width: 1024px)',
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    global.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(payload))
+
+    const { api } = await import('./client.js')
+    const result = await api.health()
+
+    expect(result).toEqual(payload)
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(cacheSet).toHaveBeenCalledWith('GET:/api/health', payload)
   })
 })
