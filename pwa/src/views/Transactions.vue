@@ -17,9 +17,16 @@
         <option value="">All Owners</option>
         <option v-for="o in store.owners" :key="o" :value="o">{{ o }}</option>
       </select>
+      <select v-model="filters.categoryGroup" @change="onFilterChange">
+        <option value="">All Category Groups</option>
+        <option v-for="group in categoryGroupNames" :key="group" :value="group">{{ group }}</option>
+      </select>
+    </div>
+    <div class="filter-bar" :class="{ 'filters-muted': aiFilters }">
       <select v-model="filters.category" @change="onFilterChange">
         <option value="">All Categories</option>
-        <option v-for="c in store.categoryNames" :key="c" :value="c">{{ c }}</option>
+        <option value="__uncategorised__">Uncategorised only</option>
+        <option v-for="c in sortedCategoryNames" :key="c" :value="c">{{ c }}</option>
       </select>
     </div>
     <div class="filter-bar" :class="{ 'filters-muted': aiFilters }">
@@ -277,6 +284,7 @@ const filters = ref({
   year: '',
   month: '',
   owner: '',
+  categoryGroup: '',
   category: '',
   q: '',
 })
@@ -294,6 +302,15 @@ const aiLabel         = ref('')
 const aiExcludeSystem = ref(true)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
+const sortedCategoryNames = computed(() => [...store.categoryNames].sort((a, b) => a.localeCompare(b)))
+const categoryGroupNames = computed(() => {
+  const groups = new Set(
+    (store.categories || [])
+      .map((category) => category.category_group)
+      .filter((group) => !!group)
+  )
+  return [...groups].sort((a, b) => a.localeCompare(b))
+})
 const selectedTx = computed(() =>
   expandedHash.value
     ? transactions.value.find(tx => tx.hash === expandedHash.value) || null
@@ -366,6 +383,8 @@ async function load() {
   expandedHash.value = null
   try {
     const params = {}
+    const selectedCategory = filters.value.category
+    const uncategorisedOnly = selectedCategory === '__uncategorised__'
     if (aiFilters.value) {
       const af = aiFilters.value
       if (af.year)     params.year     = af.year
@@ -381,11 +400,13 @@ async function load() {
       if (filters.value.year)     params.year     = filters.value.year
       if (filters.value.month)    params.month    = filters.value.month
       if (filters.value.owner)    params.owner    = filters.value.owner
-      if (filters.value.category) params.category = filters.value.category
+      if (filters.value.categoryGroup) params.category_group = filters.value.categoryGroup
+      if (uncategorisedOnly)      params.uncategorised_only = true
+      else if (selectedCategory)  params.category = selectedCategory
       if (filters.value.q)        params.q        = filters.value.q
     }
 
-    const res = await api.transactions(params)
+    const res = await api.transactions(params, { forceFresh: true })
     let txs = res.transactions || []
 
     if (aiFilters.value) {
@@ -401,7 +422,7 @@ async function load() {
       if (limit > 0) txs = txs.slice(0, limit)
       totalCount.value = txs.length
     } else {
-      totalCount.value = res.total_count || 0
+      totalCount.value = res.total ?? res.total_count ?? 0
     }
 
     transactions.value = txs

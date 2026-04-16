@@ -6,7 +6,7 @@ Endpoints
   GET  /api/health
   GET  /api/owners
   GET  /api/categories
-  GET  /api/transactions           ?year= &month= &owner= &category= &q= &limit= &offset=
+  GET  /api/transactions           ?year= &month= &owner= &category= &uncategorised_only= &q= &limit= &offset=
   GET  /api/transactions/foreign   ?year= &month= &owner=
   GET  /api/summary/years
   GET  /api/summary/year/{year}
@@ -1178,6 +1178,17 @@ class CategoryOverrideRequest(BaseModel):
     update_alias: bool = True   # also update Merchant Aliases tab so future imports auto-categorise
 
 
+class CategoryUpsertRequest(BaseModel):
+    category: str
+    original_category: Optional[str] = None
+    icon: str = ""
+    sort_order: int = 99
+    is_recurring: bool = False
+    monthly_budget: Optional[float] = None
+    category_group: str = ""
+    subcategory: str = ""
+
+
 class WealthQuestionRequest(BaseModel):
     snapshot_date: Optional[str] = None
     question: str
@@ -1255,6 +1266,80 @@ def get_categories():
     ]
 
 
+@app.post("/api/categories", dependencies=[Depends(require_api_key)])
+def post_category(req: CategoryUpsertRequest):
+    category = (req.category or "").strip()
+    original_category = (req.original_category or "").strip() or None
+    if not category:
+        raise HTTPException(400, "Category name is required")
+
+    synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    with _db() as conn:
+        if original_category and original_category != category:
+            existing = conn.execute(
+                "SELECT 1 FROM categories WHERE category = ?",
+                (category,),
+            ).fetchone()
+            if existing:
+                raise HTTPException(409, f"Category already exists: {category}")
+
+            conn.execute(
+                """
+                UPDATE categories
+                SET category = ?, icon = ?, sort_order = ?, is_recurring = ?, monthly_budget = ?,
+                    category_group = ?, subcategory = ?, synced_at = ?
+                WHERE category = ?
+                """,
+                (
+                    category,
+                    req.icon,
+                    req.sort_order,
+                    int(req.is_recurring),
+                    req.monthly_budget,
+                    req.category_group,
+                    req.subcategory,
+                    synced_at,
+                    original_category,
+                ),
+            )
+            conn.execute("UPDATE transactions SET category = ? WHERE category = ?", (category, original_category))
+            conn.execute("UPDATE category_overrides SET category = ? WHERE category = ?", (category, original_category))
+            conn.execute("UPDATE merchant_aliases SET category = ? WHERE category = ?", (category, original_category))
+        else:
+            conn.execute(
+                """
+                INSERT INTO categories (category, icon, sort_order, is_recurring, monthly_budget, category_group, subcategory, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(category) DO UPDATE SET
+                    icon = excluded.icon,
+                    sort_order = excluded.sort_order,
+                    is_recurring = excluded.is_recurring,
+                    monthly_budget = excluded.monthly_budget,
+                    category_group = excluded.category_group,
+                    subcategory = excluded.subcategory,
+                    synced_at = excluded.synced_at
+                """,
+                (
+                    category,
+                    req.icon,
+                    req.sort_order,
+                    int(req.is_recurring),
+                    req.monthly_budget,
+                    req.category_group,
+                    req.subcategory,
+                    synced_at,
+                ),
+            )
+
+        row = conn.execute(
+            "SELECT category, icon, sort_order, is_recurring, monthly_budget, category_group, subcategory FROM categories WHERE category = ?",
+            (category,),
+        ).fetchone()
+
+    return _row(row)
+
+
 # ── /api/transactions ─────────────────────────────────────────────────────────
 
 @app.get("/api/transactions", dependencies=[Depends(require_api_key)])
@@ -1263,11 +1348,13 @@ def get_transactions(
     month:    Optional[int] = Query(None, ge=1, le=12, description="Filter by month (1–12)"),
     owner:    Optional[str] = Query(None, description="Owner name, or omit for all"),
     category: Optional[str] = Query(None, description="Exact category match"),
+    category_group: Optional[str] = Query(None, description="Category group match"),
+    uncategorised_only: bool = Query(False, description="Only transactions with no resolved category"),
     q:        Optional[str] = Query(None, description="Search raw_description and merchant"),
     limit:    int           = Query(100, ge=1, le=1000),
     offset:   int           = Query(0, ge=0),
 ):
-    qp = _tx_where(year, month, owner, category, q)
+    qp = _tx_where(year, month, owner, category, category_group, uncategorised_only, q)
     with _db() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM transactions_resolved{qp.clause}", qp.params).fetchone()[0]
         rows  = conn.execute(
@@ -1289,7 +1376,7 @@ def get_foreign_transactions(
     owner: Optional[str] = Query(None),
 ):
     """Transactions that were billed in a foreign currency."""
-    qp = _tx_where(year, month, owner, category=None, q=None)
+    qp = _tx_where(year, month, owner, category=None, category_group=None, uncategorised_only=False, q=None)
     if qp.clause:
         extra_clause = qp.clause + " AND original_currency IS NOT NULL"
     else:
@@ -1312,6 +1399,8 @@ def _tx_where(
     month:    Optional[int],
     owner:    Optional[str],
     category: Optional[str],
+    category_group: Optional[str],
+    uncategorised_only: bool,
     q:        Optional[str],
 ) -> _QueryParts:
     """Build a WHERE clause + params list for transaction queries."""
@@ -1330,6 +1419,13 @@ def _tx_where(
     if category:
         conditions.append("category = ?")
         params.append(category)
+    if category_group:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM categories c WHERE c.category = transactions_resolved.category AND c.category_group = ?)"
+        )
+        params.append(category_group)
+    if uncategorised_only:
+        conditions.append("(category IS NULL OR TRIM(category) = '')")
     if q:
         escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         conditions.append("(raw_description LIKE ? ESCAPE '\\' OR merchant LIKE ? ESCAPE '\\')")

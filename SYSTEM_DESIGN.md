@@ -210,18 +210,18 @@ The system alerts on:
   - `pwa/src/views/Dashboard.vue` — restored Flows view: month/owner navigation, summary cards, **spending by group** rollup with category chips, Chart.js 12-month trend, owner split table, and desktop-only higher-contrast Monthly Trend explanation styling for readability in the dark shell
   - `pwa/src/views/GroupDrilldown.vue` — Level 1 drill-down: group → category list with amounts, tx counts, mini bar chart
   - `pwa/src/views/CategoryDrilldown.vue` — Level 2 drill-down: category → transaction list with inline edit (merchant, category, alias, notes, apply-to-similar); breadcrumb back to group
-  - `pwa/src/views/Transactions.vue` — year/month/owner/category/search filters, paginated list (50/page), mobile expandable detail rows, desktop sortable table + detail panel; AI AMA input box (natural-language query → `POST /api/ai/query` → applies filters client-side); AI mode active banner with clear button; standard filter bars muted while AI mode active
+  - `pwa/src/views/Transactions.vue` — year/month/owner/category-group/category/search filters, paginated list (50/page), uncategorised-only filter, mobile expandable detail rows, desktop sortable table + detail panel; category-group filtering is resolved server-side via the `categories.category_group` reference data; transaction fetches bypass the long-lived GET cache so review status and category changes stay current; AI AMA input box (natural-language query → `POST /api/ai/query` → applies filters client-side); AI mode active banner with clear button; standard filter bars muted while AI mode active
   - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback; review queue fetches bypass the 24-hour GET cache so desktop badge counts and queue contents stay consistent; on load it fires `POST /api/review-queue/suggest` in the background, refreshes when new hints arrive, shows a 🤖 badge for AI-enriched rows, and pre-fills merchant/category from `suggested_merchant` + `ollama_suggestion` while still requiring explicit user confirmation
   - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
   - `pwa/src/views/Adjustment.vue` — focused adjustment view (`/adjustment`): quick inline editing of market value, appraisal/statement date, and unrealized P&L for Real Estate and Jamsostek/Retirement holdings only; month picker reuses the same `wealthSnapshotDates` + `collapseMonthDates` pattern as Holdings; post-save `getHoldings` uses `forceFresh: true` to bypass the 24 h IndexedDB cache so the updated value is immediately visible; `unrealised_pnl_idr` is preserved from the holding (not recalculated from cost basis) and exposed as an editable field to allow correction of previously stored values
   - `pwa/src/views/Audit.vue` — tabbed Audit section (`/audit`): **Call Over** tab (default) — side-by-side two-month asset comparison with variance; **PDF Completeness** tab — document completeness audit grid embedded via `AuditCompleteness.vue`; Call Over resolves the two latest months within `dashboardStartMonth`–`dashboardEndMonth`, fetches balances + holdings for both, deduplicates by month-key, and renders a grouped table (Cash & Liquid, Investments, Real Estate, Physical Assets) with per-row ▲/▼ variance, group subtotals, and grand total; assets present in one month but not the other show "—"; all rows sorted by biggest movers first; theme-aware styles with desktop dark-mode overrides
   - `pwa/src/views/AuditCompleteness.vue` — document completeness audit grid (now embedded as a child tab inside Audit.vue): rows=bank entities, columns=last 3 months, cells=PDF filenames or ❌ Missing; "missing" is flagged only when an entity has files in other months but not this one (new entities with no files in any month show "—"); powered by `GET /api/audit/completeness`; Refresh button and `onMounted` both bypass the IndexedDB cache (`forceFresh: true`) so the view always reflects the current filesystem state
-  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support, persisted dashboard month-range controls, and a manual “Refresh Mobile Data Now” action for the iPhone PWA cache
+  - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, category editor (create + edit + rename existing categories with metadata such as icon/group/subcategory/budget/recurring), grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support, persisted dashboard month-range controls, and a manual “Refresh Mobile Data Now” action for the iPhone PWA cache
   - `pwa/src/composables/useLayout.js` — responsive layout detection + persisted manual desktop override for wide-screen use
   - `pwa/src/components/` + `pwa/src/layouts/` — extracted shell pieces for mobile header/nav, desktop sidebar, desktop transactions table, and desktop review workspace; mobile offline state is indicated by the header status dot turning red instead of showing a blocking banner
   - `pwa/src/composables/useOfflineSync.js` — connectivity detection via periodic heartbeat (`GET /ping`, 30 s interval, 5 s `AbortController` timeout); catches `TypeError` (ERR_CONNECTION_REFUSED) and `AbortError` (ETIMEDOUT); probes immediately on mount and on tab foreground; browser `offline` event triggers immediate offline transition; `online` event triggers a probe rather than blindly trusting the OS signal; on recovery drains IndexedDB sync queue then calls the `onReconnect` callback
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, categories, years, selectedYear/Month (initialized to `dashboardEndMonth` so Flows/Wealth/Assets open on the configured range end, not the current calendar month), reviewCount badge, reactive `currentMonthKey` computed property, dashboard month range with upper-bound validation, and optional `forceFresh` bootstrap/resource loading for desktop and explicit refresh paths
-  - `pwa/src/api/client.js` — thin `fetch` wrapper for all 25+ API endpoints; successful GETs are persisted to IndexedDB, reused for up to 24 hours by default on the iPhone PWA, and offline GETs fall back to cached responses; mutation endpoints queue offline writes; selected calls can pass `forceFresh: true` to bypass cached GET data; direct non-queued calls are used for latency-sensitive actions such as `enrichReviewQueue()` (`POST /api/review-queue/suggest`); `console.warn` when API key is not configured
+  - `pwa/src/api/client.js` — thin `fetch` wrapper for all 25+ API endpoints including category-definition writes (`POST /api/categories`); successful GETs are persisted to IndexedDB, reused for up to 24 hours by default on the iPhone PWA, and offline GETs fall back to cached responses; mutation endpoints queue offline writes; selected calls can pass `forceFresh: true` to bypass cached GET data; direct non-queued calls are used for latency-sensitive actions such as `enrichReviewQueue()` (`POST /api/review-queue/suggest`) and Settings category edits; `console.warn` when API key is not configured
   - `pwa/src/sw.js` — workbox service worker: static assets (`StaleWhileRevalidate`, 7-day expiry); `/api/wealth/*` GETs use `NetworkFirst` (8 s timeout, 10-min cache) so POST mutations are immediately reflected in subsequent GETs; all other `/api/*` GETs use `StaleWhileRevalidate` (10-min expiry); audit and workspace endpoints (`/api/audit/`, `/api/pdf/local-workspace`) are excluded from SW caching so they always hit the network; mutation endpoints (`/sync`, `/import`, `/alias`, `/api/ai/*`) use `NetworkFirst` with 10 s timeout; `skipWaiting` + `clientsClaim` so new deployments take over all open tabs immediately
   - `pwa/vite.config.js` — @vitejs/plugin-vue + vite-plugin-pwa (`injectManifest`) + `/api` proxy to `:8090`
   - Build output: `pwa/dist/` — 391 KB JS (132 KB gzipped), service worker + workbox generated
@@ -1140,6 +1140,16 @@ Commands are accepted only from handles in `authorized_senders` or from yourself
 
 ```yaml
 services:
+  finance-api:
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./output/xls:/app/output/xls:ro
+      - ./secrets/bridge.token:/run/secrets/bridge.token:ro
+    environment:
+      SETTINGS_FILE: /app/config/settings.toml
+      BRIDGE_TOKEN_FILE: /run/secrets/bridge.token
+
   mail-agent:
     build: ./agent
     restart: unless-stopped
@@ -2183,6 +2193,7 @@ This script is part of the completed migration path, not the normal steady-state
 - `GET /api/health`
 - `GET /api/owners`
 - `GET /api/categories`
+- `POST /api/categories`
 - `GET /api/transactions`
 - `GET /api/transactions/foreign`
 - `GET /api/summary/*`
@@ -2197,6 +2208,7 @@ This script is part of the completed migration path, not the normal steady-state
 
 - `POST /api/alias` writes `merchant_aliases`, writes/updates `category_overrides`, updates the base row for immediate consistency, and inserts `audit_log` entries
 - `PATCH /api/transaction/{hash}/category` writes `category_overrides`, optionally updates aliases, can propagate to similar transactions, and logs the change
+- `POST /api/categories` inserts or updates category reference data in SQLite; renaming a category also propagates to `transactions`, `category_overrides`, and `merchant_aliases`
 - `POST /api/import` runs `direct_import()` and then triggers a SQLite backup on successful writes
 
 ### Frontend behavior
@@ -2204,7 +2216,7 @@ This script is part of the completed migration path, not the normal steady-state
 The PWA still provides:
 
 - dashboard and monthly summaries
-- transactions list and inline editing
+- transactions list with category-group/category/uncategorised filtering and inline editing
 - review queue with AI-assisted suggestions
 - foreign-spend view
 - settings/import/health controls

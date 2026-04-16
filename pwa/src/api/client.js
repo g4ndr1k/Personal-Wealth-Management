@@ -144,6 +144,7 @@ export const api = {
   health: (options = {}) => get('/health', {}, options),
   owners: (options = {}) => get('/owners', {}, options),
   categories: (options = {}) => get('/categories', {}, options),
+  saveCategoryDefinition: (body) => post('/categories', body),
   transactions: (p = {}, options = {}) => get('/transactions', p, options),
   foreignTransactions: (p = {}, options = {}) => get('/transactions/foreign', p, options),
   summaryYears: (options = {}) => get('/summary/years', {}, options),

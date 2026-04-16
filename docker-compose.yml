@@ -13,10 +13,12 @@ services:
       FINANCE_XLSX_INPUT:       /app/output/xls/ALL_TRANSACTIONS.xlsx
       FINANCE_API_KEY:          ${FINANCE_API_KEY}
       OLLAMA_FINANCE_HOST:      http://host.docker.internal:11434
+      BRIDGE_TOKEN_FILE:        /run/secrets/bridge.token
     volumes:
       - ./config/settings.toml:/app/config/settings.toml:ro
       - ./data:/app/data
       - ./output/xls:/app/output/xls:ro
+      - ./secrets/bridge.token:/run/secrets/bridge.token:ro
     ports:
       - "8090:8090"
     extra_hosts:

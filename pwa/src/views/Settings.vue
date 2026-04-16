@@ -47,6 +47,83 @@
       </div>
     </div>
 
+    <div class="setting-card">
+      <div class="setting-title">🏷️ Categories</div>
+      <div class="setting-desc">
+        Add a new category or edit an existing one. Renaming a category also updates existing transactions, overrides, and aliases.
+      </div>
+
+      <div class="setting-row">
+        <label class="range-label" for="category-preset-select">Category</label>
+        <div class="category-editor-toolbar">
+          <select
+            id="category-preset-select"
+            data-testid="category-preset-select"
+            class="range-select"
+            :value="categorySelection"
+            @change="onCategorySelectionChange($event.target.value)"
+          >
+            <option value="__new__">＋ New category</option>
+            <option v-for="category in editableCategories" :key="category.category" :value="category.category">
+              {{ category.icon || '🏷️' }} {{ category.category }}
+            </option>
+          </select>
+          <button class="btn btn-ghost btn-sm" type="button" @click="resetCategoryEditor">New</button>
+        </div>
+      </div>
+
+      <div class="category-editor-grid">
+        <div class="setting-row">
+          <label class="range-label">Name</label>
+          <input data-testid="category-name-input" v-model="categoryForm.category" class="form-input" type="text" placeholder="e.g. Dining Out" />
+        </div>
+        <div class="setting-row">
+          <label class="range-label">Icon</label>
+          <input data-testid="category-icon-input" v-model="categoryForm.icon" class="form-input" type="text" placeholder="🍽️" />
+        </div>
+        <div class="setting-row">
+          <label class="range-label">Sort Order</label>
+          <input data-testid="category-sort-order-input" v-model="categoryForm.sort_order" class="form-input" type="number" min="0" step="1" />
+        </div>
+        <div class="setting-row">
+          <label class="range-label">Monthly Budget</label>
+          <input data-testid="category-budget-input" v-model="categoryForm.monthly_budget" class="form-input" type="number" min="0" step="1000" placeholder="Optional" />
+        </div>
+        <div class="setting-row">
+          <label class="range-label">Group</label>
+          <input data-testid="category-group-input" v-model="categoryForm.category_group" class="form-input" type="text" placeholder="e.g. Living" />
+        </div>
+        <div class="setting-row">
+          <label class="range-label">Subcategory</label>
+          <input data-testid="category-subcategory-input" v-model="categoryForm.subcategory" class="form-input" type="text" placeholder="e.g. Meals" />
+        </div>
+      </div>
+
+      <label class="check-label" style="margin-top:10px">
+        <input data-testid="category-recurring-input" v-model="categoryForm.is_recurring" type="checkbox" />
+        Recurring category
+      </label>
+
+      <div class="category-editor-actions">
+        <button
+          data-testid="category-save-button"
+          class="btn btn-primary"
+          :disabled="categoryEditorState.loading || !categoryForm.category.trim()"
+          @click="saveCategoryEditor"
+        >
+          <span v-if="categoryEditorState.loading"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Saving…</span>
+          <span v-else>💾 Save Category</span>
+        </button>
+      </div>
+
+      <div v-if="categoryEditorState.error" class="alert alert-error" style="margin-top:10px">
+        ❌ {{ categoryEditorState.error }}
+      </div>
+      <div v-else-if="categoryEditorState.success" class="alert alert-success" style="margin-top:10px">
+        ✅ {{ categoryEditorState.success }}
+      </div>
+    </div>
+
     <!-- Health status -->
     <div class="setting-card">
       <div class="setting-title">📡 API Status</div>
@@ -507,7 +584,24 @@ const importState = ref({ loading: false, result: null, error: null })
 const importOpts  = ref({ dry_run: false, overwrite: false })
 const refreshCacheState = ref({ loading: false, error: null, doneAt: '' })
 const pipelineState = ref({ loading: false, status: null, error: null })
+const categoryEditorState = ref({ loading: false, error: null, success: '' })
 const showPdfWorkspace = ref(false)
+
+function makeEmptyCategoryForm() {
+  return {
+    original_category: '',
+    category: '',
+    icon: '',
+    sort_order: 99,
+    is_recurring: false,
+    monthly_budget: '',
+    category_group: '',
+    subcategory: '',
+  }
+}
+
+const categorySelection = ref('__new__')
+const categoryForm = ref(makeEmptyCategoryForm())
 
 // ── Mac desktop detection ────────────────────────────────────────────────────
 // navigator.platform is "MacIntel" on macOS (and iPadOS ≥13 — exclude via maxTouchPoints).
@@ -622,6 +716,40 @@ const pdfCounts = computed(() => {
   }
   return counts
 })
+
+const editableCategories = computed(() =>
+  [...(store.categories || [])].sort((a, b) => a.category.localeCompare(b.category))
+)
+
+function resetCategoryEditor() {
+  categorySelection.value = '__new__'
+  categoryForm.value = makeEmptyCategoryForm()
+  categoryEditorState.value = { loading: false, error: null, success: '' }
+}
+
+function onCategorySelectionChange(value) {
+  categorySelection.value = value
+  categoryEditorState.value = { loading: false, error: null, success: '' }
+  if (value === '__new__') {
+    categoryForm.value = makeEmptyCategoryForm()
+    return
+  }
+  const match = editableCategories.value.find((category) => category.category === value)
+  if (!match) {
+    categoryForm.value = makeEmptyCategoryForm()
+    return
+  }
+  categoryForm.value = {
+    original_category: match.category,
+    category: match.category,
+    icon: match.icon || '',
+    sort_order: match.sort_order ?? 99,
+    is_recurring: !!match.is_recurring,
+    monthly_budget: match.monthly_budget ?? '',
+    category_group: match.category_group || '',
+    subcategory: match.subcategory || '',
+  }
+}
 
 function resetPdf() {
   pdf.value = EMPTY_PDF_STATE()
@@ -917,6 +1045,34 @@ async function doSync() {
   }
 }
 
+async function saveCategoryEditor() {
+  categoryEditorState.value = { loading: true, error: null, success: '' }
+  try {
+    const payload = {
+      original_category: categoryForm.value.original_category,
+      category: categoryForm.value.category.trim(),
+      icon: categoryForm.value.icon.trim(),
+      sort_order: Number(categoryForm.value.sort_order || 0),
+      monthly_budget: categoryForm.value.monthly_budget === '' ? null : Number(categoryForm.value.monthly_budget),
+      category_group: categoryForm.value.category_group.trim(),
+      subcategory: categoryForm.value.subcategory.trim(),
+      is_recurring: !!categoryForm.value.is_recurring,
+    }
+    const saved = await api.saveCategoryDefinition(payload)
+    await store.loadCategories({ forceFresh: true })
+    categorySelection.value = saved.category
+    categoryForm.value.original_category = saved.category
+    categoryForm.value.category = saved.category
+    categoryEditorState.value = {
+      loading: false,
+      error: null,
+      success: `Saved ${saved.category}`,
+    }
+  } catch (e) {
+    categoryEditorState.value = { loading: false, error: e.message, success: '' }
+  }
+}
+
 async function doImport() {
   importState.value = { loading: true, result: null, error: null }
   try {
@@ -991,11 +1147,29 @@ async function runPipeline() {
 
 onMounted(async () => {
   await store.loadHealth({ forceFresh: true })
+  await store.loadCategories({ forceFresh: true })
   await loadPipelineStatus()
 })
 </script>
 
 <style scoped>
+.category-editor-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.category-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.category-editor-actions {
+  margin-top: 12px;
+}
+
 /* ── PDF section ──────────────────────────────────────────────────────────── */
 
 /* Wrapper around the button so title tooltip works when button is :disabled */
