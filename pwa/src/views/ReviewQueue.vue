@@ -5,6 +5,13 @@
       <span v-if="items.length" style="margin-left:auto;font-size:12px;font-weight:600;color:var(--text-muted)">
         {{ items.length }} remaining
       </span>
+      <button
+        v-if="!store.autoAiRefine && items.length"
+        class="btn btn-ghost btn-sm"
+        style="font-size:11px;padding:2px 8px;margin-left:8px"
+        :disabled="enriching"
+        @click="enrichReviewQueue"
+      >{{ enriching ? '🤖 Getting suggestions…' : '✨ Get AI suggestions' }}</button>
     </div>
 
     <!-- Loading -->
@@ -49,6 +56,8 @@
             <span v-if="selectedItem.ollama_suggestion" style="color:var(--accent);font-size:11px;margin-left:4px">🤖</span>
           </div>
           <div class="alias-form">
+            <div v-if="store.isReadOnly" class="ro-notice">👁 Read-only — open on Mac to categorise transactions.</div>
+            <template v-else>
             <div v-if="selectedItem.ollama_suggestion" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
               🤖 AI suggested: {{ selectedItem.suggested_merchant }} · {{ selectedItem.ollama_suggestion }}
             </div>
@@ -102,6 +111,7 @@
               <button class="btn btn-ghost" :disabled="saving" @click="ignoreItem(selectedItem)">🚫 Ignore</button>
               <button class="btn btn-ghost" @click="expandedHash = null">Cancel</button>
             </div>
+            </template>
           </div>
         </div>
         <div v-else class="empty-state" style="padding:40px 0">
@@ -129,6 +139,8 @@
 
           <div v-if="expandedHash === item.hash" class="review-body">
             <div class="alias-form">
+              <div v-if="store.isReadOnly" class="ro-notice">👁 Read-only — open on Mac to categorise transactions.</div>
+              <template v-else>
               <div v-if="item.ollama_suggestion" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
                 🤖 AI suggested: {{ item.suggested_merchant }} · {{ item.ollama_suggestion }}
               </div>
@@ -182,6 +194,7 @@
                 <button class="btn btn-ghost" :disabled="saving" @click="ignoreItem(item)">🚫 Ignore</button>
                 <button class="btn btn-ghost" @click="expandedHash = null">Cancel</button>
               </div>
+              </template>
             </div>
           </div>
         </div>
@@ -222,6 +235,7 @@ const error       = ref(null)
 const expandedHash = ref(null)
 const saving      = ref(false)
 const hasMore     = ref(false)
+const enriching   = ref(false)
 const toast       = ref('')
 let toastTimer    = null
 
@@ -343,21 +357,31 @@ async function load() {
     hasMore.value = items.value.length === LIMIT
     if (data.total != null) store.setReviewCount(data.total)
 
-    // Fire enrichment in background — don't block render
-    api.enrichReviewQueue()
-      .then(result => {
-        if ((result.suggested ?? 0) + (result.applied ?? 0) > 0) {
-          showToast('🤖 AI suggestions ready — refreshing…')
-          return api.reviewQueue(LIMIT, { forceFresh: true })
-            .then(d => { items.value = d.pending ?? d })
-        }
-      })
-      .catch(() => {})
+    // Fire enrichment in background — only when auto-refine is on
+    if (store.autoAiRefine) {
+      enrichReviewQueue()
+    }
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
   }
+}
+
+async function enrichReviewQueue() {
+  if (enriching.value) return
+  enriching.value = true
+  try {
+    const result = await api.enrichReviewQueue()
+    if ((result.suggested ?? 0) + (result.applied ?? 0) > 0) {
+      showToast('🤖 AI suggestions ready — refreshing…')
+      const d = await api.reviewQueue(LIMIT, { forceFresh: true })
+      items.value = d.pending ?? d
+    } else {
+      showToast('🤖 No new AI suggestions')
+    }
+  } catch {}
+  finally { enriching.value = false }
 }
 
 async function loadMore() {
@@ -379,4 +403,13 @@ onMounted(load)
 <style scoped>
 .toast-enter-active, .toast-leave-active { transition: opacity 0.2s, transform 0.2s; }
 .toast-enter-from, .toast-leave-to { opacity: 0; transform: translateX(-50%) translateY(10px); }
+.ro-notice {
+  padding: 10px 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  color: #1d4ed8;
+  font-size: 13px;
+  text-align: center;
+}
 </style>

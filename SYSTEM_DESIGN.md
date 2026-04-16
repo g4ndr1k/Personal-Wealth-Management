@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.14.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅
+**Version:** 3.15.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema) · Synology DS920+ (AMD64 Docker)
 **Last validated against:** checked-in codebase 2026-04-16
 
@@ -2173,9 +2173,26 @@ The database and backup files are expected to use restrictive local permissions 
 - L3 writes `ollama_suggestion` and `suggested_merchant` to `transactions`
 - User confirmation via `POST /api/alias` writes both `merchant_aliases` and `category_overrides`
 
+### AI refinement toggle
+
+AI enrichment in the Review Queue, Flows trend explanation, and Wealth trend explanation is **manual by default**. A toggle in Settings → "AI Refinement" controls `autoAiRefine` (Pinia store, persisted to localStorage). When off, a "✨ Get AI suggestions" / "✨ Refine with AI" button appears in each view for on-demand enrichment. When on, enrichment fires automatically on page load (original behaviour).
+
 ### Alias backfill
 
 When the user confirms an alias, the API can also apply the category/merchant override to similar uncategorized rows. These writes are recorded in `category_overrides` with `updated_by='alias_backfill'`.
+
+### Excluded categories
+
+The following categories are excluded from income and expense totals across all SQL queries, Python sets, and frontend calculations:
+
+| Category | Reason |
+|---|---|
+| `Transfer` | Internal fund movements — not real income or spending |
+| `Adjustment` | Correction entries — not real transactions |
+| `Ignored` | Explicitly suppressed by user |
+| `Opening Balance` | Statement seed rows — not real transactions |
+
+These exclusions apply to: Flows view income/expense bars, Transactions view totals, the `income_only` filter, and the income/expense KPI cards.
 
 ---
 
@@ -2225,7 +2242,7 @@ This script is part of the completed migration path, not the normal steady-state
 - `GET /api/owners`
 - `GET /api/categories`
 - `POST /api/categories`
-- `GET /api/transactions`
+- `GET /api/transactions` — optional query params: `income_only=true` (returns `amount >= 0` rows excluding transfer/adjustment/ignored/opening-balance categories), `category_group`, `category`, `owner`, `institution`, `search`, `limit`, `offset`, `date_from`, `date_to`
 - `GET /api/transactions/foreign`
 - `GET /api/summary/*`
 - `GET /api/review-queue`
@@ -2244,15 +2261,23 @@ This script is part of the completed migration path, not the normal steady-state
 
 ### Frontend behavior
 
-The PWA still provides:
+The PWA provides:
 
-- dashboard and monthly summaries
-- transactions list with category-group/category/uncategorised filtering and inline editing
-- review queue with AI-assisted suggestions
-- foreign-spend view
-- settings/import/health controls
+- Dashboard (main KPI landing page with Charts.js visualizations)
+- **Transactions** — filterable list with category-group/category/owner/search/date filters and inline category editing
+  - **Income group**: a `💰 Income` pseudo-group sends `income_only=true` to the API rather than a `category_group` param
+  - **Save button**: category edit panel always starts with an empty dropdown selection; the Save button enables as soon as a category is chosen (prevents false-disabled state on re-open)
+- **Flows** — monthly income/expense bars (Transfer, Adjustment, Ignored, Opening Balance excluded from totals)
+- **Review Queue** — AI suggestions (on-demand or auto depending on `autoAiRefine` toggle)
+- Wealth / Holdings / Adjustment / Audit views
+- Foreign-spend view
+- Settings — includes AI Refinement toggle, Import, NAS Sync, PDF Workspace
 
-GET responses are cached in IndexedDB for offline/mobile use, while selected mutation and freshness-sensitive flows bypass stale cache when needed.
+GET responses are cached in IndexedDB (24 h TTL) for offline/mobile use, while selected mutation and freshness-sensitive flows bypass stale cache when needed.
+
+#### Read-only mode indicator
+
+When `FINANCE_READ_ONLY=true`, the PWA shows a small 👁 eye icon in the app header. Clicking it shows the read-only notice. Write controls (category edit, alias save, import, snapshot generation, etc.) are hidden via `v-if="!store.isReadOnly"`.
 
 ---
 
@@ -2649,21 +2674,27 @@ Open `/audit` → PDF Completeness. Confirm all expected statements are present 
 
 ### Overview
 
-The Mac (authoritative) periodically syncs `finance.db` to a Synology DS920+ NAS via rsync over SSH. The NAS runs the same `finance-api` Docker image with `FINANCE_READ_ONLY=true`, serving the PWA at `http://192.168.1.44:8090`. Mobile users bookmark the NAS URL for always-on read access — when the Mac sleeps, the PWA remains fully accessible.
+The Mac (authoritative) periodically syncs `finance.db` to a Synology DS920+ NAS via SSH. The NAS runs the same `finance-api` Docker image with `FINANCE_READ_ONLY=true`. iPhone connects to the NAS via **Tailscale** at `http://ds920plus.tail55bdc2.ts.net:8090` — this means the iPhone always hits the NAS container, never the Mac.
+
+```
+iPhone ──Tailscale──▶ ds920plus:8090  (NAS, always-on, read-only)
+Mac                 ──LAN──▶ 192.168.1.44:8090  (NAS, local access)
+Mac                 ──localhost──▶ 127.0.0.1:8090  (Mac, read+write)
+```
 
 ### Architecture
 
 ```
 Mac (authoritative)                           Synology DS920+ (always-on)
 ────────────────────                          ──────────────────────────
-data/finance.db  ──daily rsync + on-demand──▶  /volume1/finance/finance_readonly.db
-finance-api :8090  (read+write)                finance-api-nas :8090 (read-only)
-                                               FINANCE_READ_ONLY=true
+data/finance.db  ──ssh cat pipe + on-demand──▶  /volume1/finance/finance_readonly.db
+finance-api :8090  (read+write)                 finance-api-nas :8090 (read-only)
+                                                FINANCE_READ_ONLY=true
 ```
 
 - NAS runs the **same Docker image** built for `linux/amd64` — no separate codebase
 - PWA detects `read_only: true` in `/api/health` and adapts the UI automatically
-- Blue read-only banner replaces write controls across all views
+- Read-only indicator is a 👁 eye icon in the app header (not a banner)
 
 ### Sync mechanism
 
@@ -2699,20 +2730,23 @@ When `FINANCE_READ_ONLY=true`:
 
 ### NAS deployment
 
+Use the automated script — it handles build, transfer, and container recreation:
+
 ```bash
-# Build AMD64 image on Mac (for Synology's x86_64 CPU)
-docker buildx build --platform linux/amd64 -t finance-api-nas -f finance/Dockerfile .
-
-# Save and transfer
-docker save finance-api-nas | gzip > /tmp/finance-api-nas.tar.gz
-scp /tmp/finance-api-nas.tar.gz g4ndr1k@192.168.1.44:/tmp/
-
-# On NAS (via SSH)
-ssh g4ndr1k@192.168.1.44
-docker load < /tmp/finance-api-nas.tar.gz
+bash scripts/deploy_nas.sh
 ```
 
-NAS container configuration (via Container Manager or CLI):
+The script:
+1. `docker buildx build --no-cache --platform linux/amd64` — always builds fresh (no layer-cache stale-PWA issues)
+2. `docker save | gzip` → `ssh cat >` upload to NAS (rsync protocol is restricted on Synology; cat-pipe is reliable)
+3. `docker load` on NAS to register the new image
+4. `docker stop finance-api-nas && docker rm finance-api-nas` — removes the old container so the new image is picked up
+5. `docker run` with full env and volume config
+6. Verifies `Cache-Control` header on `sw.js` — must be `no-cache, no-store, must-revalidate` for iOS service-worker updates to work
+
+The Claude Code Stop hook (`~/.claude/settings.local.json`) also runs `docker compose build --no-cache finance-api && docker compose up -d` automatically after every session on the Mac, ensuring the Mac instance is always up to date. **NAS deployments must be run manually** via `deploy_nas.sh`.
+
+NAS container configuration (for reference — managed by `deploy_nas.sh`):
 ```bash
 docker run -d \
   --name finance-api-nas \
@@ -2723,7 +2757,7 @@ docker run -d \
   -e FINANCE_API_KEY=<same-key-as-mac> \
   -e OLLAMA_FINANCE_HOST="" \
   -v /volume1/finance:/app/data:ro \
-  finance-api-nas
+  agentic-ai-finance-api:amd64
 ```
 
 ### One-time NAS setup
@@ -2739,8 +2773,10 @@ docker run -d \
 
 ### Verification
 
-1. **NAS reachable**: `curl -s http://192.168.1.44:8090/api/health` → `{"status":"ok","read_only":true}`
-2. **Write blocked**: `curl -X POST http://192.168.1.44:8090/api/alias -H 'X-Api-Key: ...'` → 403
-3. **Data present**: `curl -s http://192.168.1.44:8090/api/transactions?limit=1` → returns transaction data
-4. **PWA loads**: Open `http://192.168.1.44:8090` on iPhone — blue banner visible, write buttons hidden
+1. **NAS reachable (LAN)**: `curl -s http://192.168.1.44:8090/api/health` → `{"status":"ok","read_only":true}`
+2. **NAS reachable (Tailscale)**: `curl -s http://ds920plus.tail55bdc2.ts.net:8090/api/health` → same
+3. **Write blocked**: `curl -X POST http://192.168.1.44:8090/api/alias -H 'X-Api-Key: ...'` → 403
+4. **Data present**: `curl -s http://192.168.1.44:8090/api/transactions?limit=1` → returns transaction data
+5. **PWA loads on iPhone**: Open `http://ds920plus.tail55bdc2.ts.net:8090` — 👁 eye icon visible in header, write buttons hidden
+6. **sw.js cache header**: `curl -I http://192.168.1.44:8090/sw.js` → `cache-control: no-cache, no-store, must-revalidate`
 5. **Sync works**: Trigger manual sync from Mac Settings → verify `finance_readonly.db` timestamp updated on NAS

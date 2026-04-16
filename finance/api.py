@@ -62,6 +62,9 @@ _ollama_cfg    = get_ollama_finance_config(_cfg)
 
 _db_path: str = _finance_cfg.sqlite_db
 
+# Read-only mode: set FINANCE_READ_ONLY=true on the NAS replica to block writes.
+_READ_ONLY: bool = os.environ.get("FINANCE_READ_ONLY", "false").lower() in ("true", "1", "yes")
+
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
@@ -140,6 +143,12 @@ def require_api_key(x_api_key: str = Header(default="")):
         raise HTTPException(status_code=500, detail="FINANCE_API_KEY not configured")
     if not hmac.compare_digest(x_api_key, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_writable():
+    """Dependency: raises 403 when running in read-only mode (NAS replica)."""
+    if _READ_ONLY:
+        raise HTTPException(status_code=403, detail="read_only_mode")
 
 
 # ── DB connection helper ──────────────────────────────────────────────────────
@@ -237,10 +246,10 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
         SELECT
             owner,
             SUM(CASE WHEN amount > 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                       THEN amount ELSE 0 END) AS income,
             SUM(CASE WHEN amount < 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                       THEN amount ELSE 0 END) AS expense,
             COUNT(*) AS tx_count
         FROM transactions_resolved
@@ -255,10 +264,10 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
         """
         SELECT
             SUM(CASE WHEN amount > 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                       THEN amount ELSE 0 END) AS income,
             SUM(CASE WHEN amount < 0
-                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                      AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                       THEN amount ELSE 0 END) AS expense,
             COUNT(*) AS tx_count
         FROM transactions_resolved
@@ -279,7 +288,7 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
     total_income = totals["income"] or 0.0
     total_expense = totals["expense"] or 0.0
 
-    transfer_cats = {"Transfer", "Adjustment", "Ignored"}
+    transfer_cats = {"Transfer", "Adjustment", "Ignored", "Opening Balance"}
     by_category = []
     for r in cat_rows:
         amt = r["total_amount"] or 0.0
@@ -353,7 +362,7 @@ def _monthly_flow_delta_rows(curr: dict, prev: dict) -> list[dict]:
 
 
 def _monthly_flow_category_deltas(curr: dict, prev: dict) -> list[dict]:
-    excluded = {"Transfer", "Adjustment", "Ignored", "Uncategorised"}
+    excluded = {"Transfer", "Adjustment", "Ignored", "Opening Balance", "Uncategorised"}
     curr_map = {
         row["category"]: abs(row["amount"])
         for row in curr["by_category"]
@@ -391,7 +400,7 @@ def _monthly_flow_explanation_fallback(curr: dict, prev: dict) -> dict:
     top_spend_up = next((row for row in category_deltas if row["delta"] > 0), None)
     top_spend_down = next((row for row in category_deltas if row["delta"] < 0), None)
     current_spending = sorted(
-        [row for row in curr["by_category"] if row["amount"] < 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored"}],
+        [row for row in curr["by_category"] if row["amount"] < 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Opening Balance"}],
         key=lambda row: abs(row["amount"]),
         reverse=True,
     )
@@ -546,7 +555,7 @@ def _fetch_monthly_label_amounts(
         WHERE strftime('%Y', date) = ?
           AND strftime('%m', date) = ?
           AND amount {comparator} 0
-          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
         GROUP BY label
         HAVING ABS(total_amount) >= 0.5
         ORDER BY total_amount DESC, label
@@ -598,12 +607,12 @@ def _build_monthly_flow_question_context(conn: sqlite3.Connection, year: int, mo
     income_categories_curr = [
         {"label": row["category"], "amount": float(row["amount"] or 0)}
         for row in curr["by_category"]
-        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Uncategorised"}
+        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Opening Balance", "Uncategorised"}
     ]
     income_categories_prev = [
         {"label": row["category"], "amount": float(row["amount"] or 0)}
         for row in prev["by_category"]
-        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Uncategorised"}
+        if row["amount"] > 0 and row["category"] not in {"Transfer", "Adjustment", "Ignored", "Opening Balance", "Uncategorised"}
     ]
     income_category_deltas = _diff_monthly_amount_maps(income_categories_curr, income_categories_prev)
 
@@ -1222,6 +1231,7 @@ def health():
         ).fetchone()[0]
     return {
         "status":            "ok",
+        "read_only":         _READ_ONLY,
         "transaction_count": tx_count,
         "needs_review":      needs_rev,
         "last_sync":         sync_row["synced_at"] if sync_row else None,
@@ -1266,7 +1276,7 @@ def get_categories():
     ]
 
 
-@app.post("/api/categories", dependencies=[Depends(require_api_key)])
+@app.post("/api/categories", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def post_category(req: CategoryUpsertRequest):
     category = (req.category or "").strip()
     original_category = (req.original_category or "").strip() or None
@@ -1350,11 +1360,12 @@ def get_transactions(
     category: Optional[str] = Query(None, description="Exact category match"),
     category_group: Optional[str] = Query(None, description="Category group match"),
     uncategorised_only: bool = Query(False, description="Only transactions with no resolved category"),
+    income_only: bool = Query(False, description="Only transactions with amount >= 0"),
     q:        Optional[str] = Query(None, description="Search raw_description and merchant"),
     limit:    int           = Query(100, ge=1, le=1000),
     offset:   int           = Query(0, ge=0),
 ):
-    qp = _tx_where(year, month, owner, category, category_group, uncategorised_only, q)
+    qp = _tx_where(year, month, owner, category, category_group, uncategorised_only, q, income_only=income_only)
     with _db() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM transactions_resolved{qp.clause}", qp.params).fetchone()[0]
         rows  = conn.execute(
@@ -1402,6 +1413,7 @@ def _tx_where(
     category_group: Optional[str],
     uncategorised_only: bool,
     q:        Optional[str],
+    income_only: bool = False,
 ) -> _QueryParts:
     """Build a WHERE clause + params list for transaction queries."""
     conditions: list[str] = []
@@ -1424,6 +1436,8 @@ def _tx_where(
             "EXISTS (SELECT 1 FROM categories c WHERE c.category = transactions_resolved.category AND c.category_group = ?)"
         )
         params.append(category_group)
+    if income_only:
+        conditions.append("amount >= 0 AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))")
     if uncategorised_only:
         conditions.append("(category IS NULL OR TRIM(category) = '')")
     if q:
@@ -1457,10 +1471,10 @@ def get_annual_summary(year: int):
             SELECT
                 CAST(strftime('%m', date) AS INTEGER) AS month,
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                           THEN amount ELSE 0 END)      AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                           THEN amount ELSE 0 END)      AS expense,
                 COUNT(*)                               AS tx_count
             FROM transactions_resolved
@@ -1475,10 +1489,10 @@ def get_annual_summary(year: int):
             """
             SELECT
                 SUM(CASE WHEN amount > 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                           THEN amount ELSE 0 END) AS income,
                 SUM(CASE WHEN amount < 0
-                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
+                          AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored','Opening Balance'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
             FROM transactions_resolved
@@ -1587,7 +1601,7 @@ def get_review_queue(limit: int = Query(50, ge=1, le=200)):
 
 # ── /api/review-queue/suggest ────────────────────────────────────────────────
 
-@app.post("/api/review-queue/suggest", dependencies=[Depends(require_api_key)])
+@app.post("/api/review-queue/suggest", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def suggest_review_queue():
     """
     Run the full categorizer (L1→L3) on every null-category transaction
@@ -1641,7 +1655,7 @@ def suggest_review_queue():
 
 # ── /api/alias ────────────────────────────────────────────────────────────────
 
-@app.post("/api/alias", dependencies=[Depends(require_api_key)])
+@app.post("/api/alias", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def post_alias(req: AliasRequest):
     """
     Confirm a merchant alias from the review queue.
@@ -1799,7 +1813,7 @@ def post_alias(req: AliasRequest):
 
 # ── /api/backfill-aliases ──────────────────────────────────────────────────
 
-@app.post("/api/backfill-aliases", dependencies=[Depends(require_api_key)])
+@app.post("/api/backfill-aliases", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def backfill_aliases():
     """
     Re-apply all merchant aliases against uncategorised transactions in SQLite.
@@ -1887,7 +1901,7 @@ def backfill_aliases():
 
 # ── /api/transaction/{hash}/category ──────────────────────────────────────────
 
-@app.patch("/api/transaction/{tx_hash}/category", dependencies=[Depends(require_api_key)])
+@app.patch("/api/transaction/{tx_hash}/category", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
     """
     Manually override the category for a specific transaction.
@@ -2013,9 +2027,34 @@ def post_sync():
     }
 
 
+# ── /api/nas-sync ─────────────────────────────────────────────────────────────
+
+@app.get("/api/nas-sync/status", dependencies=[Depends(require_api_key)])
+def get_nas_sync_status():
+    """Return NAS sync configuration and last-sync timestamp."""
+    from finance.backup import NAS_SYNC_TARGET, _load_sync_state
+    state = _load_sync_state()
+    return {
+        "configured":    bool(NAS_SYNC_TARGET),
+        "target":        NAS_SYNC_TARGET or None,
+        "last_synced_at": state.get("last_nas_sync"),
+    }
+
+
+@app.post("/api/nas-sync", dependencies=[Depends(require_api_key), Depends(require_writable)])
+def post_nas_sync():
+    """
+    Manually trigger an rsync of the latest backup to the NAS.
+    Blocked in read-only mode. Always forces the sync (ignores 24h throttle).
+    Requires NAS_SYNC_TARGET env var to be configured.
+    """
+    from finance.backup import sync_to_nas
+    return sync_to_nas(_db_path, force=True)
+
+
 # ── /api/import ───────────────────────────────────────────────────────────────
 
-@app.post("/api/import", dependencies=[Depends(require_api_key)])
+@app.post("/api/import", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def post_import(req: ImportRequest = ImportRequest()):
     """
     Import ALL_TRANSACTIONS.xlsx into SQLite.
@@ -2194,7 +2233,7 @@ def get_balances(
     return [_row(r) for r in rows]
 
 
-@app.post("/api/wealth/balances", dependencies=[Depends(require_api_key)])
+@app.post("/api/wealth/balances", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def upsert_balance(req: BalanceUpsertRequest):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _db() as conn:
@@ -2226,7 +2265,7 @@ def upsert_balance(req: BalanceUpsertRequest):
     return {"ok": True, "balance": _row(row)}
 
 
-@app.delete("/api/wealth/balances/{balance_id}", dependencies=[Depends(require_api_key)])
+@app.delete("/api/wealth/balances/{balance_id}", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def delete_balance(balance_id: int):
     with _db() as conn:
         row = conn.execute(
@@ -2267,7 +2306,7 @@ def get_holdings(
     return [_row(r) for r in rows]
 
 
-@app.post("/api/wealth/holdings", dependencies=[Depends(require_api_key)])
+@app.post("/api/wealth/holdings", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def upsert_holding(req: HoldingUpsertRequest):
     today       = datetime.now().strftime("%Y-%m-%d")
     asset_group = _ASSET_CLASS_GROUP.get(req.asset_class, "Investments")
@@ -2329,7 +2368,7 @@ class CarryForwardRequest(BaseModel):
     snapshot_date: str
 
 
-@app.post("/api/wealth/holdings/carry-forward", dependencies=[Depends(require_api_key)])
+@app.post("/api/wealth/holdings/carry-forward", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def carry_forward_holdings(req: CarryForwardRequest):
     """
     For carry-forward asset classes (retirement, real_estate, vehicle, gold, other),
@@ -2402,7 +2441,7 @@ def carry_forward_holdings(req: CarryForwardRequest):
     return {"ok": True, "carried": carried}
 
 
-@app.delete("/api/wealth/holdings/{holding_id}", dependencies=[Depends(require_api_key)])
+@app.delete("/api/wealth/holdings/{holding_id}", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def delete_holding(holding_id: int):
     with _db() as conn:
         row = conn.execute(
@@ -2508,7 +2547,7 @@ def get_liabilities(
     return [_row(r) for r in rows]
 
 
-@app.post("/api/wealth/liabilities", dependencies=[Depends(require_api_key)])
+@app.post("/api/wealth/liabilities", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def upsert_liability(req: LiabilityUpsertRequest):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _db() as conn:
@@ -2550,7 +2589,7 @@ def upsert_liability(req: LiabilityUpsertRequest):
     return {"ok": True, "liability": _row(row)}
 
 
-@app.delete("/api/wealth/liabilities/{liability_id}", dependencies=[Depends(require_api_key)])
+@app.delete("/api/wealth/liabilities/{liability_id}", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def delete_liability(liability_id: int):
     with _db() as conn:
         row = conn.execute(
@@ -2588,7 +2627,7 @@ def get_snapshot_dates():
     return [r[0] for r in rows]
 
 
-@app.post("/api/wealth/snapshot", dependencies=[Depends(require_api_key)])
+@app.post("/api/wealth/snapshot", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def create_snapshot(req: SnapshotRequest):
     """
     Aggregate account_balances + holdings + liabilities for the given date
@@ -3074,7 +3113,7 @@ class _ProcessLocalReq(BaseModel):
     filename: str | None = None
     relative_path: str | None = None
 
-@app.post("/api/pdf/process-local")
+@app.post("/api/pdf/process-local", dependencies=[Depends(require_writable)])
 async def pdf_process_local(req: _ProcessLocalReq, _auth=Depends(require_api_key)):
     """
     Ask the bridge to process a PDF by folder+relative path — no byte upload needed.
@@ -3148,7 +3187,7 @@ async def pipeline_status():
         raise HTTPException(502, f"Bridge unreachable: {e}")
 
 
-@app.post("/api/pipeline/run", dependencies=[Depends(require_api_key)])
+@app.post("/api/pipeline/run", dependencies=[Depends(require_api_key), Depends(require_writable)])
 async def pipeline_run():
     token = _read_bridge_token()
     try:
@@ -3518,7 +3557,9 @@ if _pwa_dist.is_dir():
 
     @app.get("/sw.js")
     async def _pwa_sw():
-        return _FileResponse(str(_pwa_dist / "sw.js"), media_type="application/javascript")
+        resp = _FileResponse(str(_pwa_dist / "sw.js"), media_type="application/javascript")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
 
     # Workbox runtime (filename includes a build hash)
     for _wb in _pwa_dist.glob("workbox-*.js"):
@@ -3534,6 +3575,8 @@ if _pwa_dist.is_dir():
     # This MUST be the very last route — after all /api/* and static mounts.
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
-        return _FileResponse(_index_html, media_type="text/html")
+        resp = _FileResponse(_index_html, media_type="text/html")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
 
     log.info("PWA static files served from %s", _pwa_dist)

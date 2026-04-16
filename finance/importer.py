@@ -29,8 +29,10 @@ Reimport safety
 from __future__ import annotations
 import argparse
 import calendar
+import difflib
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -47,6 +49,66 @@ from finance.models import FinanceTransaction, parse_xlsx_date
 from finance.categorizer import Categorizer, match_internal_transfers
 
 log = logging.getLogger(__name__)
+
+
+def _identity_key(date: str, amount: float, institution: str, account: str, owner: str) -> tuple[str, float, str, str, str]:
+    return (date, round(float(amount), 2), institution, account or "", owner)
+
+
+def _description_tokens(text: str) -> list[str]:
+    return re.findall(r"[A-Z0-9]+", (text or "").upper())
+
+
+def _ordered_prefix_token_match(shorter: list[str], longer: list[str]) -> bool:
+    pos = 0
+    for token in shorter:
+        matched = False
+        while pos < len(longer):
+            current = longer[pos]
+            pos += 1
+            if current == token or current.startswith(token):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
+def _should_reconcile_parser_variant(existing_desc: str, incoming_desc: str) -> bool:
+    existing_desc = (existing_desc or "").strip()
+    incoming_desc = (incoming_desc or "").strip()
+    if not existing_desc or not incoming_desc or existing_desc == incoming_desc:
+        return False
+
+    shorter, longer = sorted((existing_desc, incoming_desc), key=len)
+    if len(longer) - len(shorter) < 12:
+        return False
+
+    shorter_tokens = _description_tokens(shorter)
+    longer_tokens = _description_tokens(longer)
+    if len(shorter_tokens) < 4 or len(longer_tokens) < len(shorter_tokens) + 2:
+        return False
+
+    if not _ordered_prefix_token_match(shorter_tokens, longer_tokens):
+        return False
+
+    ratio = difflib.SequenceMatcher(None, shorter, longer).ratio()
+    return ratio >= 0.55
+
+
+def _load_existing_transactions_by_identity(conn) -> dict[tuple[str, float, str, str, str], list[dict]]:
+    rows = conn.execute(
+        """
+        SELECT hash, date, amount, raw_description, merchant, category,
+               institution, account, owner, import_file
+        FROM transactions
+        """
+    ).fetchall()
+    out: dict[tuple[str, float, str, str, str], list[dict]] = {}
+    for row in rows:
+        key = _identity_key(row["date"], row["amount"], row["institution"], row["account"], row["owner"])
+        out.setdefault(key, []).append(dict(row))
+    return out
 
 # ── ALL_TRANSACTIONS.xlsx column positions (0-based) ─────────────────────────
 # Header row: Owner | Month | Bank | Statement Type | Tgl. Transaksi |
@@ -138,6 +200,7 @@ def direct_import(
     existing_hashes: set[str] = {
         r[0] for r in conn.execute("SELECT hash FROM transactions").fetchall()
     }
+    existing_by_identity = _load_existing_transactions_by_identity(conn)
     hash_to_category: dict[str, str] = {}
     if overwrite:
         hash_to_category = {
@@ -166,7 +229,9 @@ def direct_import(
     # ── 4. Parse rows ─────────────────────────────────────────────────────────
     new_txns:       list[FinanceTransaction] = []
     overwrite_txns: list[FinanceTransaction] = []
+    reconciled_txns: list[tuple[str, FinanceTransaction]] = []
     skipped      = 0
+    reconciled   = 0
     parse_errors = 0
     by_layer: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
 
@@ -212,6 +277,20 @@ def direct_import(
             txn.merchant = result.merchant
             txn.category = result.category
             by_layer[result.layer] += 1
+
+        identity_key = _identity_key(txn.date, txn.amount, txn.institution, txn.account, txn.owner)
+        identity_matches = existing_by_identity.get(identity_key, [])
+        if not overwrite and txn.hash not in existing_hashes and len(identity_matches) == 1:
+            existing = identity_matches[0]
+            if _should_reconcile_parser_variant(existing.get("raw_description", ""), txn.raw_description):
+                reconciled_txns.append((existing["hash"], txn))
+                existing["raw_description"] = txn.raw_description
+                existing["merchant"] = txn.merchant
+                existing["category"] = txn.category
+                existing["import_file"] = txn.import_file
+                existing_hashes.add(existing["hash"])
+                reconciled += 1
+                continue
         new_txns.append(txn)
 
     total_valid = len(data_rows) - parse_errors
@@ -229,7 +308,7 @@ def direct_import(
     )
 
     if dry_run:
-        stats = _stats(0, skipped, total_valid, parse_errors, by_layer, time.time() - t0, dry_run=True)
+        stats = _stats(0, skipped, total_valid, parse_errors, by_layer, time.time() - t0, dry_run=True, reconciled=reconciled)
         stats["would_add"] = len(new_txns)
         return stats
 
@@ -255,6 +334,23 @@ def direct_import(
             )
             added += 1
 
+        for existing_hash, txn in reconciled_txns:
+            conn.execute(
+                """
+                UPDATE transactions SET
+                   raw_description=?, merchant=?, category=?,
+                   original_currency=?, original_amount=?, exchange_rate=?,
+                   institution=?, account=?, owner=?, import_date=?, import_file=?, synced_at=?
+                WHERE hash=?
+                """,
+                (
+                    txn.raw_description, txn.merchant, txn.category,
+                    txn.original_currency, txn.original_amount, txn.exchange_rate,
+                    txn.institution, txn.account, txn.owner, txn.import_date, txn.import_file, now,
+                    existing_hash,
+                ),
+            )
+
         if overwrite and overwrite_txns:
             for txn in overwrite_txns:
                 conn.execute(
@@ -271,7 +367,7 @@ def direct_import(
         duration = time.time() - t0
         notes = (
             f"direct_import L1={by_layer[1]} L2={by_layer[2]} "
-            f"L3={by_layer[3]} review={by_layer[4]}"
+            f"L3={by_layer[3]} review={by_layer[4]} reconciled={reconciled}"
         )
         conn.execute(
             """INSERT INTO import_log (import_date, import_file, rows_added,
@@ -285,7 +381,7 @@ def direct_import(
 
     sync_grogol_2_from_transactions(db_path)
     log.info("direct_import: wrote %d new rows to SQLite.", added)
-    return _stats(added, skipped, total_valid, parse_errors, by_layer, time.time() - t0)
+    return _stats(added, skipped, total_valid, parse_errors, by_layer, time.time() - t0, reconciled=reconciled)
 
 
 def sync_grogol_2_from_transactions(db_path: str) -> int:
@@ -482,11 +578,12 @@ def _float(val) -> Optional[float]:
 
 def _stats(
     added: int, skipped: int, total: int, parse_errors: int,
-    by_layer: dict, duration: float, dry_run: bool = False,
+    by_layer: dict, duration: float, dry_run: bool = False, reconciled: int = 0,
 ) -> dict:
     return {
         "added":      added,
         "skipped":    skipped,
+        "reconciled": reconciled,
         "total":      total,
         "parse_err":  parse_errors,
         "by_layer":   by_layer,
@@ -586,6 +683,7 @@ Examples:
             f"Import complete\n"
             f"  Added:      {stats['added']}\n"
             f"  Skipped:    {stats['skipped']}  (already in SQLite)\n"
+            f"  Reconciled: {stats['reconciled']}  (parser-evolution duplicates merged)\n"
             f"  Total XLSX: {stats['total']}\n"
             f"  Parse err:  {stats['parse_err']}\n"
             f"  Duration:   {stats['duration_s']}s\n"

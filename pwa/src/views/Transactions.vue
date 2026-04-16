@@ -19,6 +19,7 @@
       </select>
       <select v-model="filters.categoryGroup" @change="onFilterChange">
         <option value="">All Category Groups</option>
+        <option value="__income__">💰 Income</option>
         <option v-for="group in categoryGroupNames" :key="group" :value="group">{{ group }}</option>
       </select>
     </div>
@@ -148,7 +149,7 @@
                 </div>
               </div>
 
-              <div class="cat-editor">
+              <div v-if="!store.isReadOnly" class="cat-editor">
                 <div class="cat-editor-hd">Change category</div>
                 <div class="cat-editor-row">
                   <select v-model="editCategory" class="cat-select" @click.stop>
@@ -344,7 +345,7 @@ function toggle(tx) {
     expandedHash.value = null
   } else {
     expandedHash.value = tx.hash
-    editCategory.value = tx.category || ''
+    editCategory.value = ''
     saveError.value = null
     saveSuccess.value = false
   }
@@ -400,7 +401,8 @@ async function load() {
       if (filters.value.year)     params.year     = filters.value.year
       if (filters.value.month)    params.month    = filters.value.month
       if (filters.value.owner)    params.owner    = filters.value.owner
-      if (filters.value.categoryGroup) params.category_group = filters.value.categoryGroup
+      if (filters.value.categoryGroup === '__income__') params.income_only = true
+      else if (filters.value.categoryGroup) params.category_group = filters.value.categoryGroup
       if (uncategorisedOnly)      params.uncategorised_only = true
       else if (selectedCategory)  params.category = selectedCategory
       if (filters.value.q)        params.q        = filters.value.q
@@ -411,7 +413,7 @@ async function load() {
 
     if (aiFilters.value) {
       const { sort, limit, income_only, expense_only } = aiFilters.value
-      const SYSTEM_CATS = new Set(['Transfer', 'Adjustment', 'Ignored', 'Cash Withdrawal'])
+      const SYSTEM_CATS = new Set(['Transfer', 'Adjustment', 'Ignored', 'Opening Balance', 'Cash Withdrawal'])
       if (aiExcludeSystem.value) txs = txs.filter(tx => !SYSTEM_CATS.has(tx.category))
       if (income_only) txs = txs.filter(tx => tx.amount >= 0 && !SYSTEM_CATS.has(tx.category))
       if (expense_only) txs = txs.filter(tx => tx.amount < 0 && !SYSTEM_CATS.has(tx.category))
@@ -427,7 +429,7 @@ async function load() {
 
     transactions.value = txs
 
-    const excludeCats = new Set(['Transfer', 'Adjustment', 'Ignored'])
+    const excludeCats = new Set(['Transfer', 'Adjustment', 'Ignored', 'Opening Balance'])
     let inc = 0
     let exp = 0
     for (const tx of transactions.value) {

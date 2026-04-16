@@ -119,6 +119,12 @@
                 <span class="spinner spinner-sm"></span>
                 Refining with AI…
               </div>
+              <button
+                v-else-if="!trendAiRefined && !store.autoAiRefine"
+                class="btn btn-ghost btn-sm"
+                style="font-size:11px;padding:2px 8px"
+                @click="refineFlowWithAi"
+              >✨ Refine with AI</button>
             </div>
             <div class="trend-explanation-summary">{{ trendExplanation.summary }}</div>
             <div v-if="trendExplanation.drivers?.length" class="trend-driver-list">
@@ -256,6 +262,7 @@ const loading  = ref(false)
 const error    = ref(null)
 const trendExplanation = ref(null)
 const trendExplanationLoading = ref(false)
+const trendAiRefined = ref(false)
 const trendFollowUpQuestion = ref('')
 const trendAskingAi = ref(false)
 const trendQaHistory = ref([])
@@ -433,6 +440,7 @@ async function load() {
   error.value   = null
   trendExplanation.value = null
   trendExplanationLoading.value = true
+  trendAiRefined.value = false
   trendAskingAi.value = false
   trendFollowUpQuestion.value = ''
   trendQaHistory.value = []
@@ -467,10 +475,12 @@ async function load() {
       trendExplanation.value = res
       if (!res?.available) return null
       if (Math.abs(res.net_change || 0) < 0.5) return null
+      if (!store.autoAiRefine) return null
       const signature = buildFlowExplanationSignature(res)
       const cachedAi = flowExplanationAiCache.get(signature)
       if (cachedAi) {
         trendExplanation.value = cachedAi
+        trendAiRefined.value = true
         return null
       }
       return api.summaryExplanation(store.selectedYear, store.selectedMonth, { ai: true })
@@ -480,11 +490,29 @@ async function load() {
       const signature = buildFlowExplanationSignature(res)
       if (signature) flowExplanationAiCache.set(signature, res)
       trendExplanation.value = res
+      trendAiRefined.value = true
     })
     .catch(() => {})
     .finally(() => {
       if (token === loadToken) trendExplanationLoading.value = false
     })
+}
+
+async function refineFlowWithAi() {
+  if (trendExplanationLoading.value || trendAiRefined.value) return
+  const res = trendExplanation.value
+  if (!res?.available) return
+  trendExplanationLoading.value = true
+  try {
+    const aiRes = await api.summaryExplanation(store.selectedYear, store.selectedMonth, { ai: true })
+    if (aiRes) {
+      const signature = buildFlowExplanationSignature(aiRes)
+      if (signature) flowExplanationAiCache.set(signature, aiRes)
+      trendExplanation.value = aiRes
+      trendAiRefined.value = true
+    }
+  } catch {}
+  finally { trendExplanationLoading.value = false }
 }
 
 async function askTrendFollowUp(question) {

@@ -12,6 +12,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# System tools needed for NAS sync
+RUN apt-get update && apt-get install -y --no-install-recommends rsync openssh-client && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first (cached layer)
 COPY finance/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir \

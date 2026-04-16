@@ -217,6 +217,10 @@ onMounted(async () => {
     <div v-if="loading" class="loading"><div class="spinner"></div></div>
 
     <!-- Error -->
+    <div v-else-if="store.isReadOnly" class="alert" style="margin:12px 16px;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8">
+      👁 Read-only — adjustments are not available in NAS replica mode.
+    </div>
+
     <div v-else-if="loadError" class="alert alert-error" style="margin:12px 16px">
       ❌ {{ loadError }}
       <button class="btn btn-sm btn-ghost" @click="loadItems" style="margin-left:auto">Retry</button>

@@ -6,6 +6,7 @@ import { cacheGet, cacheSet } from '../db/index.js'
 const DASHBOARD_MIN_MONTH = '2026-01'
 const DASHBOARD_START_KEY = 'finance.dashboard.startMonth'
 const DASHBOARD_END_KEY = 'finance.dashboard.endMonth'
+const AUTO_AI_REFINE_KEY = 'finance.autoAiRefine'
 const CACHE_KEYS = {
   health: 'finance.health',
   owners: 'finance.owners',
@@ -45,6 +46,8 @@ export const useFinanceStore = defineStore('finance', () => {
   const years = ref([])
   const health = ref(null)
   const reviewCount = ref(0)
+  const isReadOnly = ref(false)
+  const autoAiRefine = ref(safeStorageGet(AUTO_AI_REFINE_KEY) !== 'false')
 
   const now = new Date()
   const currentMonthKey = computed(() => _getCurrentMonthKey())
@@ -117,6 +120,7 @@ export const useFinanceStore = defineStore('finance', () => {
       await loadCachedResource(CACHE_KEYS.health, (requestOptions) => api.health(requestOptions), (value) => {
         health.value = value
         reviewCount.value = value?.needs_review ?? 0
+        isReadOnly.value = value?.read_only === true
       }, options)
     } catch {
       // no cached fallback available
@@ -187,12 +191,17 @@ export const useFinanceStore = defineStore('finance', () => {
     await Promise.all([loadHealth(options), loadOwners(options), loadCategories(options), loadYears(options)])
   }
 
+  function setAutoAiRefine(value) {
+    autoAiRefine.value = value
+    safeStorageSet(AUTO_AI_REFINE_KEY, String(value))
+  }
+
   return {
-    owners, categories, years, health, reviewCount,
+    owners, categories, years, health, reviewCount, isReadOnly, autoAiRefine,
     selectedYear, selectedMonth, selectedOwner,
     dashboardStartMonth, dashboardEndMonth,
     categoryMap, categoryNames, dashboardMonthOptions, dashboardRangeLabel,
     loadHealth, loadOwners, loadCategories, loadYears,
-    decrementReviewCount, setReviewCount, setDashboardRange, bootstrap,
+    decrementReviewCount, setReviewCount, setDashboardRange, setAutoAiRefine, bootstrap,
   }
 })

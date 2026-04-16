@@ -1,0 +1,21 @@
+# NAS read-only overlay for Synology.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d
+#
+# One-time NAS setup:
+#   1. Pull or copy the finance-api Docker image to the NAS.
+#   2. Place an initial DB at /volume1/finance/finance_readonly.db
+#      (rsync from Mac: rsync -avz data/finance.db user@nas-ip:/volume1/finance/finance_readonly.db)
+#   3. Set FINANCE_API_KEY in Synology Container Manager environment.
+#   4. On Mac, set NAS_SYNC_TARGET=user@nas-ip:/volume1/finance/finance_readonly.db in .env
+#      so the Mac auto-syncs the DB daily and on manual trigger.
+services:
+  finance-api:
+    environment:
+      FINANCE_READ_ONLY:   "true"
+      FINANCE_SQLITE_DB:   /app/data/finance_readonly.db
+      OLLAMA_FINANCE_HOST: ""        # Ollama not needed on NAS
+      NAS_SYNC_TARGET:     ""        # NAS itself does not push further
+    volumes:
+      - /volume1/finance:/app/data:ro   # NAS data path, mounted read-only
+    # No output/xls or secrets/bridge.token volumes needed on NAS

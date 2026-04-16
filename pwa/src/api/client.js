@@ -209,6 +209,9 @@ export const api = {
   upsertLiability: (body) => postQueued('/wealth/liabilities', body),
   deleteLiability: (id) => delQueued(`/wealth/liabilities/${id}`),
 
+  nasSyncStatus: (options = {}) => get('/nas-sync/status', {}, options),
+  nasSync: () => post('/nas-sync'),
+
   aiQuery: (query) => post('/ai/query', { query }),
   pdfLocalFiles: (options = {}) => get('/pdf/local-files', {}, options),
   pdfLocalWorkspace: (options = {}) => get('/pdf/local-workspace', {}, options),

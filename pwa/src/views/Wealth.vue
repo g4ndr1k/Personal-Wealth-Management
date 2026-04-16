@@ -161,6 +161,12 @@
               <span class="spinner spinner-sm"></span>
               Refining with AI…
             </div>
+            <button
+              v-else-if="!explanationAiRefined && !store.autoAiRefine"
+              class="btn btn-ghost btn-sm"
+              style="font-size:11px;padding:2px 8px"
+              @click="refineWealthWithAi"
+            >✨ Refine with AI</button>
           </div>
           <div class="trend-explanation-summary">{{ explanation.summary }}</div>
           <div v-if="explanation.drivers?.length" class="trend-driver-list">
@@ -264,6 +270,7 @@ const liabilities = ref([])
 const dates       = ref([])
 const history     = ref([])
 const explanation = ref(null)
+const explanationAiRefined = ref(false)
 const followUpQuestion = ref('')
 const askingAi = ref(false)
 const qaHistory = ref([])
@@ -575,6 +582,7 @@ async function load() {
   const token = ++loadToken
   loading.value            = !snap.value && history.value.length === 0
   explanationLoading.value = true
+  explanationAiRefined.value = false
   error.value              = null
   try {
     const requestedDate = selectedDate.value || ''
@@ -646,10 +654,12 @@ async function load() {
       explanation.value = res
       if (!res?.available) return null
       if (Math.abs(res.net_change_idr || 0) < 0.5) return null
+      if (!store.autoAiRefine) return null
       const signature = buildWealthExplanationSignature(res)
       const cachedAi = wealthExplanationAiCache.get(signature)
       if (cachedAi) {
         explanation.value = cachedAi
+        explanationAiRefined.value = true
         return null
       }
       return api.wealthExplanation({ snapshot_date: dateForExplanation || undefined, ai: true })
@@ -659,6 +669,7 @@ async function load() {
       const signature = buildWealthExplanationSignature(res)
       if (signature) wealthExplanationAiCache.set(signature, res)
       explanation.value = res
+      explanationAiRefined.value = true
     })
     .catch(() => {
       if (token === loadToken && selectedDate.value === dateForExplanation) explanation.value = null
@@ -666,6 +677,23 @@ async function load() {
     .finally(() => {
       if (token === loadToken && selectedDate.value === dateForExplanation) explanationLoading.value = false
     })
+}
+
+async function refineWealthWithAi() {
+  if (explanationLoading.value || explanationAiRefined.value) return
+  const res = explanation.value
+  if (!res?.available) return
+  explanationLoading.value = true
+  try {
+    const aiRes = await api.wealthExplanation({ snapshot_date: selectedDate.value || undefined, ai: true })
+    if (aiRes) {
+      const signature = buildWealthExplanationSignature(aiRes)
+      if (signature) wealthExplanationAiCache.set(signature, aiRes)
+      explanation.value = aiRes
+      explanationAiRefined.value = true
+    }
+  } catch {}
+  finally { explanationLoading.value = false }
 }
 
 async function askFollowUp(question) {

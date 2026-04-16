@@ -589,6 +589,25 @@
 
     <!-- About -->
     <div class="setting-card">
+      <div class="setting-title">🤖 AI Refinement</div>
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+        When enabled, Flows and Wealth automatically call the local AI (Ollama) to enrich trend explanations, and Review Queue auto-generates category suggestions.
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input
+          type="checkbox"
+          :checked="store.autoAiRefine"
+          @change="store.setAutoAiRefine($event.target.checked)"
+          style="width:16px;height:16px;cursor:pointer"
+        />
+        <span style="font-size:13px;font-weight:500">Auto-refine with AI on page load</span>
+      </label>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:8px">
+        When off, a <strong>Refine with AI</strong> button appears on each view so you can trigger it manually.
+      </div>
+    </div>
+
+    <div class="setting-card">
       <div class="setting-title">ℹ️ About</div>
       <div style="font-size:12px;color:var(--text-muted);line-height:1.7">
         <div><strong>Finance Dashboard</strong> — Stage 2-B</div>

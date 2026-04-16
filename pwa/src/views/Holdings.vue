@@ -81,7 +81,7 @@
                 <template v-if="b.exchange_rate > 0"> · {{ fmtRate(b.exchange_rate) }}/{{ b.currency }}</template>
               </span>
             </div>
-            <button class="asset-del" @click.stop="deleteItem('balance', b.id)" title="Delete">✕</button>
+            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('balance', b.id)" title="Delete">✕</button>
           </div>
         </template>
       </template>
@@ -135,7 +135,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
             </div>
           </template>
 
@@ -171,7 +171,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
             </div>
           </template>
 
@@ -207,7 +207,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
             </div>
           </template>
 
@@ -236,7 +236,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
             </div>
           </template>
         </template>
@@ -270,7 +270,7 @@
             <div class="asset-right">
               <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
             </div>
-            <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
           </div>
         </template>
       </template>
@@ -298,13 +298,13 @@
             <div class="asset-right">
               <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
             </div>
-            <button class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
           </div>
         </template>
       </template>
 
       <!-- Generate snapshot -->
-      <div style="padding:16px">
+      <div v-if="!store.isReadOnly" style="padding:16px">
         <button
           class="btn btn-primary"
           style="width:100%"
@@ -320,8 +320,8 @@
     <!-- Toast -->
     <div v-if="toast" class="toast">{{ toast }}</div>
 
-    <!-- FAB: open add form -->
-    <button class="holdings-fab" @click="openForm(null)" title="Add entry">+</button>
+    <!-- FAB: open add form (write-only) -->
+    <button v-if="!store.isReadOnly" class="holdings-fab" @click="openForm(null)" title="Add entry">+</button>
 
     <!-- Modal form -->
     <div v-if="showForm" class="modal-overlay" @click.self="showForm = false">
