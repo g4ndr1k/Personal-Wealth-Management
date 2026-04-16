@@ -1,5 +1,5 @@
 """
-Stage 2 — XLSX → Google Sheets import module.
+Stage 2 — XLSX → SQLite import module.
 
 Usage
 ─────
@@ -12,22 +12,22 @@ Usage
 What it does
 ────────────
   1. Opens ALL_TRANSACTIONS.xlsx (Stage 1 output — immutable, never edited)
-  2. Maps columns to the Stage 2 schema (see GUIDE.md §26.1)
+  2. Maps columns to the Stage 2 schema
   3. Generates a SHA-256 dedup hash per transaction
-  4. Skips rows already in Google Sheets (hash match)
+  4. Skips rows already in SQLite (hash match)
   5. Runs the 4-layer categorization engine
-  6. Batch-appends new rows to the Transactions tab
-  7. Logs the import run to the Import Log tab
+  6. Writes new rows directly to the SQLite transactions table
+  7. Logs the import run to the import_log table
 
 Reimport safety
 ───────────────
-  If the Google Sheet is in a bad state, delete the affected rows in the Sheet
-  and re-run this script.  The XLSX is the immutable ground truth.  Use
-  --overwrite only when you explicitly want to replace existing Sheets data.
+  The XLSX is the immutable ground truth.  Delete any bad rows from SQLite
+  and re-run this script.  Manual category overrides survive re-import via
+  the category_overrides table (resolved through the transactions_resolved view).
+  Use --overwrite only when you explicitly want to replace existing rows.
 """
 from __future__ import annotations
 import argparse
-import csv
 import logging
 import os
 import sys
@@ -40,11 +40,9 @@ import openpyxl
 from finance.config import (
     load_config,
     get_finance_config,
-    get_sheets_config,
     get_ollama_finance_config,
 )
 from finance.models import FinanceTransaction, parse_xlsx_date
-from finance.sheets import SheetsClient
 from finance.categorizer import Categorizer, match_internal_transfers
 
 log = logging.getLogger(__name__)
@@ -83,19 +81,26 @@ _MIN_TX_DATE = "2026-01-01"
 
 # ── Core import logic ─────────────────────────────────────────────────────────
 
-def run(
+def direct_import(
     xlsx_path: str,
-    sheets_client: SheetsClient,
+    db_path: str,
     categorizer: Categorizer,
     overwrite: bool = False,
     dry_run: bool = False,
     import_file_label: str = "",
 ) -> dict:
     """
-    Import ALL_TRANSACTIONS.xlsx into Google Sheets.
+    Import ALL_TRANSACTIONS.xlsx directly into SQLite.
 
-    Returns a stats dict:
-        added       int   rows written to Sheets
+    Uses the same parsing and categorization logic as the old Sheets-based
+    importer, but writes directly to the ``transactions`` and ``import_log``
+    tables.  SQLite is the authoritative store.
+
+    Dedup: INSERT OR IGNORE on the hash UNIQUE constraint (normal mode).
+           UPDATE existing rows when overwrite=True.
+
+    Returns stats dict:
+        added       int   rows written to SQLite
         skipped     int   rows skipped (duplicate hash)
         total       int   total valid rows in XLSX
         parse_err   int   rows that could not be parsed
@@ -103,20 +108,17 @@ def run(
         duration_s  float elapsed seconds
         dry_run     bool  True if no writes were made
     """
+    from finance.db import open_db
+
     t0 = time.time()
     label = import_file_label or os.path.basename(xlsx_path)
 
     # ── 1. Open XLSX ──────────────────────────────────────────────────────────
-    log.info("Opening %s …", xlsx_path)
+    log.info("direct_import: opening %s …", xlsx_path)
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
-
     if "ALL_TRANSACTIONS" not in wb.sheetnames:
         wb.close()
-        raise ValueError(
-            f"Sheet 'ALL_TRANSACTIONS' not found in {xlsx_path}. "
-            f"Available sheets: {wb.sheetnames}"
-        )
-
+        raise ValueError(f"Sheet 'ALL_TRANSACTIONS' not found in {xlsx_path}.")
     ws = wb["ALL_TRANSACTIONS"]
     all_rows = list(ws.iter_rows(values_only=True))
     wb.close()
@@ -125,169 +127,174 @@ def run(
         log.warning("ALL_TRANSACTIONS sheet is empty — nothing to import.")
         return _stats(0, 0, 0, 0, {}, 0.0, dry_run)
 
-    # Validate header
     header = [str(v).strip() if v else "" for v in all_rows[0]]
     _warn_if_header_mismatch(header)
-
     data_rows = all_rows[1:]
-    log.info("Read %d data rows from XLSX.", len(data_rows))
+    log.info("direct_import: read %d data rows.", len(data_rows))
 
-    # ── 2. Load existing hashes from Sheets ───────────────────────────────────
-    if not dry_run:
-        if overwrite:
-            log.info("--overwrite: fetching existing hashes + row numbers …")
-            _backup_transactions(sheets_client)
-            hash_to_row = sheets_client.read_existing_hashes_with_rows()
-            existing_hashes = set(hash_to_row.keys())
-            # Also read existing categories so --overwrite never replaces a
-            # manually-set category with null when the categorizer can't match.
-            hash_to_category = sheets_client.read_existing_categories()
-        else:
-            log.info("Fetching existing hashes …")
-            existing_hashes = sheets_client.read_existing_hashes()
-            hash_to_row = {}
-            hash_to_category = {}
-        log.info("  %d hashes already in Sheets.", len(existing_hashes))
-    else:
-        existing_hashes = set()
-        hash_to_row = {}
-        hash_to_category = {}
+    # ── 2. Load existing hashes from SQLite ───────────────────────────────────
+    conn = open_db(db_path)
+    existing_hashes: set[str] = {
+        r[0] for r in conn.execute("SELECT hash FROM transactions").fetchall()
+    }
+    hash_to_category: dict[str, str] = {}
+    if overwrite:
+        hash_to_category = {
+            r[0]: r[1]
+            for r in conn.execute(
+                "SELECT hash, category FROM transactions_resolved WHERE category IS NOT NULL AND category != ''"
+            ).fetchall()
+        }
+    log.info("direct_import: %d hashes already in SQLite.", len(existing_hashes))
 
-    # ── 3. Reload aliases + categories into the categorizer ───────────────────
-    if not dry_run:
-        log.info("Loading merchant aliases from Sheets …")
-        aliases    = sheets_client.read_aliases()
-        categories = sheets_client.read_categories()
-        categorizer.reload_aliases(aliases)
-        if categories:
-            categorizer.categories = categories
-        log.info(
-            "  %d exact aliases  |  %d regex aliases  |  %d categories",
-            len(categorizer._exact),
-            len(categorizer._regex),
-            len(categorizer.categories),
-        )
+    # ── 3. Load aliases + categories from SQLite ──────────────────────────────
+    alias_rows = conn.execute("SELECT * FROM merchant_aliases").fetchall()
+    cat_rows   = conn.execute("SELECT category FROM categories").fetchall()
+    conn.close()
+
+    aliases    = [dict(r) for r in alias_rows]
+    categories = [r[0] for r in cat_rows]
+    categorizer.reload_aliases(aliases)
+    if categories:
+        categorizer.categories = categories
+    log.info(
+        "direct_import: %d exact aliases | %d regex aliases | %d categories",
+        len(categorizer._exact), len(categorizer._regex), len(categorizer.categories),
+    )
 
     # ── 4. Parse rows ─────────────────────────────────────────────────────────
     new_txns:       list[FinanceTransaction] = []
     overwrite_txns: list[FinanceTransaction] = []
-    skipped     = 0
+    skipped      = 0
     parse_errors = 0
-    by_layer:    dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
+    by_layer: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
 
     for xlsx_row_idx, raw in enumerate(data_rows, start=2):
         try:
-            txn = _parse_row(raw, label)
+            parse_result = _parse_row(raw, label)
         except Exception as exc:
             log.warning("Row %d: parse error — %s", xlsx_row_idx, exc)
             parse_errors += 1
             continue
 
-        if txn is None:
-            continue  # blank or incomplete row
+        if parse_result is None:
+            continue
+
+        txn, stmt_type = parse_result
+        is_rdn = txn.institution.lower() == "permata" and stmt_type == "rdn"
 
         if txn.hash in existing_hashes:
             if overwrite:
-                result = categorizer.categorize(
-                    txn.raw_description, owner=txn.owner, account=txn.account,
-                )
-                txn.merchant = result.merchant
-                # Never overwrite an existing non-null category with null (L4).
-                # This preserves manually-set categories when the categorizer
-                # can't find a match.
-                if result.category is None and hash_to_category.get(txn.hash):
-                    txn.category = hash_to_category[txn.hash]
+                if is_rdn:
+                    txn.merchant = "Permata RDN"
+                    txn.category = "Ignored"
+                    by_layer[1] += 1
                 else:
-                    txn.category = result.category
-                by_layer[result.layer] += 1
+                    result = categorizer.categorize(txn.raw_description, owner=txn.owner, account=txn.account)
+                    txn.merchant = result.merchant
+                    if result.category is None and hash_to_category.get(txn.hash):
+                        txn.category = hash_to_category[txn.hash]
+                    else:
+                        txn.category = result.category
+                    by_layer[result.layer] += 1
                 overwrite_txns.append(txn)
             else:
                 skipped += 1
             continue
 
-        # Categorize new row
-        result = categorizer.categorize(
-            txn.raw_description, owner=txn.owner, account=txn.account,
-        )
-        txn.merchant = result.merchant
-        txn.category = result.category
-        by_layer[result.layer] += 1
+        if is_rdn:
+            txn.merchant = "Permata RDN"
+            txn.category = "Ignored"
+            by_layer[1] += 1
+        else:
+            result = categorizer.categorize(txn.raw_description, owner=txn.owner, account=txn.account)
+            txn.merchant = result.merchant
+            txn.category = result.category
+            by_layer[result.layer] += 1
         new_txns.append(txn)
 
     total_valid = len(data_rows) - parse_errors
 
-    # ── Post-processing: cross-account internal transfer matching ───────────
     all_txns = new_txns + overwrite_txns
     cross_matched = match_internal_transfers(all_txns)
 
     log.info(
-        "Parsed: %d valid | %d new | %d duplicate (skipped) | %d parse errors",
+        "direct_import: %d valid | %d new | %d skipped | %d parse errors",
         total_valid, len(new_txns), skipped, parse_errors,
     )
     log.info(
-        "Categorization: L1 auto=%d  L2 auto=%d  L3 suggested=%d  L4 review=%d  cross=%d",
+        "Categorization: L1=%d L2=%d L3=%d L4=%d cross=%d",
         by_layer[1], by_layer[2], by_layer[3], by_layer[4], cross_matched,
     )
 
     if dry_run:
-        log.info("[DRY RUN] Would append %d rows. No writes performed.", len(new_txns))
-        stats = _stats(0, skipped, total_valid, parse_errors, by_layer,
-                       time.time() - t0, dry_run=True)
+        stats = _stats(0, skipped, total_valid, parse_errors, by_layer, time.time() - t0, dry_run=True)
         stats["would_add"] = len(new_txns)
         return stats
 
-    # ── 5. Write to Sheets ────────────────────────────────────────────────────
+    # ── 5. Write to SQLite ────────────────────────────────────────────────────
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     added = 0
 
-    if new_txns:
-        log.info("Appending %d new rows to Sheets …", len(new_txns))
-        added = sheets_client.append_transactions(new_txns)
-
-    if overwrite and overwrite_txns:
-        log.info("Overwriting %d existing rows …", len(overwrite_txns))
-        sheets_client.overwrite_transactions(overwrite_txns, hash_to_row)
-
-    # ── 6. Log import ─────────────────────────────────────────────────────────
-    duration = time.time() - t0
-    notes = (
-        f"L1={by_layer[1]} L2={by_layer[2]} "
-        f"L3={by_layer[3]} review={by_layer[4]}"
-    )
-    if parse_errors:
-        notes += f" parse_err={parse_errors}"
-    if overwrite and overwrite_txns:
-        notes += f" overwritten={len(overwrite_txns)}"
-
-    sheets_client.log_import(
-        import_file=label,
-        rows_added=added,
-        rows_skipped=skipped,
-        rows_total=total_valid,
-        duration_s=duration,
-        notes=notes,
-    )
-
-    # ── 7. Sync PDF Import Log ────────────────────────────────────────────────
+    conn = open_db(db_path)
     try:
-        from finance.pdf_log_sync import build_log_rows, DEFAULT_REGISTRY_DB
-        pdf_rows = build_log_rows(DEFAULT_REGISTRY_DB)
-        if pdf_rows:
-            sheets_client.write_pdf_import_log(pdf_rows)
-            log.info("PDF Import Log updated (%d rows).", len(pdf_rows))
-        else:
-            log.debug("PDF Import Log: registry empty, nothing to write.")
-    except Exception as _pdf_exc:
-        log.warning("PDF Import Log sync failed (non-fatal): %s", _pdf_exc)
+        for txn in new_txns:
+            conn.execute(
+                """INSERT OR IGNORE INTO transactions
+                   (date, amount, original_currency, original_amount, exchange_rate,
+                    raw_description, merchant, category, institution, account, owner,
+                    notes, hash, import_date, import_file, synced_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    txn.date, txn.amount, txn.original_currency, txn.original_amount,
+                    txn.exchange_rate, txn.raw_description, txn.merchant, txn.category,
+                    txn.institution, txn.account, txn.owner, "",
+                    txn.hash, txn.import_date, txn.import_file, now,
+                ),
+            )
+            added += 1
 
-    return _stats(added, skipped, total_valid, parse_errors, by_layer, duration)
+        if overwrite and overwrite_txns:
+            for txn in overwrite_txns:
+                conn.execute(
+                    """UPDATE transactions SET
+                       merchant=?, category=?, raw_description=?,
+                       institution=?, account=?, owner=?, synced_at=?
+                       WHERE hash=?""",
+                    (
+                        txn.merchant, txn.category, txn.raw_description,
+                        txn.institution, txn.account, txn.owner, now, txn.hash,
+                    ),
+                )
+
+        duration = time.time() - t0
+        notes = (
+            f"direct_import L1={by_layer[1]} L2={by_layer[2]} "
+            f"L3={by_layer[3]} review={by_layer[4]}"
+        )
+        conn.execute(
+            """INSERT INTO import_log (import_date, import_file, rows_added,
+               rows_skipped, rows_total, duration_s, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (now, label, added, skipped, total_valid, round(duration, 2), notes),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    log.info("direct_import: wrote %d new rows to SQLite.", added)
+    return _stats(added, skipped, total_valid, parse_errors, by_layer, time.time() - t0)
 
 
 # ── Row parser ────────────────────────────────────────────────────────────────
 
-def _parse_row(row: tuple, import_file: str) -> Optional[FinanceTransaction]:
+def _parse_row(row: tuple, import_file: str) -> Optional[tuple["FinanceTransaction", str]]:
     """
-    Convert one ALL_TRANSACTIONS.xlsx data row to a FinanceTransaction.
+    Convert one ALL_TRANSACTIONS.xlsx data row to a (FinanceTransaction, stmt_type) tuple.
     Returns None for blank / incomplete rows (silently skipped).
+
+    stmt_type is the raw value from the "Statement Type" column (e.g. "savings",
+    "rdn", "cc") — used by the caller to apply institution-level auto-categorization.
     """
     if not row or all(v is None or v == "" for v in row):
         return None
@@ -297,12 +304,12 @@ def _parse_row(row: tuple, import_file: str) -> Optional[FinanceTransaction]:
 
     owner       = _str(cell(_C_OWNER))
     institution = _str(cell(_C_BANK))
+    stmt_type   = _str(cell(_C_STMT_TYPE)).lower()
     raw_desc    = _str(cell(_C_DESC))
     account_num = _str(cell(_C_ACCOUNT_NUM))
     tipe        = _str(cell(_C_TIPE)).lower()        # "debit" / "credit"
     currency    = _str(cell(_C_CURRENCY)).upper() or "IDR"
 
-    # Skip rows missing the three essential identifying fields
     if not raw_desc or not owner or not institution:
         return None
 
@@ -312,14 +319,11 @@ def _parse_row(row: tuple, import_file: str) -> Optional[FinanceTransaction]:
     if date_str < _MIN_TX_DATE:
         return None  # pre-2026 transaction — drop silently
 
-    # IDR amount with sign
     amount_raw = _float(cell(_C_AMOUNT_IDR))
     if amount_raw is None:
         return None
-    # Debit = expense (negative), Credit = income/refund (positive)
     amount = -abs(amount_raw) if tipe == "debit" else abs(amount_raw)
 
-    # Foreign currency fields
     if currency == "IDR":
         original_currency = None
         original_amount   = None
@@ -328,7 +332,6 @@ def _parse_row(row: tuple, import_file: str) -> Optional[FinanceTransaction]:
         original_currency = currency
         original_amount   = _float(cell(_C_FOREIGN_AMT))
         exchange_rate     = _float(cell(_C_EXCHANGE_RT))
-        # Derive exchange rate if missing but both amounts are present
         if exchange_rate is None and original_amount:
             try:
                 exchange_rate = abs(amount_raw) / abs(original_amount)
@@ -348,7 +351,7 @@ def _parse_row(row: tuple, import_file: str) -> Optional[FinanceTransaction]:
         account=account_num,
         owner=owner,
         import_file=import_file,
-    )
+    ), stmt_type
 
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
@@ -361,8 +364,7 @@ def _float(val) -> Optional[float]:
     if val is None or val == "":
         return None
     try:
-        f = float(val)
-        return f
+        return float(val)
     except (TypeError, ValueError):
         return None
 
@@ -396,37 +398,11 @@ def _warn_if_header_mismatch(actual: list[str]):
         )
 
 
-# ── Backup helper ─────────────────────────────────────────────────────────────
-
-def _backup_transactions(sheets_client) -> str:
-    """Write a timestamped CSV backup of the Transactions tab to data/backups/.
-    Called automatically before every --overwrite run.  Returns the file path.
-    """
-    try:
-        rows = sheets_client._get(
-            f"{sheets_client.cfg.transactions_tab}!A:O"
-        )
-        backup_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data", "backups",
-        )
-        os.makedirs(backup_dir, exist_ok=True)
-        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(backup_dir, f"transactions_{ts}.csv")
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows(rows)
-        log.info("Backup saved: %s  (%d rows)", path, len(rows) - 1)
-        return path
-    except Exception as exc:
-        log.warning("Backup failed (non-fatal): %s", exc)
-        return ""
-
-
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Import ALL_TRANSACTIONS.xlsx (Stage 1 output) into Google Sheets.",
+        description="Import ALL_TRANSACTIONS.xlsx into SQLite.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -438,7 +414,7 @@ Examples:
     )
     parser.add_argument(
         "--overwrite", action="store_true",
-        help="Replace existing Sheets rows that match by hash (default: skip them)",
+        help="Replace existing rows that match by hash (default: skip them)",
     )
     parser.add_argument(
         "--file", metavar="PATH",
@@ -446,7 +422,7 @@ Examples:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Parse and categorize; print summary without writing to Sheets",
+        help="Parse and categorize; print summary without writing",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -461,35 +437,32 @@ Examples:
         stream=sys.stdout,
     )
 
-    cfg           = load_config()
-    finance_cfg   = get_finance_config(cfg)
-    sheets_cfg    = get_sheets_config(cfg)
-    ollama_cfg    = get_ollama_finance_config(cfg)
+    cfg         = load_config()
+    finance_cfg = get_finance_config(cfg)
+    ollama_cfg  = get_ollama_finance_config(cfg)
 
     xlsx_path = args.file or finance_cfg.xlsx_input
     if not os.path.exists(xlsx_path):
         log.error("XLSX file not found: %s", xlsx_path)
         sys.exit(1)
 
-    sheets     = SheetsClient(sheets_cfg)
     categorizer = Categorizer(
-        aliases=[],      # loaded fresh inside run()
-        categories=[],   # loaded fresh inside run()
+        aliases=[],
+        categories=[],
         ollama_host=ollama_cfg.host,
         ollama_model=ollama_cfg.model,
         ollama_timeout=ollama_cfg.timeout_seconds,
     )
 
-    stats = run(
+    stats = direct_import(
         xlsx_path=xlsx_path,
-        sheets_client=sheets,
+        db_path=finance_cfg.sqlite_db,
         categorizer=categorizer,
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         import_file_label=os.path.basename(xlsx_path),
     )
 
-    # ── Print summary ─────────────────────────────────────────────────────────
     print()
     if args.dry_run:
         print(
@@ -501,7 +474,7 @@ Examples:
         print(
             f"Import complete\n"
             f"  Added:      {stats['added']}\n"
-            f"  Skipped:    {stats['skipped']}  (already in Sheets)\n"
+            f"  Skipped:    {stats['skipped']}  (already in SQLite)\n"
             f"  Total XLSX: {stats['total']}\n"
             f"  Parse err:  {stats['parse_err']}\n"
             f"  Duration:   {stats['duration_s']}s\n"

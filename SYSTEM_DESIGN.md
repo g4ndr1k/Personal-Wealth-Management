@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.12.1 · Stage 1 complete · Stage 2 fully built · Stage 3 fully built ✅
+**Version:** 3.13.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema)
-**Last validated against:** checked-in codebase 2026-04-15
+**Last validated against:** checked-in codebase 2026-04-16
 
 ---
 
@@ -41,7 +41,7 @@
 26. [Stage 2 Architecture](#26-stage-2-architecture)
 27. [Stage 2 Data Schemas](#27-stage-2-data-schemas)
 28. [Stage 2 Categorization Engine](#28-stage-2-categorization-engine)
-29. [Stage 2 Google Sheets Integration](#29-stage-2-google-sheets-integration)
+29. [Stage 2 SQLite Authoritative Store](#29-stage-2-sqlite-authoritative-store)
 30. [Stage 2 FastAPI Backend & PWA](#30-stage-2-fastapi-backend--pwa)
 31. [Stage 2 Monthly Workflow](#31-stage-2-monthly-workflow)
 32. [Stage 2 Setup Checklist](#32-stage-2-setup-checklist)
@@ -193,21 +193,19 @@ The system alerts on:
   - Mail.app attachment auto-scanner for bank PDFs
   - Auto-upsert pipeline in `bridge/pdf_handler.py` after every portfolio parse: savings/consol closing balance → `account_balances`; bond holdings → `holdings`; mutual-fund holdings → `holdings`; equity/fund holdings with month-end gap-fill → `holdings`; RDN cash balance → `account_balances`
   - Gap-fill logic — carries the most recent brokerage holdings forward month-by-month (INSERT OR IGNORE) until either the current month or the first month that already has data for that institution, preventing dashboard gaps between monthly PDFs
-  - End-to-end bridge pipeline orchestrator (`bridge/pipeline.py`) with scheduled runs, manual trigger/status endpoints, import/sync chaining, month-complete notification tracking, and recursive scanning of nested folders inside `data/pdf_inbox/`
+  - End-to-end bridge pipeline orchestrator (`bridge/pipeline.py`) with scheduled runs, manual trigger/status endpoints, import/backup chaining, month-complete notification tracking, and recursive scanning of nested folders inside `data/pdf_inbox/`
 - Stage 2 finance package (`finance/`) — see §25–33
-  - `finance/config.py` — loads `[finance]`, `[google_sheets]`, `[fastapi]`, `[ollama_finance]` sections from `settings.toml`
+  - `finance/config.py` — loads `[finance]`, `[fastapi]`, and `[ollama_finance]` sections from `settings.toml`
   - `finance/models.py` — `FinanceTransaction` dataclass, SHA-256 hash generation (`date|amount|description|institution|owner|account`), XLSX date parser with calendar validation and DD-MM-YY century heuristic
-  - `finance/sheets.py` — Google Sheets API v4 client: service-account auth (preferred) with personal OAuth fallback; read/write transactions, aliases, categories, currency hints, import log; 401-triggered service cache invalidation; Category Overrides tab expanded to 10 columns (A:J) — includes txn_date, txn_amount, txn_description, txn_institution, txn_account, txn_owner alongside hash/category/notes/updated_at
   - `finance/categorizer.py` — account-aware categorization engine: normalized exact alias → token-aware contains alias (specificity-sorted by length) → regex → Ollama AI suggestion (retry wrapper, `format_json=True` for Gemma 4 JSON-mode reliability) → review queue flag, plus cross-account internal transfer matching; alias matching now tolerates inserted timestamps / transfer codes by tokenizing descriptions and dropping volatile numeric fragments; filtered rules (owner/account) are sorted before generic rules so they always win on conflict; `Categorizer.__init__()` persists `ollama_host`/`ollama_model`/`ollama_timeout` on the instance for all Layer 3 calls
-  - `finance/importer.py` — CLI entry point: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, batch-appends to Google Sheets; `--dry-run`, `--overwrite`, `--file`, `-v`
+  - `finance/importer.py` — CLI entry point and `direct_import()` implementation: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, and writes directly to SQLite; `--dry-run`, `--overwrite`, `--file`, `-v`
   - `finance/ollama_utils.py` — shared Ollama retry wrapper with exponential backoff (1s, 2s, 4s); retries on `URLError`, `TimeoutError`, `ConnectionError`; optional `format_json=True` forces Ollama JSON-mode output (`"format": "json"` in payload); uses streaming aggregation (`stream=True`) because `gemma4:e4b` can return empty `response` payloads in non-stream mode; used by categorizer and API AI endpoints
-  - `finance/setup_sheets.py` — one-time Sheet initializer: creates tabs, writes formatted headers, seeds 22 default categories and 18 currency codes
-  - `finance/db.py` — SQLite schema (5 tables + 6 indexes), WAL mode with `busy_timeout=5000`, `open_db()` connection helper, schema version tracking, 90-day sync_log retention; `merchant_aliases` table includes `owner_filter`/`account_filter` with UNIQUE constraint; `transactions` now also stores nullable `ollama_suggestion` and `suggested_merchant` columns so Layer 3 review-queue hints survive reloads
-  - `finance/sync.py` — Sheets → SQLite sync engine: atomic DELETE + INSERT per table, hash deduplication, auto-rehash with account field (writes updated hashes back to Sheets), connection leak-safe (try/finally), sync_log, `--status` CLI flag; reads Merchant Aliases columns A:G (including `owner_filter`/`account_filter`)
-  - `finance/api.py` — FastAPI app: finance read/write APIs, monthly and annual summaries, review queue, PDF-local proxy endpoints, pipeline proxy endpoints, wealth APIs, CORS (hardened with explicit methods/headers), in-memory rate limiting (60 req/min per endpoint), sanitized error messages, SQLite `_db()` context manager; `/api/backfill-aliases` now uses the same normalized/token-aware alias matching as `finance.categorizer`; `POST /api/review-queue/suggest` reruns the full categorizer on uncategorised rows without existing hints — L1/L2 writes `merchant`/`category` directly, L3 stores `ollama_suggestion` + `suggested_merchant` for user confirmation; also mounts `pwa/dist/` at `/` when present; `GET /api/audit/completeness?start_month=YYYY-MM&end_month=YYYY-MM` — scans `pdf_inbox` + `pdf_unlocked` recursively, parses filenames via `_parse_pdf_entity()` (7 regex patterns covering BCA/CIMB/IPOT/Maybank/Permata/Stockbit/BNI Sekuritas naming conventions), and returns a `{months, month_labels, entities}` grid; BNI Sekuritas matched by `SOA_BNI_SEKURITAS_\w+_{Mon}{YYYY}` pattern → `entity_key="bni-sekuritas-soa"`, `info="SOA"`; this endpoint is excluded from the Workbox SW cache so it always hits the network
+  - `finance/db.py` — authoritative SQLite schema with WAL mode, `busy_timeout=5000`, `secure_delete=ON`, `auto_vacuum=FULL`, schema version tracking, `category_overrides`, `import_log`, `audit_log`, `owner_mappings`, and the `transactions_resolved` view; `merchant_aliases` includes `owner_filter`/`account_filter` with UNIQUE constraint; `transactions` stores nullable `ollama_suggestion` and `suggested_merchant` so Layer 3 review-queue hints survive reloads
+  - `finance/backup.py` — online SQLite backup helper using `sqlite3.Connection.backup()` with pruning and restrictive file permissions
+  - `finance/api.py` — FastAPI app: finance read/write APIs, monthly and annual summaries, review queue, PDF-local proxy endpoints, pipeline proxy endpoints, wealth APIs, CORS (hardened with explicit methods/headers), in-memory rate limiting (60 req/min per endpoint), sanitized error messages, SQLite `_db()` context manager; reads from `transactions_resolved`, writes aliases and overrides directly to SQLite, keeps `POST /api/sync` as a no-op compatibility endpoint, exposes `/api/backfill-aliases`, and mounts `pwa/dist/` at `/` when present; `GET /api/audit/completeness?start_month=YYYY-MM&end_month=YYYY-MM` scans `pdf_inbox` + `pdf_unlocked` recursively, parses filenames via `_parse_pdf_entity()` (7 regex patterns covering BCA/CIMB/IPOT/Maybank/Permata/Stockbit/BNI Sekuritas naming conventions), and returns a `{months, month_labels, entities}` grid; BNI Sekuritas matched by `SOA_BNI_SEKURITAS_\w+_{Mon}{YYYY}` pattern → `entity_key="bni-sekuritas-soa"`, `info="SOA"`; this endpoint is excluded from the Workbox SW cache so it always hits the network
   - `finance/server.py` — uvicorn entry point: `python3 -m finance.server`; `--host`, `--port`, `--reload` overrides
-  - `finance/Dockerfile` — `python:3.12-slim` image; installs google-auth, fastapi, uvicorn[standard], rapidfuzz, openpyxl; copies `pwa/dist/` for production static serving
-  - `finance/requirements.txt` — Python dependencies: `google-auth`, `google-auth-oauthlib`, `google-api-python-client`, `rapidfuzz`, `fastapi`, `uvicorn[standard]`
+  - `finance/Dockerfile` — `python:3.12-slim` image; installs the SQLite-first finance stack (`fastapi`, `uvicorn[standard]`, `rapidfuzz`, `openpyxl`, etc.) and copies `pwa/dist/` for production static serving
+  - `finance/requirements.txt` — Python dependencies for the SQLite-first API/import stack; Google Sheets client dependencies removed
 - Stage 2 Vue 3 PWA (`pwa/`) — see §30
   - `pwa/src/views/Dashboard.vue` — restored Flows view: month/owner navigation, summary cards, **spending by group** rollup with category chips, Chart.js 12-month trend, owner split table, and desktop-only higher-contrast Monthly Trend explanation styling for readability in the dark shell
   - `pwa/src/views/GroupDrilldown.vue` — Level 1 drill-down: group → category list with amounts, tx counts, mini bar chart
@@ -410,7 +408,7 @@ agentic-ai/
 │   ├── mail_source.py            # Mail.app SQLite adapter
 │   ├── messages_source.py        # Messages.app SQLite adapter + AppleScript sender
 │   ├── pdf_handler.py            # PDF processor endpoints (/pdf/*); auto-upsert pipeline for holdings/balances
-│   ├── pipeline.py               # Scheduled/manual PDF→import→sync orchestrator
+│   ├── pipeline.py               # Scheduled/manual PDF→import→backup orchestrator
 │   ├── pdf_unlock.py             # pikepdf unlock + AppleScript fallback
 │   ├── fx_rate.py                # Historical FX rates via fawazahmed0/currency-api (free, no key)
 │   ├── gold_price.py             # IDR/gram gold price via XAU/IDR from fx_rate (historical-capable)
@@ -420,7 +418,7 @@ agentic-ai/
 │   ├── __init__.py
 │   ├── base.py                   # Transaction, AccountSummary, StatementResult dataclasses
 │   ├── router.py                 # Auto-detect bank + statement type (bank-name-first)
-│   ├── owner.py                  # Customer name → owner label mapping (Gandrik / Helen)
+│   ├── owner.py                  # Customer name → owner label mapping (SQLite owner_mappings first, settings fallback)
 │   ├── maybank_cc.py             # Maybank credit card statement parser
 │   ├── maybank_consol.py         # Maybank consolidated statement parser
 │   ├── bca_cc.py                 # BCA credit card statement parser
@@ -440,17 +438,15 @@ agentic-ai/
 │   ├── __init__.py
 │   ├── config.py                 # Loads Stage 2 settings sections from settings.toml
 │   ├── models.py                 # FinanceTransaction dataclass + hash (date|amount|desc|institution|owner|account) + date helpers
-│   ├── sheets.py                 # Google Sheets API v4 client (service account + OAuth fallback, read, write, service cache invalidation)
 │   ├── categorizer.py            # 4-layer engine: exact → contains (specificity-sorted) → regex → Ollama JSON-mode suggestion → review queue
-│   ├── importer.py               # CLI: ALL_TRANSACTIONS.xlsx → Google Sheets
+│   ├── importer.py               # CLI + direct_import(): ALL_TRANSACTIONS.xlsx → SQLite
 │   ├── ollama_utils.py           # Shared Ollama retry wrapper (exponential backoff, retries on URLError/Timeout/ConnectionError)
-│   ├── setup_sheets.py           # One-time: create tabs, headers, seed reference data
-│   ├── db.py                     # SQLite schema + open_db() + WAL mode; 9 tables + schema_version tracking + busy_timeout + sync_log retention + AI hint columns on transactions
-│   ├── sync.py                   # Sheets → SQLite sync engine + CLI (--status); auto-rehash with account field + write-back to Sheets
+│   ├── db.py                     # SQLite schema + open_db() + WAL mode; authoritative Stage 2/3 store with overrides, audit log, owner mappings, and resolved transaction view
+│   ├── backup.py                 # SQLite online backup helper (post-import snapshots + pruning)
 │   ├── api.py                    # FastAPI: 25+ REST endpoints (12 Stage 2 + 13 Stage 3) + rate limiting + CORS hardening + PWA static mount
 │   ├── server.py                 # uvicorn entry point (python3 -m finance.server)
 │   ├── Dockerfile                # python:3.12-slim; copies finance/ + pwa/dist/
-│   └── requirements.txt          # google-auth, google-auth-oauthlib, google-api-python-client, rapidfuzz, fastapi, uvicorn
+│   └── requirements.txt          # rapidfuzz, fastapi, uvicorn, openpyxl, sqlite-first finance stack (Google deps removed)
 ├── pwa/                          # Stage 2 + 3 — Vue 3 PWA (mobile-first wealth dashboard)
 │   ├── package.json              # Vue 3, Chart.js, Pinia, vue-router, vite-plugin-pwa
 │   ├── vite.config.js            # Vite + PWA plugin + /api proxy to :8090
@@ -784,8 +780,8 @@ alert_on_categories = [
 |---|---|---|
 | `enabled` | `false` | Enable the bridge-integrated scheduled pipeline |
 | `scan_interval_seconds` | `14400` | Delay between scheduled cycles (4 hours) |
-| `auto_import_enabled` | `true` | Run XLS → Google Sheets import after successful parsing |
-| `auto_sync_enabled` | `true` | Run Google Sheets → SQLite sync after a successful import adds rows |
+| `auto_import_enabled` | `true` | Run XLS → SQLite import after successful parsing |
+| `auto_sync_enabled` | `true` | Legacy setting retained in config; Stage 2 no longer syncs from Sheets |
 | `completeness_alert` | `true` | Send one-time month-complete notifications |
 | `parse_alert` | `true` | Send per-cycle success summaries |
 | `failure_alert` | `true` | Send per-cycle failure summaries |
@@ -793,7 +789,7 @@ alert_on_categories = [
 
 ### `[owners]`
 
-Maps customer name substrings found in PDFs to canonical owner labels used for XLS file naming and the `Owner` column in `ALL_TRANSACTIONS.xlsx`. Matching is case-insensitive, first match wins.
+Fallback owner mappings used when the SQLite `owner_mappings` table is empty or unavailable. Matching is case-insensitive substring, first match wins.
 
 ```toml
 [owners]
@@ -801,7 +797,7 @@ Maps customer name substrings found in PDFs to canonical owner labels used for X
 "Dian Pratiwi" = "Helen"
 ```
 
-Add new entries here when new account holders are added. The fallback label when no match is found is `"Unknown"`.
+During normal operation, owner detection loads from SQLite first and only falls back to this section. The fallback label when no match is found is `"Unknown"`.
 
 ---
 
@@ -1728,8 +1724,8 @@ The bridge now also includes `bridge/pipeline.py`, an opt-in orchestrator that c
 2. Compute SHA-256 for each PDF and consult `data/processed_files.db`
 3. Skip files already recorded with `status='ok'`; retry prior `status='error'`
 4. Reuse the shared PDF-processing flow from `bridge/pdf_handler.py`
-5. If any PDFs succeed and `auto_import_enabled = true`, run `finance.importer`
-6. If the importer adds rows and `auto_sync_enabled = true`, run `finance.sync`
+5. If any PDFs succeed and `auto_import_enabled = true`, run `finance.importer` (`direct_import`)
+6. If the importer adds rows, create an online SQLite backup via `finance.backup`
 7. Rebuild completeness state using the PDF Import Log
 8. Send batched success/failure notifications or one-time month-complete alerts
 
@@ -1907,7 +1903,7 @@ python3 scripts/export-secrets-for-docker.py
 
 ### Owner detection
 
-`parsers/owner.py` maps the customer name found in a PDF to a canonical owner label. Matching is case-insensitive substring, first match wins. The mapping is configured in `[owners]` in `settings.toml` and passed into `export()` via `pdf_config["owner_mappings"]`.
+`parsers/owner.py` maps the customer name found in a PDF to a canonical owner label. Matching is case-insensitive substring, first match wins. It now loads from the SQLite `owner_mappings` table first, falls back to `[owners]` in `settings.toml`, then finally to hardcoded defaults.
 
 | Customer name (from PDF) | Owner label |
 |---|---|
@@ -2007,6 +2003,309 @@ python3 scripts/batch_process.py --dry-run
 
 # Wipe all XLS output before processing
 python3 scripts/batch_process.py --clear-output
+```
+
+---
+
+## 25. Stage 2 Overview & Scope
+
+Stage 2 is the household personal-finance system built on top of the PDF statement pipeline. As of the current codebase, the Stage 2 migration is complete: **SQLite is now the authoritative store** for transactions, aliases, category overrides, import history, owner mappings, and audit history.
+
+The old intermediary flow:
+
+```
+PDFs → parsers → XLS → Google Sheets → sync.py → SQLite → API → PWA
+```
+
+has been replaced by:
+
+```
+PDFs → parsers → XLS → direct_import() → SQLite → API → PWA
+```
+
+The XLS layer still exists as a parser export artifact and import source, but Google Sheets and `finance.sync` have been removed from the runtime architecture.
+
+### Scope
+
+- Transaction ingestion from `ALL_TRANSACTIONS.xlsx`
+- Merchant aliasing and transaction categorization
+- Review queue for uncategorized rows and AI suggestions
+- Durable manual overrides that survive re-imports
+- FastAPI backend + offline-capable PWA
+- Import history, owner mappings, and audit logging
+- Post-import SQLite backups
+
+---
+
+## 26. Stage 2 Architecture
+
+### Runtime data flow
+
+```
+PDFs
+  ↓  parsers/*
+output/xls/ALL_TRANSACTIONS.xlsx
+  ↓  finance.importer.direct_import()
+SQLite (data/finance.db)
+  ├─ transactions               # parser output / base layer
+  ├─ category_overrides         # user edits / override layer
+  ├─ transactions_resolved      # read-time merged view
+  ├─ merchant_aliases           # reusable categorization rules
+  ├─ owner_mappings             # PDF customer name → owner label
+  ├─ import_log                 # import history
+  └─ audit_log                  # lightweight change tracking
+  ↓
+FastAPI (finance/api.py)
+  ↓
+PWA (Vue 3)
+```
+
+### Key design decisions
+
+- **SQLite-first**: all reads and writes now go directly to `data/finance.db`.
+- **Override layer, not event sourcing**: parser output remains in `transactions`; human edits live in `category_overrides`; `transactions_resolved` merges them at read time.
+- **Re-import safety**: `direct_import()` deduplicates by transaction hash and can overwrite parser rows without losing manual category fixes.
+- **Operational simplicity**: no Google OAuth, service-account credentials, token refresh flow, or Sheets API limits in the hot path.
+- **Local-first privacy**: household financial data stays on the machine, protected by FileVault plus restrictive SQLite file permissions.
+
+### Backup strategy
+
+Tier 1 is deterministic re-parse from PDFs and XLS artifacts. Tier 2 is implemented in code: after a successful import, `bridge/pipeline.py` calls `finance.backup.backup_db()` to create a timestamped backup in `data/backups/` using `sqlite3.Connection.backup()`, prune old copies, and apply `chmod 600`.
+
+---
+
+## 27. Stage 2 Data Schemas
+
+### Core transaction tables
+
+| Table | Role |
+|---|---|
+| `transactions` | Base parser/import output keyed by transaction hash |
+| `category_overrides` | Human edits that must survive re-imports |
+| `transactions_resolved` | SQL view merging `transactions` with overrides |
+| `merchant_aliases` | Exact / contains / regex alias rules |
+| `categories` | Category reference data |
+| `currency_codes` | Currency metadata for foreign-spend reporting |
+| `owner_mappings` | Customer-name substring → owner label mapping |
+| `import_log` | Import run history |
+| `audit_log` | Lightweight append-only operational log |
+| `sync_log` | Legacy history retained for backward compatibility |
+
+### Override-layer design
+
+Manual categorization is preserved through a two-layer model:
+
+- `transactions` stores parser/import results
+- `category_overrides` stores user-supplied `category`, optional `merchant`, and `notes`
+- `transactions_resolved` exposes the merged row with `COALESCE(...)` and a `has_override` flag
+
+This means a re-import can safely refresh parser output while leaving user corrections untouched.
+
+### Security and PRAGMA hardening
+
+`finance.db.open_db()` enables:
+
+- WAL mode
+- `busy_timeout=5000`
+- `PRAGMA foreign_keys=ON`
+- `PRAGMA secure_delete=ON`
+- `PRAGMA auto_vacuum=FULL`
+
+The database and backup files are expected to use restrictive local permissions (`0600`).
+
+---
+
+## 28. Stage 2 Categorization Engine
+
+`finance/categorizer.py` still uses the same four-layer approach, but aliases now load from SQLite instead of Google Sheets:
+
+1. **Exact alias** match
+2. **Contains** alias match (specificity-sorted)
+3. **Regex** alias match
+4. **Ollama suggestion** for review-queue enrichment
+
+### Review queue behavior
+
+- Uncategorized rows are fetched from `transactions_resolved`
+- `POST /api/review-queue/suggest` re-runs categorization on unresolved rows
+- L1/L2 matches can be applied automatically
+- L3 writes `ollama_suggestion` and `suggested_merchant` to `transactions`
+- User confirmation via `POST /api/alias` writes both `merchant_aliases` and `category_overrides`
+
+### Alias backfill
+
+When the user confirms an alias, the API can also apply the category/merchant override to similar uncategorized rows. These writes are recorded in `category_overrides` with `updated_by='alias_backfill'`.
+
+---
+
+## 29. Stage 2 SQLite Authoritative Store
+
+The Google Sheets layer has been fully removed from the live system.
+
+### What changed
+
+- `finance/sheets.py`, `finance/sync.py`, and `finance/setup_sheets.py` are deleted
+- `finance/importer.py` writes directly to SQLite through `direct_import()`
+- `finance/api.py` reads from `transactions_resolved` and writes to SQLite tables directly
+- `POST /api/sync` is now a no-op endpoint kept only for Settings-page compatibility
+- Docker and Python dependencies for Google auth/API clients are removed
+
+### Manual-edit preservation
+
+The critical data-integrity problem from the old Sheets-based system is now handled locally:
+
+- parser/import output can be refreshed freely
+- manual edits live outside the base transaction rows
+- reads always resolve through the `transactions_resolved` view
+
+This replaces the old Sheets "Category Overrides" tab with a durable SQLite override layer.
+
+### One-time migration
+
+`scripts/migrate_to_sqlite_master.py` exists for the historical cutover. It:
+
+1. Requires schema version 2
+2. Reads overrides and import log from Google Sheets
+3. Reads `[owners]` from `settings.toml`
+4. Inserts into `category_overrides`, `import_log`, and `owner_mappings`
+5. Records migration actions in `audit_log`
+
+This script is part of the completed migration path, not the normal steady-state flow.
+
+---
+
+## 30. Stage 2 FastAPI Backend & PWA
+
+### Backend responsibilities
+
+`finance/api.py` now serves Stage 2 directly from SQLite:
+
+- `GET /api/health`
+- `GET /api/owners`
+- `GET /api/categories`
+- `GET /api/transactions`
+- `GET /api/transactions/foreign`
+- `GET /api/summary/*`
+- `GET /api/review-queue`
+- `POST /api/review-queue/suggest`
+- `POST /api/alias`
+- `PATCH /api/transaction/{hash}/category`
+- `POST /api/import`
+- `POST /api/sync` (no-op compatibility endpoint)
+
+### Write behavior
+
+- `POST /api/alias` writes `merchant_aliases`, writes/updates `category_overrides`, updates the base row for immediate consistency, and inserts `audit_log` entries
+- `PATCH /api/transaction/{hash}/category` writes `category_overrides`, optionally updates aliases, can propagate to similar transactions, and logs the change
+- `POST /api/import` runs `direct_import()` and then triggers a SQLite backup on successful writes
+
+### Frontend behavior
+
+The PWA still provides:
+
+- dashboard and monthly summaries
+- transactions list and inline editing
+- review queue with AI-assisted suggestions
+- foreign-spend view
+- settings/import/health controls
+
+GET responses are cached in IndexedDB for offline/mobile use, while selected mutation and freshness-sensitive flows bypass stale cache when needed.
+
+---
+
+## 31. Stage 2 Monthly Workflow
+
+### 1. Process PDFs
+
+Use the bridge pipeline or batch processor to parse new statements into XLS output.
+
+### 2. Import transactions into SQLite
+
+```bash
+python3 -m finance.importer
+```
+
+Or use the PWA Settings import action, which calls `POST /api/import`.
+
+### 3. Review uncategorized transactions
+
+Open `/review` in the PWA:
+
+- inspect null-category rows from `transactions_resolved`
+- accept or adjust AI suggestions
+- create aliases
+- optionally backfill similar transactions
+
+### 4. Verify dashboard outputs
+
+Check `/flows`, `/transactions`, `/foreign`, and `/audit` to confirm categories, owners, and monthly totals look correct.
+
+### 5. Confirm backup creation
+
+After successful imports, confirm a fresh file exists in `data/backups/`.
+
+---
+
+## 32. Stage 2 Setup Checklist
+
+### Prerequisites
+
+- Stage 1 PDF pipeline working
+- `data/finance.db` writable
+- Finance API running (`docker compose up -d finance-api`)
+- Ollama available for review-queue suggestions (optional but recommended)
+
+### First-time validation
+
+```bash
+# Import current XLS into SQLite
+python3 -m finance.importer --dry-run
+python3 -m finance.importer
+
+# Sanity-check resolved transaction count
+python3 -c "import sqlite3; c=sqlite3.connect('data/finance.db'); print(c.execute('SELECT COUNT(*) FROM transactions_resolved').fetchone())"
+
+# Create an explicit backup if needed
+python3 -m finance.backup
+```
+
+### Historical migration validation
+
+If validating the original cutover:
+
+```bash
+python3 scripts/migrate_to_sqlite_master.py --dry-run
+python3 scripts/migrate_to_sqlite_master.py
+```
+
+Then compare row counts for `category_overrides`, `import_log`, and `owner_mappings`.
+
+---
+
+## 33. Stage 2 Operations Reference
+
+### Useful commands
+
+```bash
+# Import from XLS into SQLite
+python3 -m finance.importer
+
+# Re-import without writes
+python3 -m finance.importer --dry-run
+
+# Force a backup
+python3 -m finance.backup
+
+# Check unresolved review queue count
+python3 -c "import sqlite3; c=sqlite3.connect('data/finance.db'); print(c.execute(\"SELECT COUNT(*) FROM transactions_resolved WHERE category IS NULL OR category = ''\").fetchone())"
+```
+
+### Operational notes
+
+- `transactions_resolved` is the canonical read surface for transaction queries
+- `category_overrides`, `merchant_aliases`, `owner_mappings`, and `audit_log` contain human-maintained data that cannot be reconstructed from parser output alone
+- deterministic re-parse protects transaction recovery, but backups protect manual household knowledge
+- `POST /api/sync` should be treated as informational only; it no longer syncs from any external system
 
 ---
 
@@ -2225,16 +2524,16 @@ At the end of each month (or whenever new PDF statements arrive):
 # Drop PDFs into data/pdf_inbox/ (or use Settings → PDF Workspace in PWA)
 # The pipeline runs automatically on schedule, or trigger manually:
 TOKEN=$(cat secrets/bridge.token)
-curl -s -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/pdf/pipeline/trigger
+curl -s -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9100/pipeline/run
 ```
 
 Brokerage PDFs (IPOT, BNI Sekuritas, Stockbit) auto-upsert holdings and account balances.
 
-### 2. Sync transactions to SQLite
+### 2. Import transactions to SQLite
 
 ```bash
-python3 -m finance.sync
-# or use Settings → Sync in PWA
+python3 -m finance.importer
+# or use Settings → Import in PWA
 ```
 
 ### 3. Review and categorize
@@ -2273,7 +2572,7 @@ Open `/audit` → Call Over tab. Compare the two most recent months side by side
 
 ### Prerequisites
 
-- Stage 2 fully operational (sync running, SQLite DB populated)
+- Stage 2 fully operational (SQLite DB populated, import path working)
 - Finance API running (`docker compose up -d finance-api`)
 
 ### Initial data entry

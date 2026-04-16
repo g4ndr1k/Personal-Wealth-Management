@@ -14,22 +14,6 @@ class FinanceConfig:
 
 
 @dataclass
-class SheetsConfig:
-    credentials_file: str
-    token_file: str
-    service_account_file: str
-    spreadsheet_id: str
-    transactions_tab: str
-    aliases_tab: str
-    categories_tab: str
-    currency_tab: str
-    import_log_tab: str
-    overrides_tab: str
-    pdf_import_log_tab: str
-    holdings_tab: str
-
-
-@dataclass
 class FastAPIConfig:
     host: str
     port: int
@@ -60,29 +44,6 @@ def get_finance_config(cfg: dict) -> FinanceConfig:
     return FinanceConfig(
         sqlite_db  = os.environ.get("FINANCE_SQLITE_DB")  or s["sqlite_db"],
         xlsx_input = os.environ.get("FINANCE_XLSX_INPUT") or s["xlsx_input"],
-    )
-
-
-def get_sheets_config(cfg: dict) -> SheetsConfig:
-    s = cfg["google_sheets"]
-    creds = os.environ.get("GOOGLE_CREDENTIALS_FILE") or s["credentials_file"]
-    # Default token file lives beside the credentials file
-    default_token = os.path.join(os.path.dirname(creds), "google_token.json")
-    token = os.environ.get("GOOGLE_TOKEN_FILE") or s.get("token_file", default_token)
-    service_account = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE") or s.get("service_account_file", "")
-    return SheetsConfig(
-        credentials_file=creds,
-        token_file=token,
-        service_account_file=service_account,
-        spreadsheet_id=os.environ.get("GOOGLE_SPREADSHEET_ID") or s["spreadsheet_id"],
-        transactions_tab=s.get("transactions_tab", "Transactions"),
-        aliases_tab=s.get("aliases_tab", "Merchant Aliases"),
-        categories_tab=s.get("categories_tab", "Categories"),
-        currency_tab=s.get("currency_tab", "Currency Codes"),
-        import_log_tab=s.get("import_log_tab", "Import Log"),
-        overrides_tab=s.get("overrides_tab", "Category Overrides"),
-        pdf_import_log_tab=s.get("pdf_import_log_tab", "PDF Import Log"),
-        holdings_tab=s.get("holdings_tab", "Holdings"),
     )
 
 

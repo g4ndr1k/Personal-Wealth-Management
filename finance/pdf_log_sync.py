@@ -37,8 +37,6 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from finance.config import load_config, get_sheets_config
-from finance.sheets import SheetsClient
 
 log = logging.getLogger(__name__)
 
@@ -250,14 +248,6 @@ def main():
         help=f"Path to processed_files.db (default: {DEFAULT_REGISTRY_DB})",
     )
     ap.add_argument(
-        "--config", default=None, metavar="PATH",
-        help="Path to settings.toml (default: config/settings.toml)",
-    )
-    ap.add_argument(
-        "--dry-run", action="store_true",
-        help="Print the rows that would be written without touching the sheet.",
-    )
-    ap.add_argument(
         "-v", "--verbose", action="store_true",
         help="Enable debug logging.",
     )
@@ -290,23 +280,12 @@ def main():
         complete, partial, missing,
     )
 
-    if args.dry_run:
-        header = ["month", "label", "expected", "actual", "status", "files", "last_processed"]
-        print("\n" + "  ".join(f"{h:<22}" for h in header))
-        print("─" * 120)
-        for r in rows:
-            print("  ".join(str(v)[:22].ljust(22) for v in r))
-        print(f"\n{total} rows total  (dry-run — sheet not updated)\n")
-        return
-
-    raw_cfg    = load_config(args.config)
-    sheets_cfg = get_sheets_config(raw_cfg)
-    client     = SheetsClient(sheets_cfg)
-
-    log.info("Writing to '%s' tab …", sheets_cfg.pdf_import_log_tab)
-    client.write_pdf_import_log(rows)
-
-    log.info("Done.")
+    header = ["month", "label", "expected", "actual", "status", "files", "last_processed"]
+    print("\n" + "  ".join(f"{h:<22}" for h in header))
+    print("─" * 120)
+    for r in rows:
+        print("  ".join(str(v)[:22].ljust(22) for v in r))
+    print(f"\n{total} rows total\n")
     if missing or partial:
         log.warning(
             "%d missing and %d partial entries — some PDFs were not processed.",

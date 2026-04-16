@@ -10,6 +10,42 @@ const store = useFinanceStore()
 // ── Tab state ──────────────────────────────────────────────────────────────
 const activeTab = ref('call-over')
 
+// ── Ignored Transactions state ─────────────────────────────────────────────
+const ignoredLoading = ref(false)
+const ignoredError = ref('')
+const ignoredTxns = ref([])
+const ignoredTotal = ref(0)
+const ignoredOffset = ref(0)
+const IGNORED_PAGE_SIZE = 100
+
+async function loadIgnored(reset = true) {
+  if (reset) ignoredOffset.value = 0
+  ignoredLoading.value = true
+  ignoredError.value = ''
+  try {
+    const res = await api.transactions({
+      category: 'Ignored',
+      limit: IGNORED_PAGE_SIZE,
+      offset: ignoredOffset.value,
+    })
+    ignoredTotal.value = res.total || 0
+    if (reset) {
+      ignoredTxns.value = res.transactions || []
+    } else {
+      ignoredTxns.value = [...ignoredTxns.value, ...(res.transactions || [])]
+    }
+  } catch (e) {
+    ignoredError.value = e.message || 'Failed to load ignored transactions'
+  } finally {
+    ignoredLoading.value = false
+  }
+}
+
+function loadMoreIgnored() {
+  ignoredOffset.value += IGNORED_PAGE_SIZE
+  loadIgnored(false)
+}
+
 // ── Call Over state ────────────────────────────────────────────────────────
 const loading = ref(false)
 const error = ref('')
@@ -243,6 +279,12 @@ onMounted(() => { loadCallOver() })
 watch([() => store.dashboardStartMonth, () => store.dashboardEndMonth], () => {
   loadCallOver()
 })
+
+watch(activeTab, (tab) => {
+  if (tab === 'ignored' && !ignoredTxns.value.length && !ignoredLoading.value) {
+    loadIgnored()
+  }
+})
 </script>
 
 <template>
@@ -256,11 +298,81 @@ watch([() => store.dashboardStartMonth, () => store.dashboardEndMonth], () => {
       <button
         :class="['audit-tab', activeTab === 'pdf' && 'active']"
         @click="activeTab = 'pdf'"
-      >📋 PDF Completeness</button>
+      >📋 PDF</button>
+      <button
+        :class="['audit-tab', activeTab === 'ignored' && 'active']"
+        @click="activeTab = 'ignored'"
+      >🚫 Ignored</button>
     </div>
 
     <!-- PDF Completeness tab -->
     <AuditCompleteness v-if="activeTab === 'pdf'" />
+
+    <!-- Ignored Transactions tab -->
+    <template v-if="activeTab === 'ignored'">
+      <div class="ign-header">
+        <div class="ign-header-row">
+          <h1 class="co-title">🚫 Ignored Transactions</h1>
+          <button class="btn btn-ghost btn-sm" :disabled="ignoredLoading" @click="loadIgnored()">
+            {{ ignoredLoading ? 'Loading…' : 'Refresh' }}
+          </button>
+        </div>
+        <p class="co-subtitle">
+          Transactions excluded from all income/expense/category calculations (e.g. Permata RDN custodian account movements).
+        </p>
+      </div>
+
+      <div v-if="ignoredLoading && !ignoredTxns.length" class="loading">
+        <div class="spinner"></div> Loading ignored transactions…
+      </div>
+
+      <div v-else-if="ignoredError" class="alert alert-error" style="margin:0 16px">
+        ⚠️ {{ ignoredError }}
+        <button class="btn btn-sm btn-ghost" style="margin-left:auto" @click="loadIgnored()">Retry</button>
+      </div>
+
+      <template v-else>
+        <div class="ign-count">
+          {{ ignoredTotal.toLocaleString() }} ignored transaction{{ ignoredTotal !== 1 ? 's' : '' }}
+        </div>
+
+        <!-- Table header -->
+        <div class="ign-table-header">
+          <div class="ign-col-date">Date</div>
+          <div class="ign-col-inst">Institution</div>
+          <div class="ign-col-desc">Description</div>
+          <div class="ign-col-owner">Owner</div>
+          <div class="ign-col-amt">Amount (IDR)</div>
+        </div>
+
+        <div
+          v-for="tx in ignoredTxns"
+          :key="tx.id || tx.hash"
+          class="ign-row"
+        >
+          <div class="ign-col-date">{{ tx.date }}</div>
+          <div class="ign-col-inst">{{ tx.institution }}</div>
+          <div class="ign-col-desc">
+            <span class="ign-desc-text">{{ tx.raw_description }}</span>
+            <span v-if="tx.merchant" class="ign-merchant">{{ tx.merchant }}</span>
+          </div>
+          <div class="ign-col-owner">{{ tx.owner }}</div>
+          <div class="ign-col-amt" :class="tx.amount >= 0 ? 'text-income' : 'text-expense'">
+            {{ fmt(tx.amount) }}
+          </div>
+        </div>
+
+        <div v-if="ignoredTxns.length < ignoredTotal" class="ign-load-more">
+          <button class="btn btn-ghost btn-sm" :disabled="ignoredLoading" @click="loadMoreIgnored">
+            {{ ignoredLoading ? 'Loading…' : `Load more (${ignoredTxns.length} / ${ignoredTotal})` }}
+          </button>
+        </div>
+
+        <div v-if="!ignoredTxns.length" class="ign-empty">
+          No ignored transactions found.
+        </div>
+      </template>
+    </template>
 
     <!-- Call Over tab -->
     <template v-if="activeTab === 'call-over'">
@@ -574,6 +686,77 @@ watch([() => store.dashboardStartMonth, () => store.dashboardEndMonth], () => {
   font-size: 14px !important;
   font-weight: 800 !important;
   color: var(--text) !important;
+}
+
+/* ── Ignored Transactions tab ───────────────────────────────────────────── */
+.ign-header {
+  padding: 8px 16px 12px;
+}
+.ign-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ign-count {
+  padding: 6px 16px 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ign-table-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 16px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 2px solid var(--border);
+}
+.ign-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  font-size: 12px;
+}
+.ign-row:active { background: var(--primary-dim); }
+.ign-col-date  { flex: 0 0 88px; color: var(--text-muted); padding-top: 1px; }
+.ign-col-inst  { flex: 0 0 80px; font-weight: 600; color: var(--text); padding-top: 1px; }
+.ign-col-desc  { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ign-col-owner { flex: 0 0 64px; color: var(--neutral); padding-top: 1px; }
+.ign-col-amt   {
+  flex: 0 0 100px;
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-top: 1px;
+}
+.ign-desc-text {
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ign-merchant {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.ign-load-more {
+  padding: 12px 16px;
+  text-align: center;
+}
+.ign-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 /* ── Desktop dark overrides ──────────────────────────────────────────────── */

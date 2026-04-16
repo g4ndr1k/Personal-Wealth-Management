@@ -157,6 +157,10 @@ export const useFinanceStore = defineStore('finance', () => {
     reviewCount.value = Math.max(0, reviewCount.value - n)
   }
 
+  function setReviewCount(n) {
+    reviewCount.value = Math.max(0, n)
+  }
+
   function setDashboardRange(startMonth, endMonth) {
     const normalizedStart = normalizeDashboardMonth(startMonth, DASHBOARD_MIN_MONTH)
     const normalizedEnd = normalizeDashboardMonth(endMonth, currentMonthKey.value)
@@ -189,6 +193,6 @@ export const useFinanceStore = defineStore('finance', () => {
     dashboardStartMonth, dashboardEndMonth,
     categoryMap, categoryNames, dashboardMonthOptions, dashboardRangeLabel,
     loadHealth, loadOwners, loadCategories, loadYears,
-    decrementReviewCount, setDashboardRange, bootstrap,
+    decrementReviewCount, setReviewCount, setDashboardRange, bootstrap,
   }
 })

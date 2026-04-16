@@ -11,17 +11,12 @@ services:
       # Override host-absolute paths from settings.toml with container paths
       FINANCE_SQLITE_DB:        /app/data/finance.db
       FINANCE_XLSX_INPUT:       /app/output/xls/ALL_TRANSACTIONS.xlsx
-      GOOGLE_CREDENTIALS_FILE:  /app/secrets/google_credentials.json
-      GOOGLE_TOKEN_FILE:        /app/secrets/google_token.json
-      GOOGLE_SERVICE_ACCOUNT_FILE: /app/secrets/google_service_account.json
       FINANCE_API_KEY:          ${FINANCE_API_KEY}
-      GOOGLE_SPREADSHEET_ID:    ${GOOGLE_SPREADSHEET_ID:-}
       OLLAMA_FINANCE_HOST:      http://host.docker.internal:11434
     volumes:
       - ./config/settings.toml:/app/config/settings.toml:ro
       - ./data:/app/data
       - ./output/xls:/app/output/xls:ro
-      - ./secrets:/app/secrets
     ports:
       - "8090:8090"
     extra_hosts:

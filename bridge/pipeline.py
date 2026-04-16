@@ -9,15 +9,12 @@ from pathlib import Path
 from bridge.pdf_handler import run_pdf_pipeline_file
 from finance.categorizer import Categorizer
 from finance.config import (
-get_finance_config,
+    get_finance_config,
     get_ollama_finance_config,
-    get_sheets_config,
     load_config,
 )
-from finance.importer import run as importer_run
+from finance.importer import direct_import as importer_direct
 from finance.pdf_log_sync import DEFAULT_REGISTRY_DB, TOTAL_EXPECTED, build_log_rows
-from finance.sheets import SheetsClient
-from finance.sync import sync as sync_run
 from scripts.batch_process import Registry, is_stable, sha256_file
 
 log = logging.getLogger(__name__)
@@ -110,7 +107,6 @@ class PipelineRunner:
                 "files_failed": 1,
                 "import_new_tx": 0,
                 "import_review": 0,
-                "sync_performed": 0,
             }
             self._last_result = result
             self._last_run_at = result["finished_at"]
@@ -134,12 +130,11 @@ class PipelineRunner:
         files_ok = sum(1 for r in parse_results if r["status"] == "ok")
         files_failed = sum(1 for r in parse_results if r["status"] == "error")
         import_stats = {"added": 0, "by_layer": {4: 0}}
-        sync_stats = None
 
         if files_ok and self.config.get("auto_import_enabled", True):
             import_stats = self._run_import()
-            if import_stats.get("added", 0) > 0 and self.config.get("auto_sync_enabled", True):
-                sync_stats = self._run_sync()
+            if import_stats.get("added", 0) > 0:
+                self._run_backup()
 
         completed_months = self._find_completed_months()
         self._send_notifications(parse_results, import_stats, completed_months)
@@ -155,7 +150,6 @@ class PipelineRunner:
             "files_failed": files_failed,
             "import_new_tx": import_stats.get("added", 0),
             "import_review": import_stats.get("by_layer", {}).get(4, 0),
-            "sync_performed": 1 if sync_stats else 0,
             "results": parse_results,
             "completed_months": completed_months,
         }
@@ -213,10 +207,8 @@ class PipelineRunner:
     def _run_import(self) -> dict:
         cfg = load_config()
         finance_cfg = get_finance_config(cfg)
-        sheets_cfg = get_sheets_config(cfg)
         ollama_cfg = get_ollama_finance_config(cfg)
 
-        sheets = SheetsClient(sheets_cfg)
         categorizer = Categorizer(
             aliases=[],
             categories=[],
@@ -224,20 +216,24 @@ class PipelineRunner:
             ollama_model=ollama_cfg.model,
             ollama_timeout=ollama_cfg.timeout_seconds,
         )
-        return importer_run(
+        return importer_direct(
             xlsx_path=finance_cfg.xlsx_input,
-            sheets_client=sheets,
+            db_path=finance_cfg.sqlite_db,
             categorizer=categorizer,
             overwrite=False,
             dry_run=False,
             import_file_label=Path(finance_cfg.xlsx_input).name,
         )
 
-    def _run_sync(self) -> dict:
-        cfg = load_config()
-        finance_cfg = get_finance_config(cfg)
-        sheets_cfg = get_sheets_config(cfg)
-        return sync_run(finance_cfg.sqlite_db, SheetsClient(sheets_cfg))
+    def _run_backup(self) -> None:
+        try:
+            from finance.backup import backup_db
+            cfg = load_config()
+            finance_cfg = get_finance_config(cfg)
+            backup_db(finance_cfg.sqlite_db)
+            log.info("Post-import backup completed.")
+        except Exception as exc:
+            log.warning("Post-import backup failed (non-fatal): %s", exc)
 
     def _find_completed_months(self) -> list[str]:
         if not self.config.get("completeness_alert", True):

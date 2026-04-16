@@ -1,16 +1,21 @@
 """
-SQLite schema and connection helpers for Stage 2 finance read cache.
+SQLite schema and connection helpers for Stage 2 finance.
 
-The DB is a throw-away read cache — safe to delete and rebuild anytime by
-running:  python3 -m finance.sync
+As of schema version 2, SQLite is the authoritative store for all
+finance data.  The DB is no longer a throw-away cache.
 
 Schema notes
 ────────────
-  transactions   — mirror of the Google Sheets Transactions tab
-  merchant_aliases — mirror of Merchant Aliases tab
-  categories     — mirror of Categories tab
-  currency_codes — mirror of Currency Codes tab
-  sync_log       — one row per sync run (for /api/health and --status)
+  transactions      — parser output (base layer)
+  category_overrides — human edits that survive re-imports (override layer)
+  transactions_resolved — read-time view merging base + overrides
+  merchant_aliases  — categorization rules
+  categories        — category reference data
+  currency_codes    — currency reference data
+  owner_mappings    — account-to-owner substring mappings
+  import_log        — import run history
+  audit_log         — lightweight change tracking
+  sync_log          — legacy sync run log (retained for history)
 
 Precision note
 ──────────────
@@ -212,6 +217,68 @@ CREATE TABLE IF NOT EXISTS net_worth_snapshots (
     notes                   TEXT    DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_nw_date ON net_worth_snapshots(snapshot_date);
+
+-- ── Stage 2.5: SQLite-as-Master tables ──────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS category_overrides (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    hash        TEXT    NOT NULL UNIQUE,
+    category    TEXT    NOT NULL,
+    merchant    TEXT,
+    notes       TEXT    DEFAULT '',
+    updated_at  TEXT    NOT NULL,
+    updated_by  TEXT    DEFAULT 'user'
+);
+CREATE INDEX IF NOT EXISTS idx_overrides_hash ON category_overrides(hash);
+
+CREATE TABLE IF NOT EXISTS import_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_date  TEXT    NOT NULL,
+    import_file  TEXT    NOT NULL,
+    rows_added   INTEGER DEFAULT 0,
+    rows_skipped INTEGER DEFAULT 0,
+    rows_total   INTEGER DEFAULT 0,
+    duration_s   REAL,
+    notes        TEXT    DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp   TEXT    NOT NULL DEFAULT (datetime('now')),
+    entity      TEXT    NOT NULL,
+    entity_id   TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    field       TEXT,
+    old_value   TEXT,
+    new_value   TEXT,
+    source      TEXT    DEFAULT 'api'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts     ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);
+
+CREATE TABLE IF NOT EXISTS owner_mappings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    substring_match TEXT    NOT NULL UNIQUE,
+    owner_label     TEXT    NOT NULL,
+    added_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    notes           TEXT    DEFAULT ''
+);
+"""
+
+TRANSACTIONS_RESOLVED_VIEW = """
+CREATE VIEW IF NOT EXISTS transactions_resolved AS
+SELECT
+    t.id, t.date, t.amount, t.original_currency, t.original_amount,
+    t.exchange_rate, t.raw_description,
+    COALESCE(o.merchant, t.merchant) AS merchant,
+    COALESCE(o.category, t.category) AS category,
+    t.institution, t.account, t.owner,
+    COALESCE(o.notes, t.notes) AS notes,
+    t.hash, t.import_date, t.import_file, t.synced_at,
+    t.ollama_suggestion, t.suggested_merchant,
+    CASE WHEN o.id IS NOT NULL THEN 1 ELSE 0 END AS has_override
+FROM transactions t
+LEFT JOIN category_overrides o ON t.hash = o.hash;
 """
 
 HOLDINGS_TABLE_SQL = """
@@ -369,7 +436,12 @@ def open_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA secure_delete=ON")
+    conn.execute("PRAGMA auto_vacuum=FULL")
     conn.executescript(SCHEMA)
+    # Create the resolved view (DROP + CREATE to pick up schema changes)
+    conn.execute("DROP VIEW IF EXISTS transactions_resolved")
+    conn.executescript(TRANSACTIONS_RESOLVED_VIEW)
     if _needs_holdings_migration(conn):
         _rebuild_holdings_table(conn)
     if _needs_liabilities_migration(conn):
@@ -391,11 +463,22 @@ def open_db(db_path: str) -> sqlite3.Connection:
         if col not in tx_cols:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
     conn.commit()
+    # Schema version bump
+    ver = _get_schema_version(conn)
+    if ver < 2:
+        _set_schema_version(conn, 2)
+        conn.commit()
     # Prune sync_log entries older than 90 days
     conn.execute(
         "DELETE FROM sync_log WHERE synced_at < datetime('now', '-90 days')"
     )
     conn.commit()
+    # Set restrictive file permissions (owner read/write only)
+    try:
+        import os
+        os.chmod(db_path, 0o600)
+    except OSError:
+        pass
     return conn
 
 

@@ -1,5 +1,5 @@
 """
-Stage 2-B — FastAPI backend for the personal finance dashboard.
+Stage 2.5 — FastAPI backend for the personal finance dashboard.
 
 Endpoints
 ─────────
@@ -14,11 +14,11 @@ Endpoints
   GET  /api/review-queue           ?limit=
   POST  /api/alias                  {hash, alias, merchant, category, match_type, apply_to_similar}
   PATCH /api/transaction/{hash}/category  {category, notes?}
-  POST  /api/sync
+  POST  /api/sync                   (no-op — SQLite is authoritative)
   POST  /api/import                 {dry_run?, overwrite?}
 
-All read endpoints query SQLite only (data/finance.db).
-Write endpoints (alias, sync, import) also touch Google Sheets.
+All endpoints read and write SQLite directly (data/finance.db).
+Google Sheets dependency removed in Phase 4.
 
 Start with:  python3 -m finance.server
 """
@@ -46,11 +46,9 @@ from finance.config import (
     load_config,
     get_finance_config,
     get_fastapi_config,
-    get_sheets_config,
     get_ollama_finance_config,
 )
 from finance.db import open_db
-from finance.sheets import SheetsClient
 
 log = logging.getLogger(__name__)
 
@@ -59,27 +57,18 @@ log = logging.getLogger(__name__)
 
 _cfg           = load_config()
 _finance_cfg   = get_finance_config(_cfg)
-_sheets_cfg    = get_sheets_config(_cfg)
 _fastapi_cfg   = get_fastapi_config(_cfg)
 _ollama_cfg    = get_ollama_finance_config(_cfg)
 
-_db_path: str              = _finance_cfg.sqlite_db
-_sheets: SheetsClient | None = None  # lazy — created on first write request
-
-
-def _get_sheets() -> SheetsClient:
-    global _sheets
-    if _sheets is None:
-        _sheets = SheetsClient(_sheets_cfg)
-    return _sheets
+_db_path: str = _finance_cfg.sqlite_db
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Personal Finance API",
-    version="2.1.0",
-    description="Stage 2 finance dashboard backend — reads SQLite, writes Google Sheets.",
+    version="3.0.0",
+    description="Personal finance dashboard — SQLite authoritative store.",
 )
 
 app.add_middleware(
@@ -234,7 +223,7 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
             c.sort_order,
             SUM(t.amount)            AS total_amount,
             COUNT(*)                 AS tx_count
-        FROM transactions t
+        FROM transactions_resolved t
         LEFT JOIN categories c ON t.category = c.category
         WHERE strftime('%Y-%m', t.date) = ?
         GROUP BY t.category
@@ -254,7 +243,7 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
                       AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                       THEN amount ELSE 0 END) AS expense,
             COUNT(*) AS tx_count
-        FROM transactions
+        FROM transactions_resolved
         WHERE strftime('%Y-%m', date) = ?
         GROUP BY owner
         ORDER BY owner
@@ -272,7 +261,7 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
                       AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                       THEN amount ELSE 0 END) AS expense,
             COUNT(*) AS tx_count
-        FROM transactions
+        FROM transactions_resolved
         WHERE strftime('%Y-%m', date) = ?
         """,
         (period,),
@@ -280,7 +269,7 @@ def _get_monthly_summary_data(conn: sqlite3.Connection, year: int, month: int) -
 
     needs_review = conn.execute(
         """
-        SELECT COUNT(*) FROM transactions
+        SELECT COUNT(*) FROM transactions_resolved
         WHERE strftime('%Y-%m', date) = ?
           AND (category IS NULL OR category = '')
         """,
@@ -553,7 +542,7 @@ def _fetch_monthly_label_amounts(
         SELECT
             COALESCE(NULLIF(TRIM(merchant), ''), NULLIF(TRIM(raw_description), ''), 'Unknown') AS label,
             SUM(CASE WHEN amount {comparator} 0 THEN ABS(amount) ELSE 0 END) AS total_amount
-        FROM transactions
+        FROM transactions_resolved
         WHERE strftime('%Y', date) = ?
           AND strftime('%m', date) = ?
           AND amount {comparator} 0
@@ -1171,7 +1160,7 @@ def _build_wealth_explanation(conn: sqlite3.Connection, snapshot_date: Optional[
 
 class AliasRequest(BaseModel):
     hash:             str
-    alias:            str   # raw_description pattern to match (written to Sheets)
+    alias:            str   # raw_description pattern to match
     merchant:         str   # canonical merchant name
     category:         str
     match_type:       str   = "exact"   # "exact" | "contains" | "regex"
@@ -1213,12 +1202,12 @@ def ping():
 @app.get("/api/health", dependencies=[Depends(require_api_key)])
 def health():
     with _db() as conn:
-        tx_count  = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        tx_count  = conn.execute("SELECT COUNT(*) FROM transactions_resolved").fetchone()[0]
         sync_row  = conn.execute(
             "SELECT synced_at, transactions_count FROM sync_log ORDER BY id DESC LIMIT 1"
         ).fetchone()
         needs_rev = conn.execute(
-            "SELECT COUNT(*) FROM transactions WHERE category IS NULL OR category = ''"
+            "SELECT COUNT(*) FROM transactions_resolved WHERE category IS NULL OR category = ''"
         ).fetchone()[0]
     return {
         "status":            "ok",
@@ -1280,9 +1269,9 @@ def get_transactions(
 ):
     qp = _tx_where(year, month, owner, category, q)
     with _db() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM transactions{qp.clause}", qp.params).fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM transactions_resolved{qp.clause}", qp.params).fetchone()[0]
         rows  = conn.execute(
-            f"SELECT * FROM transactions{qp.clause} ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM transactions_resolved{qp.clause} ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
             qp.params + [limit, offset],
         ).fetchall()
     return {
@@ -1307,7 +1296,7 @@ def get_foreign_transactions(
         extra_clause = " WHERE original_currency IS NOT NULL"
     with _db() as conn:
         rows = conn.execute(
-            f"SELECT * FROM transactions{extra_clause} ORDER BY date DESC",
+            f"SELECT * FROM transactions_resolved{extra_clause} ORDER BY date DESC",
             qp.params,
         ).fetchall()
     return [_row(r) for r in rows]
@@ -1358,7 +1347,7 @@ def get_available_years():
     with _db() as conn:
         rows = conn.execute(
             "SELECT DISTINCT strftime('%Y', date) AS yr "
-            "FROM transactions WHERE date != '' ORDER BY yr DESC"
+            "FROM transactions_resolved WHERE date != '' ORDER BY yr DESC"
         ).fetchall()
     return [int(r[0]) for r in rows if r[0]]
 
@@ -1378,7 +1367,7 @@ def get_annual_summary(year: int):
                           AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                           THEN amount ELSE 0 END)      AS expense,
                 COUNT(*)                               AS tx_count
-            FROM transactions
+            FROM transactions_resolved
             WHERE strftime('%Y', date) = ?
             GROUP BY month
             ORDER BY month
@@ -1396,7 +1385,7 @@ def get_annual_summary(year: int):
                           AND (category IS NULL OR category NOT IN ('Transfer','Adjustment','Ignored'))
                           THEN amount ELSE 0 END) AS expense,
                 COUNT(*) AS tx_count
-            FROM transactions
+            FROM transactions_resolved
             WHERE strftime('%Y', date) = ?
             """,
             (str(year),),
@@ -1482,11 +1471,11 @@ def get_review_queue(limit: int = Query(50, ge=1, le=200)):
     """
     with _db() as conn:
         total = conn.execute(
-            "SELECT COUNT(*) FROM transactions WHERE category IS NULL OR category = ''"
+            "SELECT COUNT(*) FROM transactions_resolved WHERE category IS NULL OR category = ''"
         ).fetchone()[0]
         rows = conn.execute(
             """
-            SELECT * FROM transactions
+            SELECT * FROM transactions_resolved
             WHERE category IS NULL OR category = ''
             ORDER BY date DESC
             LIMIT ?
@@ -1514,7 +1503,10 @@ def suggest_review_queue():
     """
     from finance.categorizer import Categorizer
 
-    aliases = _get_sheets().read_aliases()
+    with _db() as conn:
+        alias_rows = conn.execute("SELECT * FROM merchant_aliases").fetchall()
+    aliases = [dict(r) for r in alias_rows]
+
     cat = Categorizer(
         aliases=aliases,
         categories=[],
@@ -1525,7 +1517,7 @@ def suggest_review_queue():
 
     with _db() as conn:
         rows = conn.execute(
-            "SELECT hash, raw_description, owner, account FROM transactions "
+            "SELECT hash, raw_description, owner, account FROM transactions_resolved "
             "WHERE (category IS NULL OR category = '') AND ollama_suggestion IS NULL"
         ).fetchall()
 
@@ -1558,30 +1550,46 @@ def post_alias(req: AliasRequest):
     """
     Confirm a merchant alias from the review queue.
 
-    1. Writes the alias to the Merchant Aliases tab in Google Sheets
-    2. Updates the specific transaction in SQLite (by hash)
-    3. If apply_to_similar=true, also updates uncategorised transactions
-       that share the exact same raw_description
-
-    The next sync will persist these local SQLite edits back from Sheets
-    (the importer will use the new alias on future imports too).
+    1. Writes the alias to SQLite merchant_aliases (authoritative)
+    2. Updates the target transaction via category_overrides (override layer)
+    3. If apply_to_similar=true, also writes overrides for similar uncategorised rows
     """
-    # 1. Write to Google Sheets
-    _get_sheets().append_alias(
-        merchant=req.merchant,
-        alias=req.alias,
-        category=req.category,
-        match_type=req.match_type,
-    )
-    log.info("Alias saved: %s → %s  [%s]", req.alias, req.merchant, req.category)
+    from datetime import datetime, timezone as _tz
+    _now = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     updated_hashes: list[str] = []
+    updated_rows: list[dict] = []
 
     with _db() as conn:
-        # 2. Update the target transaction
+        # 1. Write alias to SQLite merchant_aliases (SQLite-first)
+        conn.execute(
+            """INSERT OR IGNORE INTO merchant_aliases
+               (merchant, alias, category, match_type, added_date, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (req.merchant, req.alias, req.category, req.match_type, _now, _now),
+        )
+        conn.execute(
+            "INSERT INTO audit_log (entity, entity_id, action, field, new_value, source) VALUES ('alias', ?, 'create', 'alias', ?, 'api')",
+            (req.alias, req.category),
+        )
+        log.info("Alias saved to SQLite: %s → %s  [%s]", req.alias, req.merchant, req.category)
+
+        # 2. Write category override for the target transaction
+        conn.execute(
+            """INSERT INTO category_overrides (hash, category, merchant, notes, updated_at, updated_by)
+               VALUES (?, ?, ?, '', ?, 'user')
+               ON CONFLICT(hash) DO UPDATE SET category=excluded.category,
+               merchant=excluded.merchant, updated_at=excluded.updated_at""",
+            (req.hash, req.category, req.merchant, _now),
+        )
+        # Also update transactions table directly for immediate consistency
         conn.execute(
             "UPDATE transactions SET merchant = ?, category = ? WHERE hash = ?",
             (req.merchant, req.category, req.hash),
+        )
+        conn.execute(
+            "INSERT INTO audit_log (entity, entity_id, action, field, new_value, source) VALUES ('override', ?, 'create', 'category', ?, 'api')",
+            (req.hash, req.category),
         )
         updated_hashes.append(req.hash)
 
@@ -1589,13 +1597,13 @@ def post_alias(req: AliasRequest):
         if req.apply_to_similar:
             if req.match_type == "exact":
                 target = conn.execute(
-                    "SELECT raw_description FROM transactions WHERE hash = ?",
+                    "SELECT raw_description FROM transactions_resolved WHERE hash = ?",
                     (req.hash,),
                 ).fetchone()
                 if target:
                     similar = conn.execute(
                         """
-                        SELECT hash FROM transactions
+                        SELECT hash FROM transactions_resolved
                         WHERE raw_description = ?
                           AND hash != ?
                           AND (category IS NULL OR category = '')
@@ -1605,20 +1613,23 @@ def post_alias(req: AliasRequest):
                     if similar:
                         similar_hashes = [r["hash"] for r in similar]
                         conn.executemany(
+                            """INSERT INTO category_overrides (hash, category, merchant, notes, updated_at, updated_by)
+                               VALUES (?, ?, ?, '', ?, 'alias_backfill')
+                               ON CONFLICT(hash) DO UPDATE SET category=excluded.category,
+                               merchant=excluded.merchant, updated_at=excluded.updated_at""",
+                            [(h, req.category, req.merchant, _now) for h in similar_hashes],
+                        )
+                        conn.executemany(
                             "UPDATE transactions SET merchant = ?, category = ? WHERE hash = ?",
                             [(req.merchant, req.category, h) for h in similar_hashes],
                         )
                         updated_hashes.extend(similar_hashes)
-                        log.info(
-                            "Applied alias to %d similar uncategorised transactions.",
-                            len(similar_hashes),
-                        )
+                        log.info("Applied alias to %d similar uncategorised transactions.", len(similar_hashes))
             elif req.match_type == "contains":
-                # Find all uncategorised rows whose raw_description contains the alias pattern
                 pattern = req.alias.strip().upper()
                 similar = conn.execute(
                     """
-                    SELECT hash, raw_description FROM transactions
+                    SELECT hash, raw_description FROM transactions_resolved
                     WHERE UPPER(raw_description) LIKE ?
                       AND hash != ?
                       AND (category IS NULL OR category = '')
@@ -1628,21 +1639,25 @@ def post_alias(req: AliasRequest):
                 if similar:
                     similar_hashes = [r["hash"] for r in similar]
                     conn.executemany(
+                        """INSERT INTO category_overrides (hash, category, merchant, notes, updated_at, updated_by)
+                           VALUES (?, ?, ?, '', ?, 'alias_backfill')
+                           ON CONFLICT(hash) DO UPDATE SET category=excluded.category,
+                           merchant=excluded.merchant, updated_at=excluded.updated_at""",
+                        [(h, req.category, req.merchant, _now) for h in similar_hashes],
+                    )
+                    conn.executemany(
                         "UPDATE transactions SET merchant = ?, category = ? WHERE hash = ?",
                         [(req.merchant, req.category, h) for h in similar_hashes],
                     )
                     updated_hashes.extend(similar_hashes)
-                    log.info(
-                        "Applied contains alias to %d similar uncategorised transactions.",
-                        len(similar_hashes),
-                    )
+                    log.info("Applied contains alias to %d similar uncategorised transactions.", len(similar_hashes))
             elif req.match_type == "regex":
                 import re
                 try:
                     pat = re.compile(req.alias, re.IGNORECASE)
                     uncategorised = conn.execute(
                         """
-                        SELECT hash, raw_description FROM transactions
+                        SELECT hash, raw_description FROM transactions_resolved
                         WHERE hash != ?
                           AND (category IS NULL OR category = '')
                         """,
@@ -1651,20 +1666,32 @@ def post_alias(req: AliasRequest):
                     similar_hashes = [r["hash"] for r in uncategorised if pat.search(r["raw_description"])]
                     if similar_hashes:
                         conn.executemany(
+                            """INSERT INTO category_overrides (hash, category, merchant, notes, updated_at, updated_by)
+                               VALUES (?, ?, ?, '', ?, 'alias_backfill')
+                               ON CONFLICT(hash) DO UPDATE SET category=excluded.category,
+                               merchant=excluded.merchant, updated_at=excluded.updated_at""",
+                            [(h, req.category, req.merchant, _now) for h in similar_hashes],
+                        )
+                        conn.executemany(
                             "UPDATE transactions SET merchant = ?, category = ? WHERE hash = ?",
                             [(req.merchant, req.category, h) for h in similar_hashes],
                         )
                         updated_hashes.extend(similar_hashes)
-                        log.info(
-                            "Applied regex alias to %d similar uncategorised transactions.",
-                            len(similar_hashes),
-                        )
+                        log.info("Applied regex alias to %d similar uncategorised transactions.", len(similar_hashes))
                 except re.error:
                     log.warning("Invalid regex in alias backfill: %s", req.alias)
 
-        # Return the updated row
+        if updated_hashes:
+            placeholders = ",".join("?" * len(updated_hashes))
+            updated_rows = [
+                dict(r) for r in conn.execute(
+                    f"SELECT * FROM transactions WHERE hash IN ({placeholders})",
+                    updated_hashes,
+                ).fetchall()
+            ]
+
         updated = conn.execute(
-            "SELECT * FROM transactions WHERE hash = ?", (req.hash,)
+            "SELECT * FROM transactions_resolved WHERE hash = ?", (req.hash,)
         ).fetchone()
 
     return {
@@ -1679,16 +1706,18 @@ def post_alias(req: AliasRequest):
 @app.post("/api/backfill-aliases", dependencies=[Depends(require_api_key)])
 def backfill_aliases():
     """
-    Re-apply all merchant aliases from Sheets against uncategorised transactions
-    in SQLite.  This fixes rows that were imported before an alias was created.
+    Re-apply all merchant aliases against uncategorised transactions in SQLite.
+    This fixes rows that were imported before an alias was created.
 
     Returns the number of transactions updated.
     """
     import re as _re
     from finance.categorizer import alias_text_tokens, alias_tokens_match, normalize_alias_key
 
-    # 1. Load aliases from Sheets
-    aliases = _get_sheets().read_aliases()
+    # 1. Load aliases from SQLite (authoritative since Phase 2.5)
+    with _db() as conn:
+        alias_rows = conn.execute("SELECT * FROM merchant_aliases").fetchall()
+    aliases = [dict(r) for r in alias_rows]
     if not aliases:
         return {"ok": True, "updated_count": 0, "detail": "no aliases found"}
 
@@ -1719,7 +1748,7 @@ def backfill_aliases():
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT hash, raw_description FROM transactions
+            SELECT hash, raw_description FROM transactions_resolved
             WHERE category IS NULL OR category = ''
             """
         ).fetchall()
@@ -1767,11 +1796,13 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
     """
     Manually override the category for a specific transaction.
 
-    1. Writes to the Category Overrides tab in Google Sheets (survives re-imports)
-    2. Updates the transaction in SQLite immediately (no sync needed)
-    3. Returns the updated transaction row
+    1. Writes to SQLite category_overrides (survives re-imports)
+    2. Returns the updated transaction row via transactions_resolved view
     """
-    # Validate category exists (special-case system category: Ignored)
+    from datetime import datetime, timezone as _tz
+    _now = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Validate category and fetch transaction
     with _db() as conn:
         if req.category != "Ignored":
             cat_row = conn.execute(
@@ -1780,74 +1811,56 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
             if not cat_row:
                 raise HTTPException(400, f"Unknown category: {req.category!r}")
 
-        # Verify transaction exists
         tx = conn.execute(
             "SELECT * FROM transactions WHERE hash = ?", (tx_hash,)
         ).fetchone()
         if not tx:
             raise HTTPException(404, f"Transaction not found: {tx_hash}")
 
-    # Write override to Google Sheets (persistent, survives re-sync)
-    _get_sheets().write_override(
-        tx_hash, req.category, req.notes,
-        txn_date=tx["date"] or "",
-        txn_amount=str(tx["amount"]) if tx["amount"] else "",
-        txn_description=tx["raw_description"] or "",
-        txn_institution=tx["institution"] or "",
-        txn_account=tx["account"] or "",
-        txn_owner=tx["owner"] or "",
-    )
-
-    # Update SQLite immediately so the dashboard reflects it now
     also_updated = 0
     with _db() as conn:
+        # 1. Write to SQLite category_overrides (SQLite-first, authoritative)
         conn.execute(
-            "UPDATE transactions SET category = ? WHERE hash = ?",
-            (req.category, tx_hash),
+            """INSERT INTO category_overrides (hash, category, notes, updated_at, updated_by)
+               VALUES (?, ?, ?, ?, 'user')
+               ON CONFLICT(hash) DO UPDATE SET category=excluded.category,
+               notes=excluded.notes, updated_at=excluded.updated_at""",
+            (tx_hash, req.category, req.notes or "", _now),
         )
+        conn.execute(
+            "INSERT INTO audit_log (entity, entity_id, action, field, new_value, source) VALUES ('override', ?, 'update', 'category', ?, 'api')",
+            (tx_hash, req.category),
+        )
+        # 2. Also update transactions table for direct consistency
+        conn.execute("UPDATE transactions SET category = ? WHERE hash = ?", (req.category, tx_hash))
         if req.notes:
-            conn.execute(
-                "UPDATE transactions SET notes = ? WHERE hash = ?",
-                (req.notes, tx_hash),
-            )
+            conn.execute("UPDATE transactions SET notes = ? WHERE hash = ?", (req.notes, tx_hash))
 
         raw_desc = tx["raw_description"]
         merchant = tx["merchant"]
 
-        # Also update the Merchant Aliases tab so future imports auto-categorise
         if req.update_alias and raw_desc:
-            # Check if an alias already exists for this raw_description
             existing = conn.execute(
-                "SELECT category FROM merchant_aliases WHERE alias = ?",
-                (raw_desc,),
+                "SELECT category FROM merchant_aliases WHERE alias = ?", (raw_desc,)
             ).fetchone()
             if existing and existing["category"] != req.category:
-                # Update the existing alias in Sheets
-                _get_sheets().update_alias_category(raw_desc, req.category)
                 conn.execute(
                     "UPDATE merchant_aliases SET category = ? WHERE alias = ?",
                     (req.category, raw_desc),
                 )
                 log.info("Updated alias: %s → %s", raw_desc[:40], req.category)
             elif not existing:
-                # Create new alias
                 alias_merchant = merchant or raw_desc
-                _get_sheets().append_alias(
-                    merchant=alias_merchant,
-                    alias=raw_desc,
-                    category=req.category,
-                    match_type="exact",
-                )
                 conn.execute(
-                    "INSERT OR IGNORE INTO merchant_aliases (merchant, alias, category, match_type) VALUES (?, ?, ?, ?)",
-                    (alias_merchant, raw_desc, req.category, "exact"),
+                    "INSERT OR IGNORE INTO merchant_aliases (merchant, alias, category, match_type, synced_at) VALUES (?, ?, ?, ?, ?)",
+                    (alias_merchant, raw_desc, req.category, "exact", _now),
                 )
                 log.info("New alias: %s → %s [%s]", raw_desc[:40], alias_merchant, req.category)
 
-            # Apply to all other transactions with the same raw_description
+            # Apply override to all similar transactions with the same raw_description
             similar = conn.execute(
                 """
-                SELECT hash FROM transactions
+                SELECT hash FROM transactions_resolved
                 WHERE raw_description = ?
                   AND hash != ?
                   AND (category IS NULL OR category = '' OR category != ?)
@@ -1857,6 +1870,13 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
             if similar:
                 similar_hashes = [r["hash"] for r in similar]
                 conn.executemany(
+                    """INSERT INTO category_overrides (hash, category, notes, updated_at, updated_by)
+                       VALUES (?, ?, '', ?, 'alias_backfill')
+                       ON CONFLICT(hash) DO UPDATE SET category=excluded.category,
+                       updated_at=excluded.updated_at""",
+                    [(h, req.category, _now) for h in similar_hashes],
+                )
+                conn.executemany(
                     "UPDATE transactions SET category = ? WHERE hash = ?",
                     [(req.category, h) for h in similar_hashes],
                 )
@@ -1864,7 +1884,7 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
                 log.info("Applied category to %d similar transactions.", also_updated)
 
         updated = conn.execute(
-            "SELECT * FROM transactions WHERE hash = ?", (tx_hash,)
+            "SELECT * FROM transactions_resolved WHERE hash = ?", (tx_hash,)
         ).fetchone()
 
     log.info("Category override: %s → %s", tx_hash[:16], req.category)
@@ -1880,10 +1900,21 @@ def patch_transaction_category(tx_hash: str, req: CategoryOverrideRequest):
 
 @app.post("/api/sync", dependencies=[Depends(require_api_key)])
 def post_sync():
-    """Pull all data from Google Sheets into the local SQLite cache."""
-    from finance.sync import sync as _sync
-    stats = _sync(_db_path, _get_sheets())
-    return {"ok": True, **stats}
+    """
+    SQLite is the authoritative store — no external sync needed.
+    Returns the last import timestamp from import_log for the PWA Settings page.
+    """
+    with _db() as conn:
+        tx_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        last_import = conn.execute(
+            "SELECT import_date FROM import_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return {
+        "ok":                 True,
+        "noop":               True,
+        "transactions_count": tx_count,
+        "last_sync":          last_import["import_date"] if last_import else None,
+    }
 
 
 # ── /api/import ───────────────────────────────────────────────────────────────
@@ -1891,21 +1922,18 @@ def post_sync():
 @app.post("/api/import", dependencies=[Depends(require_api_key)])
 def post_import(req: ImportRequest = ImportRequest()):
     """
-    Trigger the Stage 1 → Sheets importer (finance.importer).
+    Import ALL_TRANSACTIONS.xlsx into SQLite.
 
-    Reads ALL_TRANSACTIONS.xlsx, skips duplicates (or overwrites with
-    --overwrite), categorises new rows, and appends to Sheets.
-
-    After a successful non-dry-run import that adds rows, automatically
-    syncs Sheets → SQLite so the dashboard reflects the new data immediately.
+    Reads the XLSX, skips duplicates (or overwrites with --overwrite),
+    categorises new rows via the alias/Ollama pipeline, and writes directly
+    to SQLite. SQLite is the authoritative store — no external sync needed.
     """
     xlsx_path = _finance_cfg.xlsx_input
     if not os.path.exists(xlsx_path):
         raise HTTPException(404, f"XLSX not found: {xlsx_path}")
 
-    from finance.importer import run as _import_run
+    from finance.importer import direct_import as _direct_import
     from finance.categorizer import Categorizer
-    from finance.sync import sync as _sync
 
     categorizer = Categorizer(
         aliases=[],
@@ -1915,20 +1943,22 @@ def post_import(req: ImportRequest = ImportRequest()):
         ollama_timeout=_ollama_cfg.timeout_seconds,
     )
 
-    stats = _import_run(
+    stats = _direct_import(
         xlsx_path=xlsx_path,
-        sheets_client=_get_sheets(),
+        db_path=_db_path,
         categorizer=categorizer,
         overwrite=req.overwrite,
         dry_run=req.dry_run,
         import_file_label=os.path.basename(xlsx_path),
     )
 
-    # Auto-sync after a real import that added rows
+    # Trigger a backup after a real import that added rows
     if not req.dry_run and stats.get("added", 0) > 0:
-        log.info("Auto-syncing after import …")
-        sync_stats = _sync(_db_path, _get_sheets())
-        stats["sync"] = sync_stats
+        try:
+            from finance.backup import backup_db
+            backup_db(_db_path)
+        except Exception as _bkp_exc:
+            log.warning("Post-import backup failed (non-fatal): %s", _bkp_exc)
 
     return {"ok": True, **stats}
 
@@ -2187,7 +2217,6 @@ def upsert_holding(req: HoldingUpsertRequest):
             "WHERE snapshot_date=? AND asset_class=? AND asset_name=? AND owner=? AND institution=?",
             (req.snapshot_date, req.asset_class, req.asset_name, req.owner, req.institution),
         ).fetchone()
-    _sync_holdings_to_sheets()
     _auto_snapshot(req.snapshot_date)
     _cascade_holding_update(
         req.snapshot_date,
@@ -2272,7 +2301,6 @@ def carry_forward_holdings(req: CarryForwardRequest):
                 carried += conn.execute("SELECT changes()").fetchone()[0]
 
     if carried > 0:
-        _sync_holdings_to_sheets()
         _auto_snapshot(req.snapshot_date)
 
     return {"ok": True, "carried": carried}
@@ -2286,26 +2314,10 @@ def delete_holding(holding_id: int):
         ).fetchone()
         snap_date = row["snapshot_date"] if row else None
         conn.execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
-    _sync_holdings_to_sheets()
     if snap_date:
         _auto_snapshot(snap_date)
     return {"ok": True}
 
-
-def _sync_holdings_to_sheets():
-    """Write all holdings to the Holdings Google Sheet tab (best-effort)."""
-    try:
-        with _db() as conn:
-            rows = conn.execute(
-                "SELECT snapshot_date, asset_class, asset_group, asset_name, institution, "
-                "owner, currency, market_value_idr, cost_basis_idr, unrealised_pnl_idr, "
-                "last_appraised_date, notes, import_date FROM holdings "
-                "ORDER BY snapshot_date DESC, asset_group, asset_class, asset_name"
-            ).fetchall()
-        sheet_rows = [list(r) for r in rows]
-        _get_sheets().write_holdings(sheet_rows)
-    except Exception as exc:
-        log.warning("Holdings Sheets sync failed (non-fatal): %s", exc)
 
 
 def _auto_snapshot(snapshot_date: str):
@@ -2371,7 +2383,6 @@ def _cascade_holding_update(
             if conn.execute("SELECT changes()").fetchone()[0] > 0:
                 affected_dates.append(target_date)
     if affected_dates:
-        _sync_holdings_to_sheets()
         for d in affected_dates:
             _auto_snapshot(d)
 

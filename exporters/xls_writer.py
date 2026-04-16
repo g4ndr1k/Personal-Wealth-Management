@@ -64,6 +64,7 @@ IDR_FMT = '#,##0;(#,##0);"-"'
 _TYPE_SUFFIX = {
     "cc":           "CC",
     "savings":      "Savings",
+    "rdn":          "RDN",
     "consolidated": "Consol",
 }
 

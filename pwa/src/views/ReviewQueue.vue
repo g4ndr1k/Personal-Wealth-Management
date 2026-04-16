@@ -341,6 +341,7 @@ async function load() {
     const data = await api.reviewQueue(LIMIT, { forceFresh: true })
     items.value = data.pending ?? data
     hasMore.value = items.value.length === LIMIT
+    if (data.total != null) store.setReviewCount(data.total)
 
     // Fire enrichment in background — don't block render
     api.enrichReviewQueue()

@@ -4,7 +4,7 @@ A personal finance, wealth tracking, and mail-alert system for macOS.
 
 This repo combines three production stages:
 - Stage 1: Apple Mail + iMessage bridge and mail alert agent
-- Stage 2: bank-statement parsing, Google Sheets import, FastAPI backend, and finance PWA
+- Stage 2: bank-statement parsing, SQLite-authoritative finance backend, and finance PWA
 - Stage 3: wealth tracking, holdings, balances, liabilities, and net-worth dashboards
 
 The system is built for a personal Apple-centric workflow:
@@ -19,8 +19,9 @@ The system is built for a personal Apple-centric workflow:
 - Classifies financial emails with Ollama (local)
 - Sends iMessage alerts through Messages.app
 - Parses password-protected bank and brokerage PDFs (BCA, CIMB, Maybank, Permata, BNI Sekuritas, Stockbit, IPOT)
-- Imports and categorizes transactions into Google Sheets with a 4-layer categorization engine
-- Syncs Sheets data into SQLite for fast local reads
+- Imports and categorizes transactions into SQLite with a 4-layer categorization engine
+- Preserves manual category fixes with a SQLite override layer (`category_overrides` + `transactions_resolved`)
+- Creates post-import SQLite backups for local resilience
 - Tracks wealth: account balances, investment holdings, real estate, retirement, net-worth snapshots
 - Serves a personal finance and wealth dashboard as an offline-capable PWA
 - Provides an Audit view for call-over comparison and PDF completeness checks
@@ -29,14 +30,14 @@ The system is built for a personal Apple-centric workflow:
 
 - bridge/ — macOS host bridge for Mail.app, Messages.app, PDF processing, and pipeline orchestration
 - agent/ — Dockerized mail agent that polls the bridge, classifies with Ollama, and sends iMessage alerts
-- finance/ — FastAPI backend: finance APIs, wealth APIs, Google Sheets sync/import, SQLite cache, serves PWA
+- finance/ — FastAPI backend: finance APIs, wealth APIs, SQLite authoritative store, import/backup utilities, serves PWA
 - pwa/ — Vue 3 + Vite + Pinia PWA: mobile-first finance dashboard with offline support
 
 ## Repository layout
 
 - agent/ — Dockerized mail agent
 - bridge/ — macOS host bridge for Mail, Messages, PDF processing, and orchestration
-- finance/ — FastAPI backend, Google Sheets sync/import, SQLite cache, wealth APIs
+- finance/ — FastAPI backend, SQLite authoritative store, import/backup utilities, wealth APIs
 - parsers/ — bank and brokerage PDF parsers (BCA, CIMB, Maybank, Permata, BNI Sekuritas, Stockbit, IPOT)
 - exporters/ — XLSX export pipeline
 - pwa/ — Vue 3 + Vite + Pinia PWA frontend
@@ -107,9 +108,9 @@ docker compose up --build -d
 ```bash
 python3 -m finance.server
 python3 -m finance.server --reload
-python3 -m finance.sync
 python3 -m finance.importer --dry-run
 python3 -m finance.importer
+python3 -m finance.backup
 ```
 
 ### PWA
@@ -167,7 +168,7 @@ Outputs feed both transaction workflows and wealth holdings/balance workflows.
 
 Current state:
 - Stage 1 complete
-- Stage 2 fully built
+- Stage 2 SQLite migration complete
 - Stage 3 fully built
 
 ## License
