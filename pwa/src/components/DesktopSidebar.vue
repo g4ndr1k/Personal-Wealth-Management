@@ -34,7 +34,9 @@ const { setLayoutMode } = useLayout()
     <div class="desktop-sidebar__footer">
       <div class="desktop-sidebar__status">
         <span class="status-dot" :class="{ ok: store.health?.status === 'ok' }"></span>
-        {{ store.health?.transaction_count ?? '—' }} txn · Agentic Finance
+        {{ store.health?.transaction_count ?? '—' }} txn
+        <span v-if="store.isReadOnly" class="ro-indicator" title="Read-only · NAS replica">👁</span>
+        · Agentic Finance
       </div>
       <button class="desktop-sidebar__mode-btn" @click="setLayoutMode('auto')">
         Auto Layout
@@ -65,5 +67,12 @@ const { setLayoutMode } = useLayout()
 
 .desktop-sidebar__mode-btn:hover {
   background: rgba(255,255,255,0.12);
+}
+
+.ro-indicator {
+  font-size: 12px;
+  margin-left: 2px;
+  opacity: 0.6;
+  vertical-align: 1px;
 }
 </style>

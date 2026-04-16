@@ -3,6 +3,8 @@
     <div class="section-hd">⚙️ Settings</div>
     <div class="settings-grid">
 
+    <ReadOnlyBanner />
+
     <div class="setting-card">
       <div class="setting-title">📊 Dashboard Range</div>
       <div class="setting-desc">
@@ -180,7 +182,7 @@
     </div>
 
     <!-- Sync from Google Sheets -->
-    <div class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card">
       <div class="setting-title">☁️ Sync from Google Sheets</div>
       <div class="setting-desc">
         Pull the latest data from your Google Sheets spreadsheet into the local SQLite cache.
@@ -224,7 +226,7 @@
     </div>
 
     <!-- Import from XLSX -->
-    <div class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card">
       <div class="setting-title">📥 Import from XLSX</div>
       <div class="setting-desc">
         Run the Stage 1 importer to process
@@ -284,7 +286,7 @@
       </div>
     </div>
 
-    <div class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card">
       <div class="setting-title">🧩 PDF Pipeline</div>
       <div class="setting-desc">
         Run the end-to-end pipeline from <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">data/pdf_inbox</code>
@@ -332,7 +334,7 @@
     </div>
 
     <!-- ── Process Local PDFs ──────────────────────────────────────────────── -->
-    <div class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card">
       <div class="setting-title">📄 Process Local PDFs</div>
       <div class="setting-desc">
         Scan <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">data/pdf_inbox</code>
@@ -557,12 +559,43 @@
       </div>
     </div>
 
+    <!-- NAS Sync (only when writable and NAS is configured) -->
+    <div v-if="!store.isReadOnly && nasSyncStatus.configured" class="setting-card">
+      <div class="setting-title">🖥️ NAS Sync</div>
+      <div class="setting-desc">
+        Push the latest backup to the NAS replica so the always-on copy stays current.
+        Auto-syncs daily after each import.
+      </div>
+      <div v-if="nasSyncStatus.last_synced_at" style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+        Last synced: {{ fmtNasSync(nasSyncStatus.last_synced_at) }}
+      </div>
+      <button
+        class="btn btn-primary btn-block"
+        :disabled="nasSyncState.loading"
+        @click="doNasSync"
+      >
+        <span v-if="nasSyncState.loading"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Syncing…</span>
+        <span v-else>🖥️ Sync to NAS Now</span>
+      </button>
+      <div v-if="nasSyncState.result" style="margin-top:10px;font-size:12px">
+        <div v-if="nasSyncState.result.ok" class="alert alert-success" style="padding:6px 8px">
+          ✓ Synced at {{ fmtNasSync(nasSyncState.result.synced_at) }}
+        </div>
+        <div v-else class="alert alert-error" style="padding:6px 8px">
+          ❌ {{ nasSyncState.result.error || 'Sync failed' }}
+        </div>
+      </div>
+    </div>
+
     <!-- About -->
     <div class="setting-card">
       <div class="setting-title">ℹ️ About</div>
       <div style="font-size:12px;color:var(--text-muted);line-height:1.7">
         <div><strong>Finance Dashboard</strong> — Stage 2-B</div>
-        <div>Vue 3 PWA · FastAPI backend · SQLite read cache · Google Sheets source of truth</div>
+        <div>Vue 3 PWA · FastAPI backend · SQLite authoritative store</div>
+        <div v-if="store.isReadOnly" style="margin-top:4px;color:#2563eb;font-weight:600">
+          👁 Read-only replica (NAS)
+        </div>
         <div style="margin-top:6px">
           API: <code style="font-size:11px">localhost:8090</code>
         </div>
@@ -576,11 +609,14 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
+import ReadOnlyBanner from '../components/ReadOnlyBanner.vue'
 
 const store = useFinanceStore()
 
-const syncState   = ref({ loading: false, result: null, error: null })
-const importState = ref({ loading: false, result: null, error: null })
+const syncState      = ref({ loading: false, result: null, error: null })
+const importState    = ref({ loading: false, result: null, error: null })
+const nasSyncState   = ref({ loading: false, result: null })
+const nasSyncStatus  = ref({ configured: false, last_synced_at: null, target: null })
 const importOpts  = ref({ dry_run: false, overwrite: false })
 const refreshCacheState = ref({ loading: false, error: null, doneAt: '' })
 const pipelineState = ref({ loading: false, status: null, error: null })
@@ -1145,10 +1181,39 @@ async function runPipeline() {
   }
 }
 
+// ── NAS sync ──────────────────────────────────────────────────────────────────
+function fmtNasSync(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z')
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000)
+  if (diff < 60)   return 'just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+async function loadNasSyncStatus() {
+  try {
+    nasSyncStatus.value = await api.nasSyncStatus({ forceFresh: true })
+  } catch {}
+}
+
+async function doNasSync() {
+  nasSyncState.value = { loading: true, result: null }
+  try {
+    const result = await api.nasSync()
+    nasSyncState.value = { loading: false, result }
+    if (result.ok) nasSyncStatus.value.last_synced_at = result.synced_at
+  } catch (e) {
+    nasSyncState.value = { loading: false, result: { ok: false, error: e.message } }
+  }
+}
+
 onMounted(async () => {
   await store.loadHealth({ forceFresh: true })
   await store.loadCategories({ forceFresh: true })
   await loadPipelineStatus()
+  await loadNasSyncStatus()
 })
 </script>
 

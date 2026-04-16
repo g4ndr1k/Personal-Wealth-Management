@@ -20,9 +20,19 @@ const pageTitle = computed(() => route.meta?.title || 'Personal Finance')
       <span class="status-dot" :class="{ ok: store.health?.status === 'ok' && isOnline }"></span>
       <span v-if="store.health">
         {{ store.health.transaction_count }} txn
+        <span v-if="store.isReadOnly" class="ro-indicator" title="Read-only · NAS replica">👁</span>
         <template v-if="store.reviewCount > 0"> · {{ store.reviewCount }} pending</template>
       </span>
       <span v-else>connecting…</span>
     </div>
   </header>
 </template>
+
+<style scoped>
+.ro-indicator {
+  font-size: 13px;
+  margin-left: 2px;
+  opacity: 0.7;
+  vertical-align: 1px;
+}
+</style>
