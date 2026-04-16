@@ -2044,11 +2044,16 @@ def get_nas_sync_status():
 @app.post("/api/nas-sync", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def post_nas_sync():
     """
-    Manually trigger an rsync of the latest backup to the NAS.
+    Manually trigger a sync of the current DB state to the NAS.
+    Creates a fresh backup first so category edits made after the last import are included.
     Blocked in read-only mode. Always forces the sync (ignores 24h throttle).
     Requires NAS_SYNC_TARGET env var to be configured.
     """
-    from finance.backup import sync_to_nas
+    from finance.backup import backup_db, sync_to_nas
+    try:
+        backup_db(_db_path)
+    except Exception as exc:
+        log.warning("Pre-sync backup failed (non-fatal): %s", exc)
     return sync_to_nas(_db_path, force=True)
 
 

@@ -181,58 +181,14 @@
       </div>
     </div>
 
-    <!-- Sync from Google Sheets -->
-    <div v-if="!store.isReadOnly" class="setting-card">
-      <div class="setting-title">☁️ Sync from Google Sheets</div>
-      <div class="setting-desc">
-        Pull the latest data from your Google Sheets spreadsheet into the local SQLite cache.
-        This replaces all rows atomically — no partial states.
-      </div>
-      <button
-        class="btn btn-primary btn-block"
-        :disabled="syncState.loading"
-        @click="doSync"
-      >
-        <span v-if="syncState.loading"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Syncing…</span>
-        <span v-else>🔄 Sync Now</span>
-      </button>
-
-      <!-- Sync result -->
-      <div v-if="syncState.error" class="alert alert-error" style="margin-top:10px">
-        ❌ {{ syncState.error }}
-      </div>
-      <div v-else-if="syncState.result" class="result-box">
-        <div class="result-row">
-          <span class="rk">Synced at</span>
-          <span class="rv">{{ syncState.result.synced_at }}</span>
-        </div>
-        <div class="result-row">
-          <span class="rk">Transactions</span>
-          <span class="rv">{{ syncState.result.transactions_count?.toLocaleString() }}</span>
-        </div>
-        <div class="result-row">
-          <span class="rk">Aliases</span>
-          <span class="rv">{{ syncState.result.aliases_count }}</span>
-        </div>
-        <div class="result-row">
-          <span class="rk">Categories</span>
-          <span class="rv">{{ syncState.result.categories_count }}</span>
-        </div>
-        <div class="result-row">
-          <span class="rk">Duration</span>
-          <span class="rv">{{ syncState.result.duration_s }}s</span>
-        </div>
-      </div>
-    </div>
-
     <!-- Import from XLSX -->
     <div v-if="!store.isReadOnly" class="setting-card">
       <div class="setting-title">📥 Import from XLSX</div>
       <div class="setting-desc">
-        Run the Stage 1 importer to process
+        Read
         <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">ALL_TRANSACTIONS.xlsx</code>
-        and push new rows to Google Sheets.
-        After a successful import, a Sheets → SQLite sync runs automatically.
+        and import new rows directly into SQLite. Duplicate rows (matched by hash) are skipped unless "Overwrite" is on.
+        A backup is created automatically after a successful import.
       </div>
 
       <div class="setting-row">
@@ -269,16 +225,6 @@
             {{ importState.result.rows_added ?? 0 }}
           </span>
         </div>
-        <template v-if="importState.result.sync_stats">
-          <div class="result-row">
-            <span class="rk">After-sync transactions</span>
-            <span class="rv">{{ importState.result.sync_stats.transactions_count?.toLocaleString() }}</span>
-          </div>
-          <div class="result-row">
-            <span class="rk">Sync duration</span>
-            <span class="rv">{{ importState.result.sync_stats.duration_s }}s</span>
-          </div>
-        </template>
         <div v-if="importOpts.dry_run" class="result-row">
           <span class="rk">Mode</span>
           <span class="rv" style="color:var(--warning)">Dry run — no changes written</span>
@@ -632,7 +578,6 @@ import ReadOnlyBanner from '../components/ReadOnlyBanner.vue'
 
 const store = useFinanceStore()
 
-const syncState      = ref({ loading: false, result: null, error: null })
 const importState    = ref({ loading: false, result: null, error: null })
 const nasSyncState   = ref({ loading: false, result: null })
 const nasSyncStatus  = ref({ configured: false, last_synced_at: null, target: null })
@@ -1081,23 +1026,6 @@ async function processSelectedPdfs() {
   pdf.value.phase = 'idle'
   pdf.value.current = ''
   await loadPdfWorkspace()
-}
-
-// ── Existing actions ─────────────────────────────────────────────────────────
-async function doSync() {
-  syncState.value = { loading: true, result: null, error: null }
-  try {
-    const res = await api.sync()
-    syncState.value.result = res.queued ? { status: 'queued' } : res
-    if (!res.queued) {
-      await store.loadHealth({ forceFresh: true })
-      await store.loadCategories({ forceFresh: true })
-    }
-  } catch (e) {
-    syncState.value.error = e.message
-  } finally {
-    syncState.value.loading = false
-  }
 }
 
 async function saveCategoryEditor() {
