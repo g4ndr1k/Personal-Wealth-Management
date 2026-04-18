@@ -21,7 +21,7 @@ def verify_statement(
     *,
     ollama_host: str,
     model: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 60,
 ) -> dict:
     """Run deterministic checks plus an Ollama verification pass."""
     deterministic = run_deterministic_checks(result)
@@ -156,11 +156,14 @@ def run_deterministic_checks(result: StatementResult) -> dict:
 
 def extract_verification_evidence(pdf_path: str, max_pages: int = 2, max_chars: int = 6000) -> dict:
     snippets: list[str] = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages[:max_pages]:
-            text = (page.extract_text() or "").strip()
-            if text:
-                snippets.append(text[: max_chars // max(1, max_pages)])
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages[:max_pages]:
+                text = (page.extract_text() or "").strip()
+                if text:
+                    snippets.append(text[: max_chars // max(1, max_pages)])
+    except Exception:
+        log.warning("Failed to extract text from %s", pdf_path, exc_info=True)
     combined = "\n\n".join(snippets)
     return {
         "page_count_considered": min(max_pages, len(snippets)),
@@ -258,6 +261,7 @@ def _ollama_generate(
     timeout_seconds: int,
     response_format: dict,
 ) -> str:
+    timeout_seconds = min(timeout_seconds, 60)
     body = json.dumps({
         "model": model,
         "system": system,

@@ -193,8 +193,11 @@ class Handler(BaseHTTPRequestHandler):
                 if self.ctx.mail is None:
                     self._json(503, {"error": "Mail features unavailable — FDA not granted"})
                     return
+                if not self.ctx.rate.allow("mail_pending"):
+                    self._json(429, {"error": "Rate limit exceeded"})
+                    return
                 try:
-                    limit = int(params.get("limit", ["25"])[0])
+                    limit = min(int(params.get("limit", ["25"])[0]), 1000)
                 except (ValueError, TypeError):
                     self._json(400, {"error": "Invalid limit parameter"})
                     return
@@ -220,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
                 # No rate limit on polling — only on command
                 # execution/replies (handled via /alerts/send)
                 try:
-                    limit = int(params.get("limit", ["20"])[0])
+                    limit = min(int(params.get("limit", ["20"])[0]), 1000)
                 except (ValueError, TypeError):
                     self._json(400, {"error": "Invalid limit parameter"})
                     return
@@ -246,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/pdf/jobs":
                 try:
-                    limit = int(params.get("limit", ["50"])[0])
+                    limit = min(int(params.get("limit", ["50"])[0]), 1000)
                 except (ValueError, TypeError):
                     self._json(400, {"error": "Invalid limit parameter"})
                     return
@@ -330,7 +333,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
 
         except ValueError as e:
-            self._json(400, {"error": str(e)})
+            logger.debug("POST %s validation error: %s", path, e)
+            self._json(400, {"error": "Invalid request"})
         except Exception as e:
             logger.exception("POST error on %s", path)
             self.ctx.state.log_request(path, "error", False)

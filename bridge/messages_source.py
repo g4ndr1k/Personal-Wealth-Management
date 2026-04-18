@@ -1,12 +1,15 @@
 import re
 import sqlite3
 import subprocess
+import logging
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
+log = logging.getLogger(__name__)
+
 MESSAGES_DB = Path.home() / "Library" / "Messages" / "chat.db"
-APPLE_EPOCH = datetime(2001, 1, 1)
+APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 
 
 def normalize_handle(value: str) -> str:
@@ -58,6 +61,10 @@ class MessagesSource:
 
         recipient = (self.primary_recipient
                      .replace('"', '').replace('\\', ''))
+        # Validate recipient format to prevent AppleScript injection
+        if not re.fullmatch(r"[+0-9]{5,20}|[\w.+-]+@[\w.-]+", recipient):
+            log.warning("Rejected malformed iMessage recipient: %r", recipient)
+            return {"success": False, "error": "invalid recipient format"}
 
         # Uses 'first service whose service type = iMessage'
         # instead of hardcoded 'service 1' for robustness

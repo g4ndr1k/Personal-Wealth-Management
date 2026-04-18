@@ -22,6 +22,9 @@ from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from urllib.parse import unquote
 
+log = logging.getLogger("bridge.mail_source")
+
+
 def discover_mail_db() -> Path:
     root = Path.home() / "Library" / "Mail"
     candidates = sorted(root.glob("V*/MailData/Envelope Index"), reverse=True)
@@ -79,7 +82,7 @@ class MailSource:
 
     def _log_mail_directory_structure(self) -> None:
         """Log top-level folder names under ~/Library/Mail/V* for debugging."""
-        log = logging.getLogger("bridge.mail_source")
+
         try:
             mail_root = Path.home() / "Library" / "Mail"
             for v_dir in sorted(mail_root.glob("V*"), reverse=True):
@@ -93,7 +96,7 @@ class MailSource:
     def _detect_optional_schema(self) -> None:
         """Detect optional schema features (document_id, generated_summaries)."""
         import logging
-        log = logging.getLogger("bridge.mail_source")
+
         try:
             with self._connect() as conn:
                 # Check messages.document_id
@@ -277,15 +280,21 @@ class MailSource:
         """
         if not message_id or message_id.startswith("rowid-"):
             return None
-        log = logging.getLogger("bridge.mail_source")
+        # Validate RFC 2822 message-ID format before embedding in mdfind predicate.
+        # This prevents predicate injection via malformed IDs from a corrupted chat.db.
+        if not re.fullmatch(r"<[A-Za-z0-9._%+\-!#$&'*/=?^`{|}~]+@[A-Za-z0-9.\-]+>", message_id):
+            log.debug("Skipping Spotlight search — message_id not RFC 2822 shaped: %s", message_id[:80])
+            return None
+
         mail_root = str(Path.home() / "Library" / "Mail")
-        safe_id = message_id.replace("'", "").replace("\\", "")
+        import shlex as _shlex
+        safe_id = _shlex.quote(message_id)
         # Try known Spotlight attributes for RFC 2822 Message-ID
         for attr in ("kMDItemIdentifier", "kMDItemMessageID",
                      "com_apple_mail_messageID"):
             try:
                 r = subprocess.run(
-                    ["mdfind", f"{attr} == '{safe_id}'",
+                    ["mdfind", f"{attr} == {safe_id}",
                      "-onlyin", mail_root],
                     capture_output=True, text=True, timeout=5)
                 if r.returncode == 0 and r.stdout.strip():
@@ -311,7 +320,7 @@ class MailSource:
         Format: imap://{account_uuid}/{encoded_mailbox_path}
         Maps to: ~/Library/Mail/V*/{account_uuid}.mbox/{mailbox}.mbox/Messages/
         """
-        log = logging.getLogger("bridge.mail_source")
+
         if not mailbox_url:
             return None
         try:
@@ -369,7 +378,7 @@ class MailSource:
         3. document_id-based broad glob
         4. ROWID-based broad glob (older Mail.app layout)
         """
-        log = logging.getLogger("bridge.mail_source")
+
         mail_root = Path.home() / "Library" / "Mail"
         try:
             account_id = None
@@ -437,7 +446,7 @@ class MailSource:
           Next N bytes: RFC 2822 MIME message
           Remainder: plist XML (ignored)
         """
-        log = logging.getLogger("bridge.mail_source")
+
         try:
             raw = path.read_bytes()
         except OSError as e:

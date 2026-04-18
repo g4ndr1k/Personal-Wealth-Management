@@ -13,9 +13,9 @@ Alias rules support optional owner_filter and account_filter columns.
 When set, the rule only matches if the transaction's owner/account matches.
 Filtered (specific) rules are always checked before generic rules.
 
-Confirmed Layer 3/4 entries are written back to the Merchant Aliases tab by
-the caller (PWA → FastAPI), not by this module.  This module is read-only
-with respect to Google Sheets.
+Confirmed Layer 3/4 entries are written back to the SQLite merchant_aliases
+table by the caller (PWA → FastAPI), not by this module.  This module is
+read-only with respect to the database.
 """
 from __future__ import annotations
 import json
@@ -31,7 +31,7 @@ from finance.config import load_config
 
 log = logging.getLogger(__name__)
 
-# Fallback category list used when the Sheets Categories tab is empty
+# Fallback category list used when the SQLite categories table is empty
 DEFAULT_CATEGORIES = [
     # Housing & Bills
     "Housing", "Utilities", "Phone Bill", "Internet",
@@ -196,7 +196,7 @@ class Categorizer:
             key_entries.sort(key=lambda e: (0 if (e[2] or e[3]) else 1))
 
     def reload_aliases(self, aliases: list[dict]):
-        """Replace all alias rules (call after pulling fresh data from Sheets)."""
+        """Replace all alias rules (call after reloading from SQLite)."""
         self._exact.clear()
         self._contains.clear()
         self._regex.clear()
@@ -271,12 +271,7 @@ class Categorizer:
             return CategorizationResult(
                 merchant, category, layer=3, confidence="suggested"
             )
-
-
-            log.debug("L3 claude: %r → %s / %s", desc, merchant, category)
-            return CategorizationResult(
-                merchant, category, layer=3, confidence="suggested"
-            )
+        # No Ollama suggestion — fall through to review queue (Layer 4)
 
         # ── Layer 4: review queue ─────────────────────────────────────────────
         log.debug("L4 review: %r → no suggestion", desc)

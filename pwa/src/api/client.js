@@ -4,6 +4,10 @@ const BASE = '/api'
 const DEFAULT_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const DESKTOP_MIN_WIDTH_PX = 1024
 const LAYOUT_STORAGE_KEY = 'pwa_layout_mode'
+// Security note: VITE_FINANCE_API_KEY is embedded in the JS bundle at build time and is
+// visible to anyone who can load the PWA. This is intentional — the app is only accessible
+// via Tailscale, so network-level ACLs are the real auth boundary. Do not reuse this key
+// for any other service or store sensitive credentials here.
 const API_KEY = import.meta.env.VITE_FINANCE_API_KEY || ''
 const AUTH_HEADERS = API_KEY
   ? { 'X-Api-Key': API_KEY }
@@ -82,6 +86,15 @@ async function get(path, params = {}, options = {}) {
 
 async function refreshReferenceData() {
   await cacheClearAll()
+}
+
+// Clear sensitive cached financial data when the app is backgrounded
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      cacheClearAll().catch(() => {})
+    }
+  })
 }
 
 async function post(path, body = {}) {
@@ -209,6 +222,8 @@ export const api = {
   upsertLiability: (body) => postQueued('/wealth/liabilities', body),
   deleteLiability: (id) => delQueued(`/wealth/liabilities/${id}`),
 
+  backupStatus: (options = {}) => get('/backups/status', {}, options),
+  manualBackup: () => post('/backups/manual'),
   nasSyncStatus: (options = {}) => get('/nas-sync/status', {}, options),
   nasSync: () => post('/nas-sync'),
 

@@ -155,9 +155,9 @@ def direct_import(
     """
     Import ALL_TRANSACTIONS.xlsx directly into SQLite.
 
-    Uses the same parsing and categorization logic as the old Sheets-based
-    importer, but writes directly to the ``transactions`` and ``import_log``
-    tables.  SQLite is the authoritative store.
+    Reads ALL_TRANSACTIONS.xlsx, categorizes each row, and writes directly
+    to the ``transactions`` and ``import_log`` tables.  SQLite is the
+    authoritative store.
 
     Dedup: INSERT OR IGNORE on the hash UNIQUE constraint (normal mode).
            UPDATE existing rows when overwrite=True.
@@ -313,13 +313,14 @@ def direct_import(
         return stats
 
     # ── 5. Write to SQLite ────────────────────────────────────────────────────
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     added = 0
 
     conn = open_db(db_path)
     try:
+        conn.execute("BEGIN")
         for txn in new_txns:
-            conn.execute(
+            cur = conn.execute(
                 """INSERT OR IGNORE INTO transactions
                    (date, amount, original_currency, original_amount, exchange_rate,
                     raw_description, merchant, category, institution, account, owner,
@@ -332,7 +333,8 @@ def direct_import(
                     txn.hash, txn.import_date, txn.import_file, now,
                 ),
             )
-            added += 1
+            if cur.rowcount > 0:
+                added += 1
 
         for existing_hash, txn in reconciled_txns:
             conn.execute(
@@ -376,6 +378,9 @@ def direct_import(
             (now, label, added, skipped, total_valid, round(duration, 2), notes),
         )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -423,7 +428,10 @@ def sync_grogol_2_from_transactions(db_path: str) -> int:
         ).fetchall()
 
         candidate_dates = {baseline_snapshot}
+        _ALLOWED_TABLES = {"account_balances", "holdings", "liabilities", "net_worth_snapshots"}
         for table in ("account_balances", "holdings", "liabilities", "net_worth_snapshots"):
+            if table not in _ALLOWED_TABLES:
+                raise ValueError(f"Refusing table name: {table}")
             candidate_dates.update(
                 row[0]
                 for row in conn.execute(f"SELECT DISTINCT snapshot_date FROM {table}").fetchall()

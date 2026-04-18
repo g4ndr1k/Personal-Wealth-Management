@@ -50,7 +50,7 @@ def get_finance_config(cfg: dict) -> FinanceConfig:
 def get_fastapi_config(cfg: dict) -> FastAPIConfig:
     s = cfg.get("fastapi", {})
     return FastAPIConfig(
-        host=s.get("host", "0.0.0.0"),
+        host=s.get("host", "127.0.0.1"),
         port=s.get("port", 8090),
         cors_origins=s.get("cors_origins", ["http://localhost:5173"]),
     )

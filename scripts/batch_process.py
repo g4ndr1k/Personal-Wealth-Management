@@ -188,7 +188,7 @@ class Registry:
                period: str = "", transactions: int = 0,
                output_file: str = "", error: str = "",
                error_category: str = ""):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(datetime.timezone.utc).isoformat()
         with self._con() as con:
             con.execute("""
                 INSERT INTO processed_files
@@ -209,7 +209,7 @@ class Registry:
                   bank, stmt_type, period, transactions, output_file, status, error, error_category))
 
     def record_zip_member(self, zip_sha256: str, pdf_filename: str, pdf_sha256: str = ""):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(datetime.timezone.utc).isoformat()
         with self._con() as con:
             con.execute("""
                 INSERT OR IGNORE INTO zip_members

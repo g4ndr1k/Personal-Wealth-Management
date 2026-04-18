@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.15.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅
+**Version:** 3.16.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅
 **Platform:** Apple Silicon Mac · macOS (Tahoe-era Mail schema) · Synology DS920+ (AMD64 Docker)
-**Last validated against:** checked-in codebase 2026-04-16
+**Last validated against:** checked-in codebase 2026-04-17
 
 ---
 
@@ -60,6 +60,7 @@
 ### NAS — Read-Only Replica (live ✅)
 
 41. [NAS Read-Only Replica](#41-nas-read-only-replica)
+42. [HTTPS via Tailscale + Synology Reverse Proxy](#42-https-via-tailscale--synology-reverse-proxy)
 
 ---
 
@@ -219,8 +220,8 @@ The system alerts on:
   - `finance/importer.py` — CLI entry point and `direct_import()` implementation: reads `ALL_TRANSACTIONS.xlsx`, maps columns, deduplicates by hash, categorizes, and writes directly to SQLite; after import it also auto-syncs the carried real-estate holding `Grogol 2` from any transactions whose `raw_description` contains `Teguh Pranoto Chen`, using 2026-01-31 as a zero-value baseline and rolling the cumulative value month-by-month into the `holdings` table; `--dry-run`, `--overwrite`, `--file`, `-v`
   - `finance/ollama_utils.py` — shared Ollama retry wrapper with exponential backoff (1s, 2s, 4s); retries on `URLError`, `TimeoutError`, `ConnectionError`; optional `format_json=True` forces Ollama JSON-mode output (`"format": "json"` in payload); uses streaming aggregation (`stream=True`) because `gemma4:e4b` can return empty `response` payloads in non-stream mode; used by categorizer and API AI endpoints
   - `finance/db.py` — authoritative SQLite schema with WAL mode, `busy_timeout=5000`, `secure_delete=ON`, `auto_vacuum=FULL`, schema version tracking, `category_overrides`, `import_log`, `audit_log`, `owner_mappings`, and the `transactions_resolved` view; `merchant_aliases` includes `owner_filter`/`account_filter` with UNIQUE constraint; `transactions` stores nullable `ollama_suggestion` and `suggested_merchant` so Layer 3 review-queue hints survive reloads
-  - `finance/backup.py` — online SQLite backup helper using `sqlite3.Connection.backup()` with pruning and restrictive file permissions
-  - `finance/api.py` — FastAPI app: finance read/write APIs, monthly and annual summaries, review queue, PDF-local proxy endpoints, pipeline proxy endpoints, wealth APIs, CORS (hardened with explicit methods/headers), in-memory rate limiting (60 req/min per endpoint), sanitized error messages, SQLite `_db()` context manager; reads from `transactions_resolved`, writes aliases and overrides directly to SQLite, keeps `POST /api/sync` as a no-op compatibility endpoint, exposes `/api/backfill-aliases`, and mounts `pwa/dist/` at `/` when present; `GET /api/audit/completeness?start_month=YYYY-MM&end_month=YYYY-MM` scans `pdf_inbox` + `pdf_unlocked` recursively, parses filenames via `_parse_pdf_entity()` (7 regex patterns covering BCA/CIMB/IPOT/Maybank/Permata/Stockbit/BNI Sekuritas naming conventions), and returns a `{months, month_labels, entities}` grid; BNI Sekuritas matched by `SOA_BNI_SEKURITAS_\w+_{Mon}{YYYY}` pattern → `entity_key="bni-sekuritas-soa"`, `info="SOA"`; this endpoint is excluded from the Workbox SW cache so it always hits the network
+  - `finance/backup.py` — online SQLite backup helper using `sqlite3.Connection.backup()` with pruning and restrictive file permissions; NAS sync uses `shlex.quote()` on remote path and raises `FileNotFoundError` if an explicitly configured SSH key file is missing
+  - `finance/api.py` — FastAPI app: finance read/write APIs, monthly and annual summaries, review queue, PDF-local proxy endpoints, pipeline proxy endpoints, wealth APIs, CORS (hardened: explicit methods/headers, wildcard assertion at startup, no `allow_credentials` + wildcard combo), in-memory rate limiting (60 req/min per endpoint), sanitized error messages, SQLite `_db()` context manager; all Pydantic request models have `max_length` bounds and validated `snapshot_date` fields; reads from `transactions_resolved`, writes aliases and overrides directly to SQLite, keeps `POST /api/sync` as a no-op compatibility endpoint, exposes `/api/backfill-aliases`, and mounts `pwa/dist/` at `/` when present; `GET /api/audit/completeness?start_month=YYYY-MM&end_month=YYYY-MM` scans `pdf_inbox` + `pdf_unlocked` recursively, parses filenames via `_parse_pdf_entity()` (7 regex patterns covering BCA/CIMB/IPOT/Maybank/Permata/Stockbit/BNI Sekuritas naming conventions), and returns a `{months, month_labels, entities}` grid; BNI Sekuritas matched by `SOA_BNI_SEKURITAS_\w+_{Mon}{YYYY}` pattern → `entity_key="bni-sekuritas-soa"`, `info="SOA"`; this endpoint is excluded from the Workbox SW cache so it always hits the network
   - `finance/server.py` — uvicorn entry point: `python3 -m finance.server`; `--host`, `--port`, `--reload` overrides
   - `finance/Dockerfile` — `python:3.12-slim` image; installs the SQLite-first finance stack (`fastapi`, `uvicorn[standard]`, `rapidfuzz`, `openpyxl`, etc.) and copies `pwa/dist/` for production static serving
   - `finance/requirements.txt` — Python dependencies for the SQLite-first API/import stack; Google Sheets client dependencies removed
@@ -427,7 +428,7 @@ agentic-ai/
 │           └── gemini_provider.py   # stub
 ├── bridge/
 │   ├── server.py                 # HTTP server + endpoint routing + input validation + Content-Type enforcement + preflight FDA check
-│   ├── auth.py                   # Bearer token loader + timing-safe check (Keychain-first, warning on fallback)
+│   ├── auth.py                   # Bearer token loader + timing-safe check (length equality + hmac.compare_digest; Keychain-first, warning on fallback)
 │   ├── secret_manager.py        # macOS Keychain CLI: init/get/set/delete/list + hex-decode + resolve_env_key
 │   ├── tcc_check.py              # Pre-flight FDA/automation permission probe
 │   ├── config.py                 # TOML loader + validation
@@ -471,7 +472,7 @@ agentic-ai/
 │   ├── ollama_utils.py           # Shared Ollama retry wrapper (exponential backoff, retries on URLError/Timeout/ConnectionError)
 │   ├── db.py                     # SQLite schema + open_db() + WAL mode; authoritative Stage 2/3 store with overrides, audit log, owner mappings, and resolved transaction view
 │   ├── backup.py                 # SQLite online backup helper (post-import snapshots + pruning)
-│   ├── api.py                    # FastAPI: 25+ REST endpoints (12 Stage 2 + 13 Stage 3) + rate limiting + CORS hardening + PWA static mount
+│   ├── api.py                    # FastAPI: 40+ REST endpoints (Stage 2 + Stage 3 wealth + PDF/pipeline proxies + AI Q&A) + rate limiting + CORS hardening + PWA static mount
 │   ├── server.py                 # uvicorn entry point (python3 -m finance.server)
 │   ├── Dockerfile                # python:3.12-slim; copies finance/ + pwa/dist/
 │   └── requirements.txt          # rapidfuzz, fastapi, uvicorn, openpyxl, sqlite-first finance stack (Google deps removed)
@@ -484,8 +485,8 @@ agentic-ai/
 │       ├── main.js
 │       ├── App.vue               # Shell switcher: mobile shell vs desktop shell
 │       ├── style.css             # CSS variables, cards, buttons, forms, toast, desktop shell rules
-│       ├── router/index.js       # 11 routes: /, /flows, /wealth, /holdings, /transactions, /review, /foreign, /settings, /audit, /group-drilldown, /category-drilldown
-│       ├── api/client.js         # fetch wrapper for all 25+ /api/* endpoints + IndexedDB GET fallback + queued offline mutations + direct review-queue enrichment call
+│       ├── router/index.js       # 12 routes: /, /flows, /wealth, /holdings, /transactions, /review, /foreign, /settings, /audit, /group-drilldown, /category-drilldown, /:pathMatch(*) catch-all
+│       ├── api/client.js         # fetch wrapper for all 25+ /api/* endpoints + IndexedDB GET fallback + queued offline mutations + direct review-queue enrichment call; cache cleared on visibilitychange (app backgrounded)
 │       ├── stores/finance.js     # Pinia: owners, categories, years, selectedYear/Month (clamped to dashboardEndMonth), reviewCount, reactive dashboard month range
 │       ├── composables/
 │       │   ├── useLayout.js      # Breakpoint detection + persisted desktop override
@@ -541,13 +542,15 @@ agentic-ai/
 │   ├── run_bridge.sh             # Bridge startup wrapper
 │   └── start_agent.sh            # Docker agent startup wrapper (waits for Docker Desktop)
 ├── secrets/                      # Docker-only secret files (gitignored, exported from Keychain)
-│   ├── bridge.token               # Bearer token for bridge API auth
+│   ├── bridge.token              # Bearer token for bridge API auth
 │   ├── banks.toml                # Bank PDF passwords
-│   ├── google_service_account.json # Stage 2 — service account key JSON (exported from Keychain)
-│   ├── google_credentials.json   # Stage 2 fallback — OAuth 2.0 Desktop client JSON
-│   ├── nas_sync_key              # SSH private key for rsync to NAS
+│   ├── nas_sync_key              # SSH private key for NAS sync
 │   └── nas_sync_key.pub          # SSH public key (authorized on NAS)
+│   # Note: google_service_account.json / google_credentials.json may still
+│   # be present as leftover files from the pre-Sheets-removal era. They are
+│   # no longer read by any runtime code and can be deleted safely.
 ├── .env                          # Docker Compose env vars (gitignored; FINANCE_API_KEY, NAS_SYNC_TARGET etc.)
+├── pwa/.env.example              # Documents required VITE_* env vars for PWA contributors
 ├── app-bundle/
 │   └── AgenticAI.app/             # .app bundle for stable TCC identity (installed to /Applications)
 ├── docker-compose.yml
@@ -812,7 +815,7 @@ alert_on_categories = [
 | `enabled` | `false` | Enable the bridge-integrated scheduled pipeline |
 | `scan_interval_seconds` | `14400` | Delay between scheduled cycles (4 hours) |
 | `auto_import_enabled` | `true` | Run XLS → SQLite import after successful parsing |
-| `auto_sync_enabled` | `true` | Legacy setting retained in config; Stage 2 no longer syncs from Sheets |
+| `auto_sync_enabled` | `true` | **Legacy no-op.** Retained so existing `settings.toml` files don't error on load. Since Google Sheets was removed, there is no sync step; `POST /api/sync` is also a no-op. Safe to delete from your config. |
 | `completeness_alert` | `true` | Send one-time month-complete notifications |
 | `parse_alert` | `true` | Send per-cycle success summaries |
 | `failure_alert` | `true` | Send per-cycle failure summaries |
@@ -2048,23 +2051,292 @@ python3 scripts/batch_process.py --clear-output
 
 ---
 
+## 20. Security Notes
+
+This section documents the security posture of the system following the April 2026 hardening pass. The system handles real household financial data, so the blast radius of a breach is high.
+
+### Trust model
+
+Access is protected at two levels:
+
+1. **Network layer** — Tailscale VPN. The finance API and PWA are only reachable from devices enrolled in your Tailscale tailnet. There is no public port forwarding.
+2. **Application layer** — `X-Api-Key` header on all finance API calls, bearer token on all bridge calls.
+
+The API key embedded in the built PWA bundle is visible to anyone who can load the PWA. This is intentional — the key is a secondary signal; real protection is the Tailscale network boundary. Do not reuse this key for any external service.
+
+### Authentication & authorization
+
+| Component | Mechanism | Notes |
+|---|---|---|
+| Bridge HTTP API | Bearer token (constant-time `hmac.compare_digest` + length check) | `secrets/bridge.token` or macOS Keychain |
+| Finance FastAPI | `X-Api-Key` header (constant-time compare at startup) | `FINANCE_API_KEY` env var |
+| NAS replica | `FINANCE_READ_ONLY=true` + Tailscale | Write endpoints return 403 |
+| PWA | Same `X-Api-Key` embedded at build time | Tailscale ACLs are the real boundary |
+
+### Injection defenses
+
+| Vector | Defense |
+|---|---|
+| NAS SSH `cat >` command | `shlex.quote()` on remote path; env-var path validated at startup |
+| mdfind Spotlight predicate | `message_id` validated against RFC 2822 `<local@domain>` pattern; `shlex.quote()` applied |
+| PDF password tempfile | `chmod 0o600` immediately on creation; contents overwritten with null bytes before deletion |
+| Ollama classifier prompt | Email body fenced in `<user_email>` block; response validated against strict allowlist |
+| API request models | Pydantic `Field(max_length=...)` on all string fields; numeric fields use `ge=0` / `le` constraints |
+
+### CORS hardening
+
+`finance/api.py` asserts at startup that `cors_origins` does not contain `"*"` when `allow_credentials=True`. The CORS middleware is configured with explicit `allow_methods` and `allow_headers` rather than wildcards.
+
+### Rate limiting
+
+- Finance API: in-memory sliding window, 60 req/min per endpoint path.
+- Bridge `/alerts/send`: configurable hourly cap (`max_alerts_per_hour`) via `bridge.db` request log.
+- Bridge `/mail/pending`: rate-limited via `bridge/rate_limit.py`.
+- All bridge `limit=` query params capped at 1000 server-side.
+
+### PWA security
+
+- `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: same-origin` should be added as middleware headers in `finance/api.py` for any future public-facing deployment. Currently the Tailscale-only access model makes CSP enforcement a low-priority addition.
+- The service worker mutations-cache has a 300-second max age so stale responses expire quickly.
+- Sensitive financial data is cleared from IndexedDB when the PWA is backgrounded (`visibilitychange` → `cacheClearAll()`).
+- The `/:pathMatch(.*)*` catch-all route redirects unknown URLs to `/` rather than showing a blank screen.
+- All PWA dependencies are pinned with `~` (patch-only) in `package.json` to reduce supply-chain risk.
+
+### PDF processor hardening
+
+- PDF password tempfiles: `chmod 0o600`, contents zeroed before `os.unlink()`.
+- AppleScript-based PDF unlock uses the Quartz API via `subprocess.run([sys.executable, ...])` — no shell interpolation; no `do shell script`.
+- Ollama verification timeout is clamped to 60 seconds regardless of config.
+
+### iMessage injection
+
+The bridge sends iMessages via AppleScript. The message **body** is passed via stdin (never interpolated). The **recipient** is hardcoded from `authorized_senders` in config — never sourced from user input at send time.
+
+### Known residual risks
+
+| Risk | Mitigation status |
+|---|---|
+| API key visible in JS bundle | Documented; Tailscale-only trust model in place |
+| No CSRF tokens on state-changing endpoints | Acceptable while key is in header (not cookie); document if auth ever moves to cookies |
+| No per-IP rate limiting on finance API | Current limiter is per-path shared across clients; `slowapi` or nginx would improve this |
+| Ollama prompt injection from email bodies | Input fenced and response validated; full isolation would require a sandboxed model |
+
+---
+
+## 21. Secret Management (macOS Keychain)
+
+All secrets are stored in the macOS Keychain under service name `agentic-ai-bridge`. The `secrets/` directory holds Docker export artifacts regenerated by `scripts/export-secrets-for-docker.py` — Linux containers cannot access the host Keychain.
+
+### Secret inventory
+
+| Keychain account | Used by | Description |
+|---|---|---|
+| `bridge_token` | Bridge HTTP API | Bearer token |
+| `FINANCE_API_KEY` | Finance FastAPI + PWA build | Header authentication |
+| `maybank_password` | PDF unlock | Maybank PDF encryption password |
+| `bca_password` | PDF unlock | BCA PDF encryption password |
+| `cimb_niaga_password` | PDF unlock | CIMB Niaga PDF encryption password |
+| `permata_bank_password` | PDF unlock | Permata PDF encryption password |
+
+### Keychain operations
+
+```bash
+# Add a secret
+security add-generic-password -s agentic-ai-bridge -a bridge_token -w "$(secrets token_hex 32)"
+
+# Retrieve a secret
+security find-generic-password -s agentic-ai-bridge -a bridge_token -w
+
+# Update a secret
+security add-generic-password -U -s agentic-ai-bridge -a bridge_token -w "new_value"
+
+# Export all secrets for Docker
+python3 scripts/export-secrets-for-docker.py
+```
+
+### Docker secret files (`secrets/`)
+
+| File | Contents |
+|---|---|
+| `secrets/bridge.token` | Bridge bearer token |
+| `secrets/banks.toml` | Bank PDF passwords (TOML) |
+| `secrets/nas_sync_key` | SSH private key for NAS sync |
+| `secrets/nas_sync_key.pub` | SSH public key (authorized on NAS) |
+
+> `google_service_account.json` / `google_credentials.json` are leftover artifacts from the pre-SQLite era and can be deleted safely. No runtime code reads them.
+
+### NAS SSH key
+
+The NAS sync uses a dedicated ED25519 key pair stored at `secrets/nas_sync_key`. The public key must be present in `~/.ssh/authorized_keys` on the NAS under the sync user's account.
+
+```bash
+# Generate a new NAS sync key pair
+ssh-keygen -t ed25519 -f secrets/nas_sync_key -N "" -C "agentic-ai-nas-sync"
+
+# Copy public key to NAS (adjust user@host as needed)
+ssh-copy-id -i secrets/nas_sync_key.pub -p 68 user@ds920plus
+```
+
+---
+
+## 22. Known Limitations
+
+| Area | Limitation |
+|---|---|
+| Mail DB | Read-only; bridge cannot mark messages as read, move, or delete them |
+| iMessage sending | Requires Messages.app running and signed in; AppleScript fails silently when Messages.app loses focus in rare edge cases |
+| Ollama | No GPU on the Mac Mini; inference can be slow (1–3 s/classify) for long emails |
+| PDF parser | 3-layer pipeline (pdfplumber → regex → Ollama); complex or unusual statement formats may need a new parser file |
+| Categorizer | Layer 3 Ollama suggestions require manual confirmation; no auto-apply to prevent silent miscategorization |
+| NAS sync | 24-hour throttle on auto-sync; manual sync available via Settings or `POST /api/nas-sync` |
+| API key in bundle | `VITE_FINANCE_API_KEY` is embedded in the built PWA JS and visible in DevTools; mitigated by Tailscale-only access |
+| Rate limiter | Per-path (not per-IP); a single client can saturate an endpoint for all others |
+| Timezone | Several datetime fields use local (naive) datetimes; `APPLE_EPOCH` and NAS sync state now use UTC but not all timestamps have been migrated |
+
+---
+
+## 23. Troubleshooting
+
+### Bridge won't start
+
+```bash
+# Check Full Disk Access
+python3 -c "import sqlite3; sqlite3.connect(os.path.expanduser('~/Library/Messages/chat.db'))"
+
+# Check token file permissions (must be 600)
+ls -la ~/agentic-ai/secrets/bridge.token
+
+# Check settings.toml syntax
+python3 -c "import tomllib; tomllib.load(open('config/settings.toml','rb'))"
+```
+
+### Mail not polling
+
+```bash
+# Verify Mail.app is running
+pgrep -l Mail
+
+# Verify DB path
+find ~/Library/Mail -path "*/MailData/Envelope Index" 2>/dev/null
+
+# Test from bridge directly
+curl -s -H "Authorization: Bearer $(cat secrets/bridge.token)" http://127.0.0.1:9100/mail/schema
+```
+
+### Finance API not responding
+
+```bash
+# Check if server is running
+curl http://127.0.0.1:8090/api/health
+
+# Rebuild Docker image after Python changes
+docker compose up --build -d
+docker compose logs -f finance-api
+```
+
+### NAS sync failing
+
+```bash
+# Test SSH connectivity manually
+ssh -p 68 -i secrets/nas_sync_key user@ds920plus echo ok
+
+# Check NAS sync state
+cat data/.nas_sync_state.json
+
+# Force a sync via API
+curl -X POST -H "X-Api-Key: $FINANCE_API_KEY" http://localhost:8090/api/nas-sync
+```
+
+### PDF processing fails
+
+```bash
+# Check job status
+curl -H "Authorization: Bearer $(cat secrets/bridge.token)" \
+  "http://127.0.0.1:9100/pdf/status/<job_id>"
+
+# Verify dependencies
+python3 -c "import pikepdf, pdfplumber, openpyxl; print('OK')"
+
+# Test parser directly
+python3 -c "
+from parsers.router import detect_bank_and_type
+print(detect_bank_and_type('data/pdf_inbox/yourfile.pdf'))
+"
+```
+
+### PWA shows stale data
+
+1. Open Settings → tap "Refresh Mobile Data Now"
+2. Or: clear site data in browser / force close and reopen
+3. On desktop, data always fetches live (no 24h cache)
+
+---
+
+## 24. Current Implementation Snapshot
+
+As of version 3.16.0 (2026-04-17):
+
+### What is running in production
+
+| Component | Where | Status |
+|---|---|---|
+| Bridge HTTP server | Mac host · 127.0.0.1:9100 | ✅ Running via LaunchAgent |
+| Mail agent | Docker container · mac | ✅ Running via `docker compose` |
+| Finance API + PWA | Docker container · mac · :8090 | ✅ Running via `docker compose` |
+| Ollama | Mac host · 0.0.0.0:11434 | ✅ Running via LaunchAgent |
+| NAS finance-api-nas | Synology DS920+ · :8090 | ✅ Running, read-only replica |
+
+### Daily data flow
+
+```
+Bank emails arrive
+  → Mail.app syncs locally
+  → Bridge polls Envelope Index every 30 s
+  → Agent classifies via Ollama (gemma4:e4b)
+  → Alert sent to iPhone via iMessage
+
+Bank PDF arrives (email attachment or manual drop)
+  → bridge/pipeline.py scans pdf_inbox/
+  → Unlock → parse → XLS export → direct_import() → SQLite
+  → Post-import: online backup → NAS sync
+  → Snapshot auto-rebuilt
+```
+
+### Security hardening applied (April 2026)
+
+- NAS SSH `cat >` path escaping via `shlex.quote()`
+- mdfind predicate injection: RFC 2822 validation + `shlex.quote()`
+- PDF password tempfile: `chmod 0o600` + zero-wipe before deletion
+- CORS wildcard assertion at startup
+- All Pydantic request models have `max_length` bounds
+- `snapshot_date` validated as `YYYY-MM-DD` at API boundary
+- Bridge `ValueError` no longer leaked to HTTP response body
+- `limit=` params capped at 1000 across all bridge endpoints
+- `/mail/pending` rate-limited
+- Ollama and pdf_verify timeouts clamped to 60 s
+- `APPLE_EPOCH` made timezone-aware (UTC)
+- `CircuitBreaker` dicts bounded with LRU eviction (max 128 providers)
+- `hmac.compare_digest` now preceded by length equality check
+- `logging.getLogger` hoisted to module level in `mail_source.py`
+- PWA `visibilitychange` cache-clear on background
+- PWA `AbortController` cleanup for PDF processing loop on unmount
+- PWA `/:pathMatch(.*)*` catch-all route added
+- PWA dependency versions pinned with `~` (patch-only)
+- `pwa/.env.example` documents required env vars
+
+---
+
 ## 25. Stage 2 Overview & Scope
 
-Stage 2 is the household personal-finance system built on top of the PDF statement pipeline. As of the current codebase, the Stage 2 migration is complete: **SQLite is now the authoritative store** for transactions, aliases, category overrides, import history, owner mappings, and audit history.
+Stage 2 is the household personal-finance system built on top of the PDF statement pipeline. **SQLite is the authoritative store** for transactions, aliases, category overrides, import history, owner mappings, and audit history.
 
-The old intermediary flow:
-
-```
-PDFs → parsers → XLS → Google Sheets → sync.py → SQLite → API → PWA
-```
-
-has been replaced by:
+Current data flow:
 
 ```
 PDFs → parsers → XLS → direct_import() → SQLite → API → PWA
 ```
 
-The XLS layer still exists as a parser export artifact and import source, but Google Sheets and `finance.sync` have been removed from the runtime architecture.
+The XLS layer is kept as a parser export artifact and as the import source for `direct_import()`. Google Sheets, `finance.sync`, `finance.sheets`, and `finance.setup_sheets` have been removed from the codebase; no runtime code or settings call Google APIs.
 
 ### Scope
 
@@ -2158,7 +2430,7 @@ The database and backup files are expected to use restrictive local permissions 
 
 ## 28. Stage 2 Categorization Engine
 
-`finance/categorizer.py` still uses the same four-layer approach, but aliases now load from SQLite instead of Google Sheets:
+`finance/categorizer.py` uses a four-layer approach; aliases load from the SQLite `merchant_aliases` table:
 
 1. **Exact alias** match
 2. **Contains** alias match (specificity-sorted)
@@ -2218,17 +2490,19 @@ The critical data-integrity problem from the old Sheets-based system is now hand
 
 This replaces the old Sheets "Category Overrides" tab with a durable SQLite override layer.
 
-### One-time migration
+### One-time migration (historical — already completed)
 
-`scripts/migrate_to_sqlite_master.py` exists for the historical cutover. It:
+> **This migration has already run in production.** New installations start on the SQLite-first flow directly and do not need it. The script and this section are kept for archival purposes only.
 
-1. Requires schema version 2
-2. Reads overrides and import log from Google Sheets
-3. Reads `[owners]` from `settings.toml`
-4. Inserts into `category_overrides`, `import_log`, and `owner_mappings`
-5. Records migration actions in `audit_log`
+`scripts/migrate_to_sqlite_master.py` was the one-shot cutover tool. It:
 
-This script is part of the completed migration path, not the normal steady-state flow.
+1. Required schema version 2
+2. Read overrides and import log from the old Google Sheets workbook
+3. Read `[owners]` from `settings.toml`
+4. Inserted into `category_overrides`, `import_log`, and `owner_mappings`
+5. Recorded migration actions in `audit_log`
+
+Because the upstream Sheets workbook is no longer maintained, re-running this script on a fresh machine will not work out of the box — it is preserved only as a reference for how the historical data landed in SQLite.
 
 ---
 
@@ -2236,21 +2510,36 @@ This script is part of the completed migration path, not the normal steady-state
 
 ### Backend responsibilities
 
-`finance/api.py` now serves Stage 2 directly from SQLite:
+`finance/api.py` serves Stage 2 directly from SQLite. Stage 2 endpoints:
 
-- `GET /api/health`
-- `GET /api/owners`
-- `GET /api/categories`
+- `GET  /api/health`
+- `GET  /api/owners`
+- `GET  /api/categories`
 - `POST /api/categories`
-- `GET /api/transactions` — optional query params: `income_only=true` (returns `amount >= 0` rows excluding transfer/adjustment/ignored/opening-balance categories), `category_group`, `category`, `owner`, `institution`, `search`, `limit`, `offset`, `date_from`, `date_to`
-- `GET /api/transactions/foreign`
-- `GET /api/summary/*`
-- `GET /api/review-queue`
+- `GET  /api/transactions` — optional query params: `income_only=true` (returns `amount >= 0` rows excluding transfer/adjustment/ignored/opening-balance categories), `category_group`, `category`, `owner`, `institution`, `search`, `limit`, `offset`, `date_from`, `date_to`
+- `GET  /api/transactions/foreign`
+- `GET  /api/summary/years`
+- `GET  /api/summary/year/{year}`
+- `GET  /api/summary/{year}/{month}`
+- `GET  /api/summary/{year}/{month}/explanation` — AI / fallback narrative for a month's flows
+- `POST /api/summary/{year}/{month}/explanation/query` — follow-up Q&A against the month
+- `GET  /api/review-queue`
 - `POST /api/review-queue/suggest`
 - `POST /api/alias`
+- `POST /api/backfill-aliases`
 - `PATCH /api/transaction/{hash}/category`
 - `POST /api/import`
-- `POST /api/sync` (no-op compatibility endpoint)
+- `POST /api/sync` — **no-op** (retained only so older clients and config don't break)
+- `GET  /api/backups/status`
+- `POST /api/backups/manual`
+- `GET  /api/nas-sync/status`
+- `POST /api/nas-sync`
+- `GET  /api/audit/completeness` — PDF completeness grid across `pdf_inbox` / `pdf_unlocked`
+- `POST /api/ai/query` — natural-language transaction search
+- `GET  /api/pdf/local-files`, `GET /api/pdf/local-workspace`, `POST /api/pdf/process-local`, `GET /api/pdf/local-status/{job_id}` — PWA ↔ bridge PDF workspace proxies
+- `GET  /api/pipeline/status`, `POST /api/pipeline/run` — pipeline proxies
+
+Stage 3 endpoints are listed in §37.
 
 ### Write behavior
 
@@ -2495,15 +2784,18 @@ All endpoints under `/api/wealth/`. All require `X-Api-Key` header.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/wealth/snapshot-dates` | List all months that have snapshot data |
+| GET | `/api/wealth/snapshot/dates` | List all months that have snapshot data |
 | GET | `/api/wealth/summary` | Net worth summary for a date |
 | GET | `/api/wealth/history` | Net worth time series |
+| GET | `/api/wealth/explanation` | AI / fallback narrative for a date |
+| POST | `/api/wealth/explanation/query` | Ask a follow-up question about a snapshot |
 | POST | `/api/wealth/snapshot` | (Re)generate snapshot for a date |
 | GET | `/api/wealth/balances` | Account balances for a date |
 | POST | `/api/wealth/balances` | Upsert account balance |
 | DELETE | `/api/wealth/balances/{id}` | Delete balance |
 | GET | `/api/wealth/holdings` | Holdings for a date |
-| POST | `/api/wealth/holdings` | Upsert holding (triggers carry-forward) |
+| POST | `/api/wealth/holdings` | Upsert holding (triggers auto-snapshot) |
+| POST | `/api/wealth/holdings/carry-forward` | Carry forward prior-month holdings into a new snapshot |
 | DELETE | `/api/wealth/holdings/{id}` | Delete holding |
 | GET | `/api/wealth/liabilities` | Liabilities for a date |
 | POST | `/api/wealth/liabilities` | Upsert liability |
@@ -2780,3 +3072,187 @@ docker run -d \
 5. **PWA loads on iPhone**: Open `http://ds920plus.tail55bdc2.ts.net:8090` — 👁 eye icon visible in header, write buttons hidden
 6. **sw.js cache header**: `curl -I http://192.168.1.44:8090/sw.js` → `cache-control: no-cache, no-store, must-revalidate`
 5. **Sync works**: Trigger manual sync from Mac Settings → verify `finance_readonly.db` timestamp updated on NAS
+
+---
+
+## 42. HTTPS via Tailscale + Synology Reverse Proxy
+
+### Goal
+
+Allow secure access to the NAS-hosted **read-only Finance Dashboard** using a custom domain:
+
+https://codingholic.fun
+
+Requirements:
+- Only accessible when Tailscale VPN is ON
+- Not exposed to the public internet
+- Uses valid HTTPS (no browser warning)
+- Automatically renews certificates
+
+### Architecture
+
+```
+iPhone / Laptop (Tailscale ON)
+        ↓
+codingholic.fun
+        ↓ (AdGuard DNS rewrite)
+100.x.x.x (Tailscale IP)
+        ↓
+Synology Reverse Proxy (DSM)
+        ↓
+127.0.0.1:8090
+        ↓
+finance-api (read-only, Docker)
+```
+
+### DNS Setup
+
+#### Cloudflare (Public DNS)
+
+```
+Type: A
+Name: codingholic.fun
+Content: 100.x.x.x (Tailscale IP)
+Proxy: DNS only (IMPORTANT)
+```
+
+⚠️ Do NOT enable proxy (orange cloud)
+
+#### AdGuard (Private DNS Rewrite)
+
+```
+codingholic.fun → 100.x.x.x
+*.codingholic.fun → 100.x.x.x
+```
+
+### Synology Reverse Proxy
+
+#### HTTP Rule
+```
+Source:
+  Protocol: HTTP
+  Hostname: codingholic.fun
+  Port: 80
+
+Destination:
+  Protocol: HTTP
+  Hostname: 127.0.0.1
+  Port: 8090
+```
+
+#### HTTPS Rule
+```
+Source:
+  Protocol: HTTPS
+  Hostname: codingholic.fun
+  Port: 443
+
+Destination:
+  Protocol: HTTP
+  Hostname: 127.0.0.1
+  Port: 8090
+```
+
+### HTTPS via acme.sh (DNS Challenge)
+
+#### Install acme.sh
+
+```bash
+cd ~
+curl -L https://github.com/acmesh-official/acme.sh/archive/master.tar.gz -o acme.tar.gz
+tar -xzf acme.tar.gz
+cd acme.sh-master
+./acme.sh --install --force
+```
+
+#### Set Let's Encrypt
+
+```bash
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+```
+
+#### Issue Certificate
+
+```bash
+export CF_Token="YOUR_CLOUDFLARE_API_TOKEN"
+
+~/.acme.sh/acme.sh --issue \
+  --dns dns_cf \
+  -d codingholic.fun \
+  -d '*.codingholic.fun'
+```
+
+#### Deploy to Synology DSM
+
+```bash
+export SYNO_SCHEME="http"
+export SYNO_HOSTNAME="localhost"
+export SYNO_PORT="5000"
+export SYNO_USERNAME="YOUR_DSM_ADMIN_USERNAME"
+export SYNO_PASSWORD="YOUR_DSM_ADMIN_PASSWORD"
+export SYNO_CREATE=1
+export SYNO_CERTIFICATE="codingholic.fun"
+
+~/.acme.sh/acme.sh --deploy -d codingholic.fun --ecc --deploy-hook synology_dsm
+```
+
+### Auto Renewal (DSM Task Scheduler)
+
+Create task:
+
+- Control Panel → Task Scheduler → Create → User-defined script
+- User: g4ndr1k
+- Schedule: Daily
+
+Script:
+
+```bash
+. /var/services/homes/g4ndr1k/.config/acme/env.sh
+
+ACME_HOME="/var/services/homes/g4ndr1k/.acme.sh"
+
+"$ACME_HOME/acme.sh" --cron --home "$ACME_HOME"
+"$ACME_HOME/acme.sh" --deploy -d codingholic.fun --ecc --deploy-hook synology_dsm
+```
+
+### Secrets Management
+
+Create:
+
+```
+/var/services/homes/g4ndr1k/.config/acme/env.sh
+```
+
+Content:
+
+```bash
+export CF_Token="..."
+export SYNO_SCHEME="http"
+export SYNO_HOSTNAME="localhost"
+export SYNO_PORT="5000"
+export SYNO_USERNAME="..."
+export SYNO_PASSWORD="..."
+export SYNO_CREATE=1
+export SYNO_CERTIFICATE="codingholic.fun"
+```
+
+Permissions:
+
+```bash
+chmod 600 /var/services/homes/g4ndr1k/.config/acme/env.sh
+```
+
+### Security Notes
+
+- Domain resolves to Tailscale IP (100.x.x.x) → not publicly reachable
+- No port forwarding required
+- Only accessible via Tailscale VPN
+- Cloudflare proxy must remain OFF
+- Rotate API tokens and passwords if exposed
+
+### Result
+
+- Private access: https://codingholic.fun
+- Valid HTTPS (no warnings)
+- Auto-renewed certificates
+- Fully local-first architecture

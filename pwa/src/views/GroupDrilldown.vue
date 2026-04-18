@@ -94,9 +94,19 @@ const owner          = route.query.owner || ''
 const totalExpense   = Number(route.query.totalExpense || 0)
 // The full by_category array is passed as a JSON-encoded query param so this
 // view needs no extra API call — Dashboard already has this data in memory.
-const byCategoryRaw  = route.query.byCategory
-  ? JSON.parse(decodeURIComponent(route.query.byCategory))
-  : []
+const byCategoryRaw = (() => {
+  const raw = route.query.byCategory
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw))
+    if (Array.isArray(parsed) && parsed.length < 200 &&
+        parsed.every(c => typeof c === 'object' && c !== null &&
+          typeof c.category === 'string' && c.category.length < 200)) {
+      return parsed
+    }
+  } catch { /* silently reject malformed input */ }
+  return []
+})()
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MONTHS_LONG = ['January','February','March','April','May','June',

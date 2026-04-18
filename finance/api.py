@@ -18,7 +18,6 @@ Endpoints
   POST  /api/import                 {dry_run?, overwrite?}
 
 All endpoints read and write SQLite directly (data/finance.db).
-Google Sheets dependency removed in Phase 4.
 
 Start with:  python3 -m finance.server
 """
@@ -29,7 +28,7 @@ import os
 import sqlite3
 import json
 import hashlib
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from datetime import datetime, timezone
 from typing import Generator, NamedTuple, Optional
 import urllib.error
@@ -40,7 +39,7 @@ import hmac
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from finance.config import (
     load_config,
@@ -68,15 +67,41 @@ _READ_ONLY: bool = os.environ.get("FINANCE_READ_ONLY", "false").lower() in ("tru
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    if not _READ_ONLY:
+        try:
+            from finance.backup import ensure_auto_backups, start_backup_scheduler
+            ensure_auto_backups(_db_path)
+            start_backup_scheduler(_db_path)
+        except Exception as exc:
+            log.warning("Backup scheduler startup failed: %s", exc)
+    try:
+        yield
+    finally:
+        try:
+            from finance.backup import stop_backup_scheduler
+            stop_backup_scheduler()
+        except Exception as exc:
+            log.warning("Backup scheduler shutdown failed: %s", exc)
+
+
 app = FastAPI(
     title="Personal Finance API",
     version="3.0.0",
     description="Personal finance dashboard — SQLite authoritative store.",
+    lifespan=app_lifespan,
 )
 
+_cors_origins = _fastapi_cfg.cors_origins
+if "*" in _cors_origins:
+    raise RuntimeError(
+        "CORS wildcard origin ('*') is not allowed when allow_credentials=True. "
+        "Set explicit origins in [fastapi].cors_origins."
+    )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_fastapi_cfg.cors_origins,
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-Api-Key"],
@@ -84,11 +109,20 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def add_no_store_for_api(request: Request, call_next):
+async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
+    # Security headers on all responses
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    if request.url.path.startswith("/app") or request.url.path == "/":
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+        )
     return response
 
 
@@ -106,7 +140,8 @@ _RATE_LIMIT_WINDOW_S = 60
 async def rate_limit_middleware(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         now = _time.time()
-        key = request.url.path
+        client_ip = request.client.host if request.client else "unknown"
+        key = f"{client_ip}:{request.url.path}"
         _rate_limit_store[key] = [
             t for t in _rate_limit_store[key]
             if now - t < _RATE_LIMIT_WINDOW_S
@@ -123,25 +158,24 @@ async def rate_limit_middleware(request: Request, call_next):
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
-def require_api_key(x_api_key: str = Header(default="")):
-    """Validate X-Api-Key header against FINANCE_API_KEY.
-
-    Checks the FINANCE_API_KEY environment variable first, then falls back
-    to macOS Keychain (if auth.token_source = "keychain" in settings.toml)
-    via bridge.secret_manager.resolve_env_key.
-    If neither source provides a key the server refuses all protected
-    requests so deployments without a key fail loudly rather than silently open.
-    """
-    expected = os.environ.get("FINANCE_API_KEY", "")
-    if not expected:
+def _resolve_api_key() -> str:
+    """Resolve API key once at startup: env var → Keychain → empty string."""
+    key = os.environ.get("FINANCE_API_KEY", "")
+    if not key:
         try:
             from bridge.secret_manager import resolve_env_key
-            expected = resolve_env_key("FINANCE_API_KEY")
+            key = resolve_env_key("FINANCE_API_KEY")
         except ImportError:
             pass
-    if not expected:
-        raise HTTPException(status_code=500, detail="FINANCE_API_KEY not configured")
-    if not hmac.compare_digest(x_api_key, expected):
+    return key
+
+
+_EXPECTED_API_KEY = _resolve_api_key()
+
+
+def require_api_key(x_api_key: str = Header(default="")):
+    """Validate X-Api-Key header against FINANCE_API_KEY (constant-time compare)."""
+    if not _EXPECTED_API_KEY or not hmac.compare_digest(x_api_key, _EXPECTED_API_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -1167,13 +1201,22 @@ def _build_wealth_explanation(conn: sqlite3.Connection, snapshot_date: Optional[
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
+def _validate_snapshot_date(v: str) -> str:
+    """Shared validator: reject non-YYYY-MM-DD snapshot_date strings."""
+    try:
+        datetime.strptime(v, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"snapshot_date must be YYYY-MM-DD, got: {v!r}")
+    return v
+
+
 class AliasRequest(BaseModel):
-    hash:             str
-    alias:            str   # raw_description pattern to match
-    merchant:         str   # canonical merchant name
-    category:         str
-    match_type:       str   = "exact"   # "exact" | "contains" | "regex"
-    apply_to_similar: bool  = True      # also update uncategorised rows with same raw_desc
+    hash:             str             = Field(..., max_length=64)
+    alias:            str             = Field(..., max_length=500)
+    merchant:         str             = Field(..., max_length=200)
+    category:         str             = Field(..., max_length=100)
+    match_type:       str             = Field("exact", pattern=r"^(exact|contains|regex)$")
+    apply_to_similar: bool            = True
 
 
 class ImportRequest(BaseModel):
@@ -1182,31 +1225,38 @@ class ImportRequest(BaseModel):
 
 
 class CategoryOverrideRequest(BaseModel):
-    category:     str
-    notes:        str  = ""
-    update_alias: bool = True   # also update Merchant Aliases tab so future imports auto-categorise
+    category:     str  = Field(..., max_length=100)
+    notes:        str  = Field("", max_length=500)
+    update_alias: bool = True
 
 
 class CategoryUpsertRequest(BaseModel):
-    category: str
-    original_category: Optional[str] = None
-    icon: str = ""
-    sort_order: int = 99
-    is_recurring: bool = False
-    monthly_budget: Optional[float] = None
-    category_group: str = ""
-    subcategory: str = ""
+    category:          str            = Field(..., max_length=100)
+    original_category: Optional[str]  = Field(None, max_length=100)
+    icon:              str            = Field("", max_length=10)
+    sort_order:        int            = Field(99, ge=0, le=9999)
+    is_recurring:      bool           = False
+    monthly_budget:    Optional[float] = Field(None, ge=0)
+    category_group:    str            = Field("", max_length=100)
+    subcategory:       str            = Field("", max_length=100)
 
 
 class WealthQuestionRequest(BaseModel):
     snapshot_date: Optional[str] = None
-    question: str
-    history: list[dict] = []
+    question:      str           = Field(..., max_length=1000)
+    history:       list[dict]    = []
+
+    @field_validator("snapshot_date")
+    @classmethod
+    def validate_snap(cls, v):
+        if v is not None:
+            _validate_snapshot_date(v)
+        return v
 
 
 class MonthlyFlowQuestionRequest(BaseModel):
-    question: str
-    history: list[dict] = []
+    question: str        = Field(..., max_length=1000)
+    history:  list[dict] = []
 
 
 # ── /ping  (unauthenticated liveness probe for PWA heartbeat) ────────────────
@@ -1425,7 +1475,7 @@ def _tx_where(
     if month:
         conditions.append("strftime('%m', date) = ?")
         params.append(f"{month:02d}")
-    if owner and owner.lower() not in ("all", "both", ""):
+    if owner:
         conditions.append("owner = ?")
         params.append(owner)
     if category:
@@ -1666,6 +1716,14 @@ def post_alias(req: AliasRequest):
     """
     from datetime import datetime, timezone as _tz
     _now = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Validate regex patterns at the boundary before storing
+    if req.match_type == "regex":
+        import re
+        try:
+            re.compile(req.alias)
+        except re.error as e:
+            raise HTTPException(status_code=400, detail=f"Invalid regex: {e}")
 
     updated_hashes: list[str] = []
     updated_rows: list[dict] = []
@@ -2029,6 +2087,23 @@ def post_sync():
 
 # ── /api/nas-sync ─────────────────────────────────────────────────────────────
 
+@app.get("/api/backups/status", dependencies=[Depends(require_api_key)])
+def get_backups_status():
+    from finance.backup import get_backup_status
+    return get_backup_status(_db_path)
+
+
+@app.post("/api/backups/manual", dependencies=[Depends(require_api_key), Depends(require_writable)])
+def post_manual_backup():
+    from finance.backup import backup_db, get_backup_status
+    path = backup_db(_db_path, kind="manual", sync_to_nas_enabled=False)
+    return {
+        "ok": True,
+        "path": path,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": get_backup_status(_db_path),
+    }
+
 @app.get("/api/nas-sync/status", dependencies=[Depends(require_api_key)])
 def get_nas_sync_status():
     """Return NAS sync configuration and last-sync timestamp."""
@@ -2044,16 +2119,11 @@ def get_nas_sync_status():
 @app.post("/api/nas-sync", dependencies=[Depends(require_api_key), Depends(require_writable)])
 def post_nas_sync():
     """
-    Manually trigger a sync of the current DB state to the NAS.
-    Creates a fresh backup first so category edits made after the last import are included.
+    Manually trigger a sync of the latest available backup to the NAS.
     Blocked in read-only mode. Always forces the sync (ignores 24h throttle).
     Requires NAS_SYNC_TARGET env var to be configured.
     """
-    from finance.backup import backup_db, sync_to_nas
-    try:
-        backup_db(_db_path)
-    except Exception as exc:
-        log.warning("Pre-sync backup failed (non-fatal): %s", exc)
+    from finance.backup import sync_to_nas
     return sync_to_nas(_db_path, force=True)
 
 
@@ -2095,8 +2165,8 @@ def post_import(req: ImportRequest = ImportRequest()):
     # Trigger a backup after a real import that added rows
     if not req.dry_run and stats.get("added", 0) > 0:
         try:
-            from finance.backup import backup_db
-            backup_db(_db_path)
+            from finance.backup import ensure_auto_backups
+            ensure_auto_backups(_db_path)
         except Exception as _bkp_exc:
             log.warning("Post-import backup failed (non-fatal): %s", _bkp_exc)
 
@@ -2159,27 +2229,31 @@ _LIAB_TYPE_COL: dict[str, str] = {
 # ── Request models ─────────────────────────────────────────────────────────────
 
 class BalanceUpsertRequest(BaseModel):
-    snapshot_date: str
-    institution:   str
-    account:       str
-    account_type:  str   = "savings"
-    owner:         str   = ""
-    currency:      str   = "IDR"
-    balance:       float = 0.0
-    balance_idr:   float = 0.0
-    exchange_rate: float = 0.0
-    notes:         str   = ""
+    snapshot_date: str           = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    institution:   str           = Field(..., max_length=100)
+    account:       str           = Field(..., max_length=100)
+    account_type:  str           = Field("savings", max_length=50)
+    owner:         str           = Field("", max_length=100)
+    currency:      str           = Field("IDR", max_length=10)
+    balance:       float         = 0.0
+    balance_idr:   float         = 0.0
+    exchange_rate: float         = Field(0.0, ge=0)
+    notes:         str           = Field("", max_length=500)
+
+    @field_validator("snapshot_date")
+    @classmethod
+    def validate_snap(cls, v): return _validate_snapshot_date(v)
 
 
 class HoldingUpsertRequest(BaseModel):
-    snapshot_date:      str
-    asset_class:        str
-    asset_name:         str
-    isin_or_code:       str   = ""
-    institution:        str   = ""
-    account:            str   = ""
-    owner:              str   = ""
-    currency:           str   = "IDR"
+    snapshot_date:      str   = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    asset_class:        str   = Field(..., max_length=50)
+    asset_name:         str   = Field(..., max_length=200)
+    isin_or_code:       str   = Field("", max_length=20)
+    institution:        str   = Field("", max_length=100)
+    account:            str   = Field("", max_length=100)
+    owner:              str   = Field("", max_length=100)
+    currency:           str   = Field("IDR", max_length=10)
     quantity:           float = 0.0
     unit_price:         float = 0.0
     market_value:       float = 0.0
@@ -2187,30 +2261,42 @@ class HoldingUpsertRequest(BaseModel):
     cost_basis:         float = 0.0
     cost_basis_idr:     float = 0.0
     unrealised_pnl_idr: float = 0.0
-    exchange_rate:      float = 0.0
-    maturity_date:        str   = ""
-    coupon_rate:          float = 0.0
-    last_appraised_date:  str   = ""
-    notes:                str   = ""
+    exchange_rate:      float = Field(0.0, ge=0)
+    maturity_date:      str   = Field("", max_length=10)
+    coupon_rate:        float = 0.0
+    last_appraised_date: str  = Field("", max_length=10)
+    notes:              str   = Field("", max_length=500)
+
+    @field_validator("snapshot_date")
+    @classmethod
+    def validate_snap(cls, v): return _validate_snapshot_date(v)
 
 
 class LiabilityUpsertRequest(BaseModel):
-    snapshot_date:  str
-    liability_type: str
-    liability_name: str
-    institution:    str   = ""
-    account:        str   = ""
-    owner:          str   = ""
-    currency:       str   = "IDR"
+    snapshot_date:  str   = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    liability_type: str   = Field(..., max_length=50)
+    liability_name: str   = Field(..., max_length=200)
+    institution:    str   = Field("", max_length=100)
+    account:        str   = Field("", max_length=100)
+    owner:          str   = Field("", max_length=100)
+    currency:       str   = Field("IDR", max_length=10)
     balance:        float = 0.0
     balance_idr:    float = 0.0
-    due_date:       str   = ""
-    notes:          str   = ""
+    due_date:       str   = Field("", max_length=10)
+    notes:          str   = Field("", max_length=500)
+
+    @field_validator("snapshot_date")
+    @classmethod
+    def validate_snap(cls, v): return _validate_snapshot_date(v)
 
 
 class SnapshotRequest(BaseModel):
-    snapshot_date: str
-    notes:         str = ""
+    snapshot_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    notes:         str = Field("", max_length=500)
+
+    @field_validator("snapshot_date")
+    @classmethod
+    def validate_snap(cls, v): return _validate_snapshot_date(v)
 
 
 # ── /api/wealth/balances ──────────────────────────────────────────────────────
@@ -2370,7 +2456,11 @@ def upsert_holding(req: HoldingUpsertRequest):
 
 
 class CarryForwardRequest(BaseModel):
-    snapshot_date: str
+    snapshot_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("snapshot_date")
+    @classmethod
+    def validate_snap(cls, v): return _validate_snapshot_date(v)
 
 
 @app.post("/api/wealth/holdings/carry-forward", dependencies=[Depends(require_api_key), Depends(require_writable)])
@@ -2465,7 +2555,7 @@ def _auto_snapshot(snapshot_date: str):
     try:
         create_snapshot(SnapshotRequest(snapshot_date=snapshot_date))
     except Exception as exc:
-        log.warning("Auto-snapshot failed for %s (non-fatal): %s", snapshot_date, exc)
+        log.error("Auto-snapshot failed for %s (non-fatal): %s", snapshot_date, exc, exc_info=True)
 
 
 def _cascade_holding_update(
@@ -2962,7 +3052,7 @@ def _bridge_post_json(path: str, body: dict, token: str) -> dict:
             **( {"Authorization": f"Bearer {token}"} if token else {} ),
         }, method="POST",
     )
-    with _urllib_req.urlopen(req, timeout=120) as r:
+    with _urllib_req.urlopen(req, timeout=60) as r:
         return _json.loads(r.read())
 
 def _bridge_upload(path: str, filename: str, file_bytes: bytes, token: str) -> dict:

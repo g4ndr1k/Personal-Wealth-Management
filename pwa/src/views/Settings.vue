@@ -505,12 +505,48 @@
       </div>
     </div>
 
+    <div v-if="!store.isReadOnly" class="setting-card">
+      <div class="setting-title">💾 Backup</div>
+      <div class="setting-desc">
+        Tiered SQLite backups live in <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">{{ backupState.status?.backup_root || '~/agentic-ai/data/backups' }}</code>.
+        Auto backups keep 24 hourly, 31 daily, 5 weekly, and 12 monthly sets. Manual backups keep 10 sets.
+      </div>
+      <button
+        data-testid="manual-backup-button"
+        class="btn btn-primary btn-block"
+        :disabled="backupState.loading"
+        @click="doManualBackup"
+      >
+        <span v-if="backupState.loading"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Creating backup…</span>
+        <span v-else>💾 Create Manual Backup</span>
+      </button>
+      <div v-if="backupState.error" class="alert alert-error" style="margin-top:10px">
+        ❌ {{ backupState.error }}
+      </div>
+      <div v-else-if="backupState.result" class="alert alert-success" style="margin-top:10px">
+        ✅ Saved {{ baseName(backupState.result.path) }}
+      </div>
+      <div v-if="backupTiers.length" class="backup-tier-list">
+        <div v-for="tier in backupTiers" :key="tier.key" class="backup-tier-card">
+          <div class="backup-tier-row">
+            <div>
+              <div class="backup-tier-title">{{ tier.label }}</div>
+              <div class="backup-tier-sub">{{ tier.count }} / {{ tier.max_sets }} kept</div>
+            </div>
+            <span :class="['backup-tier-pill', `backup-tier-pill--${tier.status}`]">{{ backupStatusLabel(tier.status) }}</span>
+          </div>
+          <div class="backup-tier-meta">Latest: {{ fmtRelativeTime(tier.latest_at) }}</div>
+          <div v-if="tier.next_due_at" class="backup-tier-meta">Next due: {{ fmtRelativeTime(tier.next_due_at) }}</div>
+          <div v-if="tier.latest_file" class="backup-tier-file">{{ baseName(tier.latest_file) }}</div>
+        </div>
+      </div>
+    </div>
+
     <!-- NAS Sync (only when writable and NAS is configured) -->
     <div v-if="!store.isReadOnly && nasSyncStatus.configured" class="setting-card">
       <div class="setting-title">🖥️ NAS Sync</div>
       <div class="setting-desc">
-        Push the latest backup to the NAS replica so the always-on copy stays current.
-        Auto-syncs daily after each import.
+        Push the latest available backup to the NAS replica so the always-on copy stays current.
       </div>
       <div v-if="nasSyncStatus.last_synced_at" style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
         Last synced: {{ fmtNasSync(nasSyncStatus.last_synced_at) }}
@@ -571,7 +607,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
 import ReadOnlyBanner from '../components/ReadOnlyBanner.vue'
@@ -579,6 +615,7 @@ import ReadOnlyBanner from '../components/ReadOnlyBanner.vue'
 const store = useFinanceStore()
 
 const importState    = ref({ loading: false, result: null, error: null })
+const backupState    = ref({ loading: false, error: null, status: null, result: null })
 const nasSyncState   = ref({ loading: false, result: null })
 const nasSyncStatus  = ref({ configured: false, last_synced_at: null, target: null })
 const importOpts  = ref({ dry_run: false, overwrite: false })
@@ -721,6 +758,14 @@ const editableCategories = computed(() =>
   [...(store.categories || [])].sort((a, b) => a.category.localeCompare(b.category))
 )
 
+const backupTiers = computed(() => {
+  const status = backupState.value.status
+  if (!status) return []
+  return ['hourly', 'daily', 'weekly', 'monthly', 'manual']
+    .map((key) => status[key])
+    .filter(Boolean)
+})
+
 function resetCategoryEditor() {
   categorySelection.value = '__new__'
   categoryForm.value = makeEmptyCategoryForm()
@@ -756,16 +801,25 @@ function resetPdf() {
 }
 
 // ── Poll /api/pdf/local-status until done (max 3 min) ───────────────────────
-async function pollStatus(jobId, timeoutMs = 180_000) {
+let _pdfAbortController = null
+
+onUnmounted(() => {
+  _pdfAbortController?.abort()
+})
+
+async function pollStatus(jobId, timeoutMs = 180_000, signal = null) {
   const deadline = Date.now() + timeoutMs
   let transientErrors = 0
   while (Date.now() < deadline) {
+    if (signal?.aborted) throw new DOMException('Unmounted', 'AbortError')
     await new Promise(r => setTimeout(r, 2500))
+    if (signal?.aborted) throw new DOMException('Unmounted', 'AbortError')
     try {
       const s = await api.pdfLocalStatus(jobId)
       transientErrors = 0
       if (s.status === 'done' || s.status === 'error') return s
     } catch (err) {
+      if (err?.name === 'AbortError') throw err
       const message = String(err?.message || '')
       const isTransient = message.includes('502') || message.includes('503') || message.includes('504') || message.includes('Bridge unreachable')
       if (isTransient && transientErrors < 5) {
@@ -992,11 +1046,16 @@ async function processSelectedPdfs() {
   const selected = pdfWorkspace.value.files.filter(file => file.selected)
   if (selected.length === 0) return
 
+  _pdfAbortController?.abort()
+  _pdfAbortController = new AbortController()
+  const { signal } = _pdfAbortController
+
   resetPdf()
   pdf.value.phase = 'processing'
   pdf.value.total = selected.length
 
   for (let i = 0; i < selected.length; i++) {
+    if (signal.aborted) break
     const file = selected[i]
     file.processingState = 'processing'
     file.processingMeta = ''
@@ -1006,9 +1065,10 @@ async function processSelectedPdfs() {
       const res = await api.processLocalPdf(file.folder, file.relativePath)
       const jobId = res.job_id
       if (!jobId) throw new Error('No job_id returned')
-      const final = await pollStatus(jobId)
+      const final = await pollStatus(jobId, 180_000, signal)
       applyPdfRunResult(file, final)
     } catch (err) {
+      if (err?.name === 'AbortError') break
       await loadPdfWorkspace()
       const refreshed = pdfWorkspace.value.files.find(candidate => candidate.key === file.key)
       if (refreshed && refreshed.lastStatus === 'done') {
@@ -1064,11 +1124,61 @@ async function doImport() {
       overwrite: importOpts.value.overwrite,
     })
     importState.value.result = res.queued ? { status: 'queued' } : res
-    if (!res.queued && !importOpts.value.dry_run) await store.loadHealth({ forceFresh: true })
+    if (!res.queued && !importOpts.value.dry_run) {
+      await store.loadHealth({ forceFresh: true })
+      await loadBackupStatus()
+    }
   } catch (e) {
     importState.value.error = e.message
   } finally {
     importState.value.loading = false
+  }
+}
+
+function fmtRelativeTime(iso) {
+  if (!iso) return 'Never'
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z')
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000)
+  if (diff < 60) return 'just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+function baseName(path) {
+  if (!path) return '—'
+  return path.split('/').pop()
+}
+
+function backupStatusLabel(status) {
+  if (status === 'ok') return 'OK'
+  if (status === 'due') return 'Due'
+  return 'Missing'
+}
+
+async function loadBackupStatus() {
+  try {
+    backupState.value.status = await api.backupStatus({ forceFresh: true })
+    backupState.value.error = null
+  } catch (e) {
+    backupState.value.error = e.message
+  }
+}
+
+async function doManualBackup() {
+  const previousStatus = backupState.value.status
+  backupState.value = { loading: true, error: null, status: previousStatus, result: null }
+  try {
+    const result = await api.manualBackup()
+    backupState.value = {
+      loading: false,
+      error: null,
+      status: result.status || previousStatus,
+      result,
+    }
+    await loadBackupStatus()
+  } catch (e) {
+    backupState.value = { loading: false, error: e.message, status: previousStatus, result: null }
   }
 }
 
@@ -1130,13 +1240,7 @@ async function runPipeline() {
 
 // ── NAS sync ──────────────────────────────────────────────────────────────────
 function fmtNasSync(iso) {
-  if (!iso) return '—'
-  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z')
-  const diff = Math.floor((Date.now() - d.getTime()) / 1000)
-  if (diff < 60)   return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
+  return fmtRelativeTime(iso)
 }
 
 async function loadNasSyncStatus() {
@@ -1159,6 +1263,7 @@ async function doNasSync() {
 onMounted(async () => {
   await store.loadHealth({ forceFresh: true })
   await store.loadCategories({ forceFresh: true })
+  await loadBackupStatus()
   await loadPipelineStatus()
   await loadNasSyncStatus()
 })
@@ -1180,6 +1285,71 @@ onMounted(async () => {
 
 .category-editor-actions {
   margin-top: 12px;
+}
+
+.backup-tier-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.backup-tier-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--card-bg);
+}
+
+.backup-tier-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.backup-tier-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.backup-tier-sub,
+.backup-tier-meta,
+.backup-tier-file {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.backup-tier-meta,
+.backup-tier-file {
+  margin-top: 4px;
+}
+
+.backup-tier-file {
+  word-break: break-word;
+}
+
+.backup-tier-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.backup-tier-pill--ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.backup-tier-pill--due {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.backup-tier-pill--missing {
+  background: #fee2e2;
+  color: #991b1b;
 }
 
 /* ── PDF section ──────────────────────────────────────────────────────────── */

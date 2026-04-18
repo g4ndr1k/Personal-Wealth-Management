@@ -81,7 +81,7 @@
                 <template v-if="b.exchange_rate > 0"> · {{ fmtRate(b.exchange_rate) }}/{{ b.currency }}</template>
               </span>
             </div>
-            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('balance', b.id)" title="Delete">✕</button>
+            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('balance', b.id)" title="Delete" aria-label="Delete balance entry">✕</button>
           </div>
         </template>
       </template>
@@ -135,7 +135,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete" aria-label="Delete holding entry">✕</button>
             </div>
           </template>
 
@@ -171,7 +171,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete" aria-label="Delete holding entry">✕</button>
             </div>
           </template>
 
@@ -207,7 +207,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete" aria-label="Delete holding entry">✕</button>
             </div>
           </template>
 
@@ -236,7 +236,7 @@
                   {{ h.unrealised_pnl_idr >= 0 ? '+' : '' }}{{ fmt(h.unrealised_pnl_idr) }}
                 </span>
               </div>
-              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+              <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete" aria-label="Delete holding entry">✕</button>
             </div>
           </template>
         </template>
@@ -270,7 +270,7 @@
             <div class="asset-right">
               <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
             </div>
-            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete" aria-label="Delete holding entry">✕</button>
           </div>
         </template>
       </template>
@@ -298,7 +298,7 @@
             <div class="asset-right">
               <span class="asset-value">{{ fmt(h.market_value_idr) }}</span>
             </div>
-            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete">✕</button>
+            <button v-if="!store.isReadOnly" class="asset-del" @click.stop="deleteItem('holding', h.id)" title="Delete" aria-label="Delete holding entry">✕</button>
           </div>
         </template>
       </template>
@@ -685,11 +685,12 @@ async function loadItems() {
     holdings.value    = holds
 
     // Auto-carry-forward stable assets (retirement, real_estate, vehicle, gold, other)
-    // if any carry-forward class is missing and a prior month exists
+    // if any carry-forward class is missing and a prior month exists.
+    // Skip in read-only mode (NAS replica) — carry-forward is a write operation.
     const hasPrevMonth = snapshotDates.value.some(d => d < snapshotDate.value)
     const loadedClasses = new Set(holds.map(h => h.asset_class))
     const missingCF = [...CARRY_FORWARD_CLASSES].some(c => !loadedClasses.has(c))
-    if (hasPrevMonth && missingCF) {
+    if (!store.isReadOnly && hasPrevMonth && missingCF) {
       const { carried } = await api.carryForwardHoldings({ snapshot_date: snapshotDate.value })
       if (carried > 0) {
         holdings.value = await api.getHoldings({ snapshot_date: snapshotDate.value }, { forceFresh: true })
@@ -777,10 +778,29 @@ function editItem(type, item) {
   showForm.value = true
 }
 
+function _validateFormFields() {
+  const f = form.value
+  const cap = 255
+  const textFields = [f.institution, f.account, f.account_type, f.owner, f.currency,
+    f.asset_name, f.isin_or_code, f.liability_name, f.liability_type, f.notes]
+  for (const v of textFields) {
+    if (typeof v === 'string' && v.length > cap) throw new Error(`Text field exceeds ${cap} characters`)
+    if (typeof v === 'string' && /[<>\0]/.test(v)) throw new Error('Field contains invalid characters')
+  }
+  const numericFields = [f.balance, f.balance_idr, f.exchange_rate, f.market_value_idr,
+    f.cost_basis_idr, f.quantity, f.unit_price, f.coupon_rate]
+  for (const v of numericFields) {
+    if (v !== undefined && v !== null && v !== '' && (!Number.isFinite(Number(v)) || Number(v) < 0)) {
+      throw new Error('Numeric fields must be non-negative finite numbers')
+    }
+  }
+}
+
 async function saveForm() {
   formError.value = ''
   saving.value    = true
   try {
+    _validateFormFields()
     const sd = snapshotDate.value
     if (formMode.value === 'balance') {
       if (!form.value.institution || !form.value.account) throw new Error('Institution and Account are required')

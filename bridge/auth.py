@@ -61,4 +61,8 @@ def is_authorized(header_value: str, token: str) -> bool:
     if not header_value or not header_value.startswith("Bearer "):
         return False
     supplied = header_value[7:].strip()
+    # Length check before compare_digest avoids leaking token length via
+    # timing differences on inputs of vastly different sizes.
+    if len(supplied) != len(token):
+        return False
     return hmac.compare_digest(supplied.encode(), token.encode())

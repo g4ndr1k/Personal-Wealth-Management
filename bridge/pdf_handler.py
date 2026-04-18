@@ -1234,7 +1234,7 @@ def _upsert_investment_holdings(result, logs: list):
         cur_y, cur_m = snap_y, snap_m
         filled = 0
 
-        while True:
+        for _ in range(120):  # safety cap: max 10 years of gap-fill
             # Move to next calendar month
             if cur_m == 12:
                 cur_y, cur_m = cur_y + 1, 1

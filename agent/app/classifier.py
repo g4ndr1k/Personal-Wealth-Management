@@ -1,5 +1,6 @@
 import time
 import logging
+from collections import OrderedDict
 from app.providers.ollama_provider import OllamaProvider
 from app.schemas import Classification
 
@@ -9,13 +10,20 @@ logger = logging.getLogger("agent.classifier")
 class CircuitBreaker:
     """Simple circuit breaker for provider failures."""
 
+    _MAX_TRACKED = 128
+
     def __init__(self, max_failures: int = 3, cooldown_seconds: int = 300):
         self.max_failures = max_failures
         self.cooldown_seconds = cooldown_seconds
-        self._failures: dict[str, int] = {}
-        self._cooldown_until: dict[str, float] = {}
+        self._failures: OrderedDict[str, int] = OrderedDict()
+        self._cooldown_until: OrderedDict[str, float] = OrderedDict()
+
+    def _evict_if_full(self, d: OrderedDict) -> None:
+        while len(d) >= self._MAX_TRACKED:
+            d.popitem(last=False)
 
     def record_failure(self, provider_name: str):
+        self._evict_if_full(self._failures)
         self._failures[provider_name] = self._failures.get(provider_name, 0) + 1
         if self._failures[provider_name] >= self.max_failures:
             self._cooldown_until[provider_name] = time.time() + self.cooldown_seconds

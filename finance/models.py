@@ -11,9 +11,9 @@ import calendar
 
 @dataclass
 class FinanceTransaction:
-    """One transaction row destined for the Google Sheets Transactions tab."""
+    """One transaction row written to the SQLite transactions table."""
 
-    # ── Core fields (written to Sheet in this order) ──────────────────────────
+    # ── Core fields ───────────────────────────────────────────────────────────
     date: str                           # ISO 8601  YYYY-MM-DD
     amount: float                       # IDR — negative = expense, positive = income
     original_currency: Optional[str]    # ISO 4217; None for domestic (Currency = IDR)

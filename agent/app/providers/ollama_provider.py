@@ -17,7 +17,7 @@ class OllamaProvider(Provider):
     def __init__(self, settings: dict):
         self.host = settings["ollama"]["host"]
         self.model = settings["ollama"]["model_primary"]
-        self.timeout = int(settings["ollama"]["timeout_seconds"])
+        self.timeout = min(int(settings["ollama"]["timeout_seconds"]), 60)
         self.http = httpx.Client(timeout=self.timeout)
 
     def classify(self, message: dict) -> Classification:

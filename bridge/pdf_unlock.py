@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import logging
 from pathlib import Path
@@ -87,59 +88,44 @@ def _escape_applescript_string(s: str) -> str:
 
 def _unlock_via_applescript(src_path: str, password: str, dest_path: str) -> str:
     """
-    Open PDF in Preview with password, print to PDF (saves without password).
-    Uses a temp file to avoid leaking password into AppleScript string.
+    Unlock a password-protected PDF using macOS Quartz API via direct Python subprocess.
+    Bypasses AppleScript entirely to avoid shell injection risks.
     """
-    # Write password to a temp file — never interpolate into script string
+    # Write password to a temp file — never pass as arg or interpolate into strings.
+    # Restrict permissions immediately so other processes can't read it before use.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        os.chmod(f.name, 0o600)
         f.write(password)
         pwd_file = f.name
 
-    script = f'''
-tell application "Preview"
-    set pwdText to (read POSIX file "{_escape_applescript_string(pwd_file)}" as text)
-    set srcPDF to POSIX file "{_escape_applescript_string(src_path)}"
-    open srcPDF
-    -- Wait for document to load
-    delay 1
-    set frontDoc to front document
-    -- Print to PDF (save as)
-    set destPDF to POSIX file "{_escape_applescript_string(dest_path)}"
-    print frontDoc
-    delay 0.5
-    close frontDoc saving no
-end tell
-'''
-    # More reliable approach: use Quartz PDFDocument via Python subprocess
-    # instead of Preview (Preview may prompt for password interactively)
-    script2 = f'''
-set pwdPath to "{_escape_applescript_string(pwd_file)}"
-set srcPath to "{_escape_applescript_string(src_path)}"
-set destPath to "{_escape_applescript_string(dest_path)}"
-
--- Use Quartz to unlock
-do shell script "python3 -c \\"
-import Quartz
-url = Quartz.NSURL.fileURLWithPath_(srcPath)
+    # Python script that uses Quartz to unlock the PDF
+    py_script = '''
+import Quartz, sys
+src = sys.argv[1]
+pwdf = sys.argv[2]
+dst = sys.argv[3]
+url = Quartz.NSURL.fileURLWithPath_(src)
 pdf = Quartz.PDFDocument.alloc().initWithURL_(url)
 if pdf is None:
-    import sys; sys.exit(1)
-ok = pdf.unlockWithPassword_(open(pwdPath).read().strip())
+    sys.exit(1)
+ok = pdf.unlockWithPassword_(open(pwdf).read().strip())
 if not ok:
-    import sys; sys.exit(2)
-pdf.writeToFile_(destPath)
-\\""
+    sys.exit(2)
+pdf.writeToFile_(dst)
 '''
     try:
         result = subprocess.run(
-            ["osascript", "-e", script2],
-            capture_output=True, text=True, timeout=30
+            [sys.executable, "-c", py_script, src_path, pwd_file, dest_path],
+            capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
+            raise RuntimeError(f"PDF unlock failed (rc={result.returncode}): {result.stderr.strip()}")
         return dest_path
     finally:
         try:
+            # Overwrite before deletion so password doesn't linger on disk
+            with open(pwd_file, "w") as _f:
+                _f.write("\0" * len(password))
             os.unlink(pwd_file)
         except OSError:
             pass

@@ -28,6 +28,7 @@ export default createRouter({
     { path: '/audit', name: 'audit', component: Audit, meta: { title: 'Audit', keepAlive: true } },
     { path: '/group-drilldown', name: 'group-drilldown', component: GroupDrilldown, meta: { title: 'Group Detail' } },
     { path: '/category-drilldown', name: 'category-drilldown', component: CategoryDrilldown, meta: { title: 'Category Detail' } },
+    { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })

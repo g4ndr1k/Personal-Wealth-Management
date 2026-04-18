@@ -227,10 +227,10 @@ class PipelineRunner:
 
     def _run_backup(self) -> None:
         try:
-            from finance.backup import backup_db
+            from finance.backup import ensure_auto_backups
             cfg = load_config()
             finance_cfg = get_finance_config(cfg)
-            backup_db(finance_cfg.sqlite_db)
+            ensure_auto_backups(finance_cfg.sqlite_db)
             log.info("Post-import backup completed.")
         except Exception as exc:
             log.warning("Post-import backup failed (non-fatal): %s", exc)
