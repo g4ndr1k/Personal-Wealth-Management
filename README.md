@@ -10,7 +10,7 @@ A self-hosted, privacy-first system for email monitoring, iMessage alerts, bank 
 
 | Capability | How |
 |---|---|
-| Monitors Mail.app for financial emails | Reads Apple Mail's local SQLite DB every 30 s |
+| Monitors Mail.app for financial emails | Reads Apple Mail's local SQLite DB every 60 m |
 | Classifies emails with a local LLM | Ollama + `gemma4:e4b` — no cloud API required |
 | Sends iMessage alerts to iPhone | Messages.app via AppleScript |
 | Parses password-protected bank PDFs | pdfplumber + pikepdf; 13 bank/statement parsers |
