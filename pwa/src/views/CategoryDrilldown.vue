@@ -208,7 +208,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const router = useRouter()
 const route  = useRoute()
@@ -265,9 +265,7 @@ const totalAmount = computed(() =>
 )
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-function fmt(n) {
-  return formatIDR(n)
-}
+const { fmt } = useFmt()
 
 function catIcon(name) {
   return store.categoryMap[name]?.icon || '📁'

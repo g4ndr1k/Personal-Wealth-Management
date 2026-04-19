@@ -92,7 +92,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const store = useFinanceStore()
 
@@ -135,9 +135,7 @@ const CCY_FLAGS = {
 function ccyFlag(ccy) { return CCY_FLAGS[ccy] || '🌐' }
 
 // ── Formatters ────────────────────────────────────────────────────────────────
-function fmt(n) {
-  return formatIDR(n)
-}
+const { fmt } = useFmt()
 
 function fmtIDRCell(n) {
   if (n === null || n === undefined) return '0'

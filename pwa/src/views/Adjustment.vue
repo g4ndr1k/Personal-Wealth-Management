@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useFinanceStore } from '../stores/finance.js'
 import { api } from '../api/client.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const store = useFinanceStore()
 
@@ -23,7 +23,7 @@ const jamsostek  = ref([])   // holdings with asset_class === 'retirement'
 const edits = ref({})
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function fmt(n) { return formatIDR(n ?? 0) }
+const { fmt } = useFmt()
 
 function fmtDateChip(d) {
   if (!d) return ''

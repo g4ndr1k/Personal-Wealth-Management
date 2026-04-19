@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useFinanceStore } from '../stores/finance.js'
 import { api } from '../api/client.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 import AuditCompleteness from './AuditCompleteness.vue'
 
 const store = useFinanceStore()
@@ -59,7 +59,7 @@ const holdingsA = ref([])
 const holdingsB = ref([])
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-function fmt(n) { return formatIDR(n ?? 0) }
+const { fmt } = useFmt()
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 

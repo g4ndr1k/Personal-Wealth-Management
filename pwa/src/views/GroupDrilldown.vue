@@ -15,7 +15,7 @@
     <div class="drill-summary card">
       <div class="ds-item">
         <div class="ds-label">Group Total</div>
-        <div class="ds-value text-expense">{{ fmt(groupTotal) }}</div>
+        <div class="ds-value text-expense">{{ fmt(Math.abs(groupTotal)) }}</div>
       </div>
       <div class="ds-divider"></div>
       <div class="ds-item">
@@ -52,7 +52,7 @@
           </div>
         </div>
         <div class="cdr-right">
-          <div class="cdr-amount">{{ fmt(cat.amount) }}</div>
+          <div class="cdr-amount">{{ fmt(Math.abs(cat.amount)) }}</div>
           <div class="cdr-pct">{{ cat.pct }}%</div>
           <span class="cdr-chevron">›</span>
         </div>
@@ -80,7 +80,7 @@
 import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const router = useRouter()
 const route  = useRoute()
@@ -124,7 +124,7 @@ const GROUP_ICONS = {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function fmt(n) { return formatIDR(Math.abs(n)) }
+const { fmt } = useFmt()
 
 // ── Computed ──────────────────────────────────────────────────────────────────
 const monthLabel = computed(() => `${MONTHS_LONG[month - 1]} ${year}`)

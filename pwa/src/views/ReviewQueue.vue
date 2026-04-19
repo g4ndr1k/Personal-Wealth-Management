@@ -220,7 +220,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 import { useLayout } from '../composables/useLayout.js'
 import ReviewWorkspace from '../components/ReviewWorkspace.vue'
 
@@ -251,9 +251,7 @@ const selectedItem = computed(() =>
 )
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-function fmt(n) {
-  return formatIDR(n)
-}
+const { fmt } = useFmt()
 
 function countSimilar(item) {
   return items.value.filter(x => x.raw_description === item.raw_description).length

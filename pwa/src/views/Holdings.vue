@@ -455,7 +455,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const route = useRoute()
 const store = useFinanceStore()
@@ -526,7 +526,7 @@ const FORM_DEFAULTS = {
 const form = ref({ ...FORM_DEFAULTS })
 
 // ── Format helpers ────────────────────────────────────────────────────────────
-function fmt(n) { return formatIDR(n ?? 0) }
+const { fmt } = useFmt()
 
 // Format foreign-currency amounts with their own locale convention
 function fmtForeign(n, currency) {

@@ -263,7 +263,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 import { useLayout } from '../composables/useLayout.js'
 import TransactionTable from '../components/TransactionTable.vue'
 
@@ -322,7 +322,7 @@ const MONTHS_LONG = ['January','February','March','April','May','June','July','A
 
 function monthName(m) { return MONTHS_LONG[m - 1] }
 function catIcon(name) { return store.categoryMap[name]?.icon || '📁' }
-function fmt(n) { return formatIDR(n) }
+const { fmt } = useFmt()
 
 let searchTimer = null
 function debouncedSearch() {

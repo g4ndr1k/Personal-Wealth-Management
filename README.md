@@ -195,6 +195,10 @@ Aliases survive re-imports. Manual category edits live in a separate `category_o
 | Audit | `/audit` | 2-month call-over comparison + PDF completeness grid |
 | Settings | `/settings` | Import, NAS sync, pipeline controls, category editor |
 
+### Privacy mode (hide amounts)
+
+Tap the `🙈/👁` button in the top-right header to toggle amount visibility across the entire PWA. All monetary values — formatted numbers, chart axis labels, AI explanation text, and suggested-question chips — are replaced with `Rp ••••••••`. Default is **hidden**, persisted in `localStorage` so the setting survives page reloads. Useful for demoing the app without revealing real figures.
+
 ---
 
 ## Stage 3 — Wealth management

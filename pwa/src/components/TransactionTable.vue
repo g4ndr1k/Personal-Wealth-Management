@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const props = defineProps({
   transactions: { type: Array, required: true },
@@ -45,9 +45,7 @@ function toggleSort(col) {
   }
 }
 
-function fmt(n) {
-  return formatIDR(n)
-}
+const { fmt } = useFmt()
 </script>
 
 <template>

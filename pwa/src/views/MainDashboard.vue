@@ -148,7 +148,7 @@ import Chart from 'chart.js/auto'
 import { RouterLink } from 'vue-router'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const HISTORY_LIMIT = 24
 const DASHBOARD_MIN_MONTH = '2026-01'
@@ -167,15 +167,14 @@ let allocationChart = null
 let wealthChart = null
 let cashFlowChart = null
 
-function fmt(value) {
-  return formatIDR(value ?? 0)
-}
+const { fmt } = useFmt()
 
 function fmtShort(value) {
+  if (store.hideNumbers) return 'Rp ••••••••'
   const abs = Math.abs(value ?? 0)
   if (abs >= 1_000_000_000) return `Rp ${(abs / 1_000_000_000).toFixed(1)}B`
   if (abs >= 1_000_000) return `Rp ${(abs / 1_000_000).toFixed(0)}M`
-  return formatIDR(value ?? 0)
+  return fmt(value ?? 0)
 }
 
 function monthKey(dateString) {
@@ -354,6 +353,7 @@ function buildYTicks(maxValue, formatter) {
 }
 
 function fmtCompact(value) {
+  if (store.hideNumbers) return '•••'
   const abs = Math.abs(value)
   if (abs >= 1_000_000_000) return `Rp ${(value / 1_000_000_000).toFixed(1)}B`
   if (abs >= 1_000_000) return `Rp ${(value / 1_000_000).toFixed(0)}M`

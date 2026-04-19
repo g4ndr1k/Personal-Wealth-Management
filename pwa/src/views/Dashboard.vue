@@ -114,7 +114,7 @@
           <div class="card-title">{{ store.selectedYear }} — Monthly Trend</div>
           <div v-if="trendExplanation?.available" class="trend-explanation">
             <div class="trend-explanation-topline">
-              <div class="trend-explanation-headline">{{ trendExplanation.headline }}</div>
+              <div class="trend-explanation-headline">{{ maskAmounts(trendExplanation.headline) }}</div>
               <div v-if="trendExplanationLoading" class="trend-explanation-status">
                 <span class="spinner spinner-sm"></span>
                 Refining with AI…
@@ -126,10 +126,10 @@
                 @click="refineFlowWithAi"
               >✨ Refine with AI</button>
             </div>
-            <div class="trend-explanation-summary">{{ trendExplanation.summary }}</div>
+            <div class="trend-explanation-summary">{{ maskAmounts(trendExplanation.summary) }}</div>
             <div v-if="trendExplanation.drivers?.length" class="trend-driver-list">
               <div v-for="driver in trendExplanation.drivers" :key="driver" class="trend-driver-item">
-                {{ driver }}
+                {{ maskAmounts(driver) }}
               </div>
             </div>
             <div class="trend-ai">
@@ -162,11 +162,11 @@
               </div>
               <div v-if="trendQaHistory.length" class="trend-qa-list">
                 <div v-for="(item, idx) in trendQaHistory" :key="idx" class="trend-qa-item">
-                  <div class="trend-qa-question">{{ item.question }}</div>
-                  <div v-if="item.answer?.title" class="trend-qa-answer-title">{{ item.answer.title }}</div>
-                  <div class="trend-qa-answer">{{ item.answer?.answer }}</div>
+                  <div class="trend-qa-question">{{ maskAmounts(item.question) }}</div>
+                  <div v-if="item.answer?.title" class="trend-qa-answer-title">{{ maskAmounts(item.answer.title) }}</div>
+                  <div class="trend-qa-answer">{{ maskAmounts(item.answer?.answer) }}</div>
                   <div v-if="item.answer?.bullets?.length" class="trend-qa-bullets">
-                    <div v-for="bullet in item.answer.bullets" :key="bullet" class="trend-qa-bullet">{{ bullet }}</div>
+                    <div v-for="bullet in item.answer.bullets" :key="bullet" class="trend-qa-bullet">{{ maskAmounts(bullet) }}</div>
                   </div>
                   <div v-if="item.answer?.references?.length" class="trend-qa-refs">
                     Based on: {{ item.answer.references.join(', ') }}
@@ -223,7 +223,7 @@ import Chart from 'chart.js/auto'
 import { api } from '../api/client.js'
 import { useLayout } from '../composables/useLayout.js'
 import { useFinanceStore } from '../stores/finance.js'
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 const flowExplanationAiCache = new Map()
 
@@ -373,15 +373,11 @@ const trendExplanationEmptyMessage = computed(() => {
 })
 
 // ── Formatters ───────────────────────────────────────────────────────────────
-function fmt(n) {
-  return formatIDR(n)
-}
-
-function fmtShort(n) {
-  return formatIDR(n)
-}
+const { fmt } = useFmt()
+const fmtShort = fmt
 
 function fmtCompact(n) {
+  if (store.hideNumbers) return '•••'
   const abs = Math.abs(n ?? 0)
   if (abs >= 1_000_000_000) return `Rp ${(abs / 1_000_000_000).toFixed(1)}B`
   if (abs >= 1_000_000) return `Rp ${(abs / 1_000_000).toFixed(1)}M`
@@ -391,6 +387,13 @@ function fmtCompact(n) {
 
 function catIcon(name) {
   return store.categoryMap[name]?.icon || '📁'
+}
+
+function maskAmounts(text) {
+  if (!store.hideNumbers || !text) return text
+  return text
+    .replace(/Rp\s*[\d,. ]+[BMKT]?/gi, 'Rp ••••')
+    .replace(/\b[\d,.]+\s*[BMK]\b/gi, '••••')
 }
 
 // ── Group drill-down (Level 1) ───────────────────────────────────────────────

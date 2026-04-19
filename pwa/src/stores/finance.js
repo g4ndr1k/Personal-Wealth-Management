@@ -7,6 +7,7 @@ const DASHBOARD_MIN_MONTH = '2026-01'
 const DASHBOARD_START_KEY = 'finance.dashboard.startMonth'
 const DASHBOARD_END_KEY = 'finance.dashboard.endMonth'
 const AUTO_AI_REFINE_KEY = 'finance.autoAiRefine'
+const HIDE_NUMBERS_KEY = 'finance.hideNumbers'
 const CACHE_KEYS = {
   health: 'finance.health',
   owners: 'finance.owners',
@@ -48,6 +49,7 @@ export const useFinanceStore = defineStore('finance', () => {
   const reviewCount = ref(0)
   const isReadOnly = ref(false)
   const autoAiRefine = ref(safeStorageGet(AUTO_AI_REFINE_KEY) !== 'false')
+  const hideNumbers = ref(safeStorageGet(HIDE_NUMBERS_KEY) !== 'false')
 
   const now = new Date()
   const currentMonthKey = computed(() => _getCurrentMonthKey())
@@ -196,12 +198,18 @@ export const useFinanceStore = defineStore('finance', () => {
     safeStorageSet(AUTO_AI_REFINE_KEY, String(value))
   }
 
+  function setHideNumbers(value) {
+    hideNumbers.value = value
+    safeStorageSet(HIDE_NUMBERS_KEY, String(value))
+  }
+
   return {
     owners, categories, years, health, reviewCount, isReadOnly, autoAiRefine,
     selectedYear, selectedMonth, selectedOwner,
     dashboardStartMonth, dashboardEndMonth,
     categoryMap, categoryNames, dashboardMonthOptions, dashboardRangeLabel,
     loadHealth, loadOwners, loadCategories, loadYears,
-    decrementReviewCount, setReviewCount, setDashboardRange, setAutoAiRefine, bootstrap,
+    decrementReviewCount, setReviewCount, setDashboardRange, setAutoAiRefine, setHideNumbers, bootstrap,
+    hideNumbers,
   }
 })

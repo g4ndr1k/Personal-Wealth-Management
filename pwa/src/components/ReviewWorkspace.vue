@@ -1,5 +1,5 @@
 <script setup>
-import { formatIDR } from '../utils/currency.js'
+import { useFmt } from '../composables/useFmt.js'
 
 defineProps({
   items: { type: Array, default: () => [] },
@@ -8,9 +8,7 @@ defineProps({
 
 defineEmits(['select'])
 
-function fmt(n) {
-  return formatIDR(n)
-}
+const { fmt } = useFmt()
 </script>
 
 <template>

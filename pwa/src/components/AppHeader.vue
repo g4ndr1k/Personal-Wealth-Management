@@ -17,6 +17,11 @@ const pageTitle = computed(() => route.meta?.title || 'Personal Finance')
       <span class="title">{{ pageTitle }}</span>
     </div>
     <div class="sync-info">
+      <button
+        class="hide-toggle"
+        :title="store.hideNumbers ? 'Show amounts' : 'Hide amounts'"
+        @click="store.setHideNumbers(!store.hideNumbers)"
+      >{{ store.hideNumbers ? '🙈' : '👁' }}</button>
       <span class="status-dot" :class="{ ok: store.health?.status === 'ok' && isOnline }"></span>
       <span v-if="store.health">
         {{ store.health.transaction_count }} txn
@@ -34,5 +39,17 @@ const pageTitle = computed(() => route.meta?.title || 'Personal Finance')
   margin-left: 2px;
   opacity: 0.7;
   vertical-align: 1px;
+}
+.hide-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  opacity: 0.8;
+  line-height: 1;
+}
+.hide-toggle:hover {
+  opacity: 1;
 }
 </style>
