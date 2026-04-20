@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.17.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅ · Public homepage with Snake game live ✅ · Multi-provider IMAP (Gmail + iCloud) ✅
+**Version:** 3.18.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅ · Public homepage with Snake game live ✅ · Multi-provider IMAP (Gmail + iCloud) ✅ · Household Expense PWA on NAS ✅
 **Platform:** Apple Silicon Mac · macOS · Synology DS920+ (AMD64 Docker)
 **Last validated against:** checked-in codebase 2026-04-19
 
@@ -61,6 +61,10 @@
 
 41. [NAS Read-Only Replica](#41-nas-read-only-replica)
 42. [HTTPS via Tailscale + Synology Reverse Proxy](#42-https-via-tailscale--synology-reverse-proxy)
+
+### Satellite — Household Expense PWA (NAS, port 8088)
+
+43. [Household Expense PWA](#43-household-expense-pwa)
 
 ---
 
@@ -263,7 +267,7 @@ The system alerts on:
 - NAS Read-Only Replica (`docker-compose.nas.yml`, `finance/backup.py`, `finance/api.py`, `pwa/`) — see §41
   - `FINANCE_READ_ONLY` env flag — when `true`, all write endpoints return 403; `GET /api/health` exposes `"read_only": true`
   - `require_writable` dependency guarded on 15+ write routes (aliases, backfill, category edits, import, wealth CRUD, review-queue suggest, nas-sync)
-  - `finance/backup.py` — `sync_to_nas()` function: streams latest backup to `NAS_SYNC_TARGET` via `ssh cat` (rsync not supported on Synology); SSH port 68, dedicated key pair at `secrets/nas_sync_key`; 24h throttle on auto-sync, state tracked in `data/.nas_sync_state.json`; auto-called after every `backup_db()` (post-import); `POST /api/nas-sync` endpoint for manual trigger (force bypasses throttle); `GET /api/nas-sync/status` returns last sync time; local-path fallback via `shutil.copy2`
+  - `finance/backup.py` — `sync_to_nas()` function: streams latest backup to `NAS_SYNC_TARGET` via `ssh cat` (rsync not supported on Synology); SSH port 22, dedicated key pair at `secrets/nas_sync_key`; 24h throttle on auto-sync, state tracked in `data/.nas_sync_state.json`; auto-called after every `backup_db()` (post-import); `POST /api/nas-sync` endpoint for manual trigger (force bypasses throttle); `GET /api/nas-sync/status` returns last sync time; local-path fallback via `shutil.copy2`
   - `docker-compose.nas.yml` — NAS overlay: `FINANCE_READ_ONLY=true`, SQLite DB at `/volume1/finance/finance_readonly.db` (read-only mount), Ollama host cleared (not needed on NAS), no XLS/secrets volumes
   - AMD64 Docker image built via `docker buildx build --platform linux/amd64` for Synology DS920+ Container Manager; loaded via `docker load`
   - PWA read-only detection: `financeStore.isReadOnly` set from `/api/health` response; blue `ReadOnlyBanner.vue` component (fixed top, shows "Read-only · NAS replica · Updated Xh ago"); all write controls hidden via `v-if="!store.isReadOnly"` across ReviewQueue, Transactions, Adjustment, Holdings, Wealth, Settings
@@ -2169,7 +2173,7 @@ The NAS sync uses a dedicated ED25519 key pair stored at `secrets/nas_sync_key`.
 ssh-keygen -t ed25519 -f secrets/nas_sync_key -N "" -C "agentic-ai-nas-sync"
 
 # Copy public key to NAS (adjust user@host as needed)
-ssh-copy-id -i secrets/nas_sync_key.pub -p 68 user@ds920plus
+ssh-copy-id -i secrets/nas_sync_key.pub -p 22 user@ds920plus
 ```
 
 ---
@@ -2240,7 +2244,7 @@ docker compose logs -f finance-api
 
 ```bash
 # Test SSH connectivity manually
-ssh -p 68 -i secrets/nas_sync_key user@ds920plus echo ok
+ssh -p 22 -i secrets/nas_sync_key user@ds920plus echo ok
 
 # Check NAS sync state
 cat data/.nas_sync_state.json
@@ -3000,7 +3004,7 @@ finance-api :8090  (read+write)                 finance-api-nas :8090 (read-only
 NAS_SYNC_TARGET=g4ndr1k@192.168.1.44:/volume1/finance/finance_readonly.db
 ```
 
-**Transfer method:** `ssh + cat` pipe (`cat source | ssh -p 68 user@host "cat > /remote/path"`). Synology restricts the rsync protocol, so the traditional rsync approach was replaced with a simpler stream-over-SSH pattern. SSH port 68 (Synology default), `StrictHostKeyChecking=no`. Falls back to `shutil.copy2` for local paths (e.g. SMB mounts).
+**Transfer method:** `ssh + cat` pipe (`cat source | ssh -p 22 user@host "cat > /remote/path"`). Synology restricts the rsync protocol, so the traditional rsync approach was replaced with a simpler stream-over-SSH pattern. SSH port 22 (Synology default), `StrictHostKeyChecking=no`. Falls back to `shutil.copy2` for local paths (e.g. SMB mounts).
 
 **Auto-sync:** After every `backup_db()` call (which runs post-import), `sync_to_nas()` streams the latest backup file to the NAS. A 24-hour throttle prevents redundant syncs. State is tracked in `data/.nas_sync_state.json`.
 
@@ -3306,3 +3310,225 @@ Internet → Cloudflare Tunnel → codingholic.fun → NAS 127.0.0.1:3002 (prod)
 - Mobile: D-pad controls + swipe gestures
 - Files: `app/game/snake-game.tsx` (client component), `app/game/page.tsx` (page wrapper)
 - Replaced BaZi Fortune Teller placeholder (Apr 2026)
+
+---
+
+## 43. Household Expense PWA
+
+### Overview
+
+A simple, mobile-friendly PWA hosted on the Synology DS920+ NAS that allows a **personal assistant (household staff)** to record daily household cash expenses in Bahasa Indonesia. The Mac Mini's agentic-ai finance system imports and reconciles these entries later against Helen's BCA ATM cash withdrawals.
+
+This is a **satellite data source**, not a new Stage inside agentic-ai. It produces raw household expense records that the Mac Mini imports, matches against ATM withdrawals, and marks as reconciled. The household PWA never writes to `finance.db` or any agentic-ai database directly.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│ Android Phone (LAN Wi-Fi)                    │
+│  Chrome PWA → http://192.168.1.44:8088      │
+│  UI: Bahasa Indonesia                        │
+└──────────────────────┬──────────────────────┘
+                       │ HTTP (LAN only)
+┌──────────────────────┴──────────────────────┐
+│ Synology DS920+ (192.168.1.44)               │
+│                                              │
+│  household-api (FastAPI, port 8088)          │
+│   · CRUD /api/household/transactions         │
+│   · GET  /api/household/export/unreconciled  │
+│   · POST /api/household/reconcile            │
+│   · Serves PWA static files at /             │
+│   · Auth: session cookie + API key            │
+│                                              │
+│  household.db (SQLite, WAL mode)             │
+│   · household_transactions                  │
+│   · household_categories                    │
+│   · cash_pools                              │
+│   · app_users                               │
+└──────────────────────────────────────────────┘
+                       │
+         Manual import (Mac Mini pulls via LAN)
+                       │
+┌──────────────────────┴──────────────────────┐
+│ Mac Mini — agentic-ai (127.0.0.1:8090)       │
+│  · GET  /api/household/export/unreconciled   │
+│  · Match against Helen BCA ATM withdrawals   │
+│  · POST /api/household/reconcile             │
+└──────────────────────────────────────────────┘
+```
+
+### Key design decisions
+
+| Decision | Detail |
+|---|---|
+| Separate database | Dedicated `household.db` on NAS — not inside `finance.db` |
+| LAN only | No Tailscale, no Cloudflare Tunnel, no HTTPS — in-house Wi-Fi only |
+| Port 8088 | Distinct from finance-api-nas (8090), homepage (3002/3003) |
+| Single user | Only the assistant logs expenses |
+| No cash pool UI | Cash pool schema exists in backend but hidden from PWA v1 |
+| Manual reconciliation | Mac Mini triggers import via CLI, not scheduled or iMessage |
+| Build on Mac Mini | PWA built locally, rsync'd to NAS before Docker build |
+| NAS-local backup | Household DB backed up on NAS only, not in agentic-ai pipeline |
+
+### Local project location
+
+```
+~/agentic-ai/household-expense/          # Mac Mini project directory
+├── api/                                 # FastAPI backend
+│   ├── main.py                          # App, CORS, static mount, startup seed
+│   ├── auth.py                          # Login, session middleware, API key
+│   ├── models.py                        # Pydantic request/response models
+│   ├── db.py                            # SQLite schema, WAL, connection
+│   ├── seed.py                          # Category + default user seeder
+│   └── routers/
+│       ├── transactions.py              # CRUD + soft-delete
+│       ├── categories.py                # Active category list
+│       ├── cash_pools.py                # Cash pool API (hidden from UI)
+│       └── export.py                    # Export unreconciled + reconcile
+├── pwa/                                 # Vue 3 + Vite + Tailwind PWA
+│   └── src/
+│       ├── views/LoginView.vue          # Login (Bahasa Indonesia)
+│       ├── views/AddView.vue            # Tambah Pengeluaran
+│       ├── views/HistoryView.vue        # Riwayat
+│       ├── api/client.js                # Fetch wrapper
+│       ├── labels.js                    # All Indonesian UI text
+│       └── utils.js                     # IDR formatting, datetime helpers
+├── dist/                                # Built PWA (output of npm run build)
+├── secrets/household_api.key            # 64-char hex API key for Mac Mini
+├── deploy_household.sh                  # Build + rsync + Docker restart
+├── docker-compose.yml
+├── Dockerfile
+└── requirements.txt
+```
+
+### NAS directory
+
+```
+/volume1/docker/household-expense/
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+├── api/
+├── dist/
+├── data/household.db                    # SQLite, WAL mode
+└── secrets/household_api.key
+```
+
+### NAS port inventory (updated)
+
+| Port | Service | Owner |
+|---|---|---|
+| 8090 | finance-api-nas (read-only PWM replica) | agentic-ai |
+| 8088 | **household-api (this project)** | **household-expense** |
+| 3002 | codingholic-homepage (prod) | homepage |
+| 3003 | codingholic-homepage (staging) | homepage |
+| 5000 | DSM HTTP | Synology |
+| 5001 | DSM HTTPS | Synology |
+
+### Database schema
+
+SQLite with WAL mode, `busy_timeout=5000`, `foreign_keys=ON`, `secure_delete=ON` — matching the `finance.db` PRAGMA pattern (§29).
+
+Key tables:
+
+| Table | Role |
+|---|---|
+| `household_transactions` | Expenses with `client_txn_id` dedup, soft-delete, reconcile status |
+| `household_categories` | 15 categories with English `code` + Indonesian `label_id` |
+| `cash_pools` | ATM withdrawal tracking (backend only, hidden from PWA UI) |
+| `app_users` | Single user: `asisten` / bcrypt-hashed password |
+
+### Authentication
+
+Two auth mechanisms:
+
+| Mechanism | Used by | Endpoints |
+|---|---|---|
+| Session cookie (httpOnly, 7-day) | Android PWA (assistant) | All CRUD endpoints |
+| `X-Api-Key` header | Mac Mini (agentic-ai) | Export + reconcile endpoints |
+
+API key is a 64-character hex token. Constant-time comparison using `hmac.compare_digest` (matching §20 pattern).
+
+### Category taxonomy
+
+| `code` | `label_id` (Indonesian) | Maps to Stage 2 category |
+|---|---|---|
+| `groceries` | Belanja Harian | Groceries |
+| `meals` | Makanan & Minuman | Dining Out |
+| `snacks` | Jajan / Camilan | Dining Out |
+| `gas_lpg` | Gas LPG | Utilities |
+| `electricity_token` | Token Listrik | Utilities |
+| `water` | Air (Galon / PDAM) | Utilities |
+| `transport` | Transportasi | Auto |
+| `household_supplies` | Peralatan Rumah Tangga | Household |
+| `laundry` | Laundry | Household |
+| `cleaning` | Kebersihan | Household |
+| `medical` | Kesehatan / Obat | Healthcare |
+| `children` | Anak-anak | Family |
+| `donation` | Sedekah / Donasi | Gifts & Donations |
+| `staff_salary` | Gaji ART / Driver | Household |
+| `other` | Lainnya | Other |
+
+### API endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/household/health` | None | Unauthenticated liveness probe |
+| `POST` | `/api/household/auth/login` | None | Login → session cookie |
+| `POST` | `/api/household/auth/logout` | Session | Clear session |
+| `GET` | `/api/household/transactions` | Session | List with filters |
+| `POST` | `/api/household/transactions` | Session | Create (client-generated UUID) |
+| `PUT` | `/api/household/transactions/{id}` | Session | Update |
+| `DELETE` | `/api/household/transactions/{id}` | Session | Soft-delete |
+| `GET` | `/api/household/categories` | Session | Active categories |
+| `GET` | `/api/household/cash-pools` | Session | List pools |
+| `POST` | `/api/household/cash-pools` | Session | Create pool |
+| `GET` | `/api/household/export/unreconciled` | API key | Pending transactions JSON |
+| `POST` | `/api/household/reconcile` | API key | Mark matched rows |
+
+### Default credentials
+
+| Field | Value |
+|---|---|
+| Username | `asisten` |
+| Password | `rumah123` |
+| Display name | `Asisten` |
+
+### Amount formatting
+
+- **Storage:** whole IDR integers (no decimals)
+- **API JSON:** plain integers (`"amount": 75000`)
+- **PWA display:** Indonesian dot format (`Rp 75.000`)
+
+### Deploy workflow
+
+```bash
+# On Mac Mini — one-command deploy
+bash ~/agentic-ai/household-expense/deploy_household.sh
+```
+
+This script:
+1. Builds the Vue PWA (`npm run build` → `dist/`)
+2. Rsyncs the project to NAS (`/volume1/docker/household-expense/`)
+3. Rebuilds and restarts the Docker container
+4. Verifies the health endpoint
+
+### agentic-ai integration (Phase 5 — pending)
+
+Planned but not yet implemented:
+
+- `finance/household_import.py` module on Mac Mini
+- Pull unreconciled expenses, match against Helen BCA ATM withdrawals
+- Post reconciliation marks back to household DB
+- `[household]` section in `config/settings.toml`
+- `HOUSEHOLD_API_KEY` stored in macOS Keychain
+
+### Security
+
+- **LAN-only** — port 8088 is not forwarded, not proxied, not on Tailscale
+- **No HTTPS** — plain HTTP over home Wi-Fi (acceptable threat model for expense amounts)
+- **Session cookies** — httpOnly, SameSite=Lax, 7-day expiry
+- **API key** — 64-char hex, constant-time comparison
+- **Soft-delete** — all records preserved for audit trail
+- **Request validation** — Pydantic `max_length` bounds on all string fields, `amount` capped at 999,999,999
+- **Container hardening** — `mem_limit: 256m`, `no-new-privileges:true`

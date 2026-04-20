@@ -48,9 +48,12 @@ Mac Mini (host)
         gemma4:e4b — classification + categorization
 
 Synology DS920+ (always-on)
-  └── Finance API NAS  (Docker  ·  :8090)
-        FINANCE_READ_ONLY=true
-        DB synced from Mac via SSH after each import
+  ├── Finance API NAS  (Docker  ·  :8090)
+  │     FINANCE_READ_ONLY=true
+  │     DB synced from Mac via SSH after each import
+  └── Household Expense  (Docker  ·  :8088)
+        LAN-only PWA for assistant expense tracking
+        Separate household.db — reconciled against Mac Mini at import time
 ```
 
 ### Access tiers
@@ -60,6 +63,7 @@ Synology DS920+ (always-on)
 | Public homepage | codingholic.fun | Open internet |
 | Finance dashboard (read/write) | mac.codingholic.fun | Tailscale only |
 | NAS read-only demo | ro.codingholic.fun | Tailscale only |
+| Household expense PWA | http://192.168.1.44:8088 | LAN only |
 
 ---
 
@@ -117,6 +121,7 @@ agentic-ai/
 ├── exporters/          # XLS writer (ALL_TRANSACTIONS.xlsx + per-bank files)
 ├── finance/            # FastAPI backend, SQLite schema, importer, categorizer, backup
 ├── pwa/                # Vue 3 PWA (mobile-first wealth dashboard)
+├── household-expense/  # Satellite PWA for household expense tracking on NAS
 ├── scripts/            # Batch processor, NAS deploy, seed scripts, setup helpers
 ├── config/
 │   └── settings.toml   # All runtime config (Stage 1 + Stage 2 + Stage 3)
@@ -363,6 +368,7 @@ All secrets are stored in the **macOS Keychain** under service `agentic-ai-bridg
 - NAS read-only replica: ✅ live
 - Security hardening (April 2026): ✅ applied
 - Gmail IMAP migration (April 2026): ✅ Mail.app dependency removed
+- Household Expense PWA (April 2026): ✅ live on NAS port 8088
 
 ---
 

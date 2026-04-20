@@ -37,8 +37,11 @@ function _getCurrentMonthKey() {
 }
 
 function normalizeDashboardMonth(value, fallback) {
+  if (!/^\d{4}-\d{2}$/.test(value || '')) return fallback
+  if (value < DASHBOARD_MIN_MONTH) return DASHBOARD_MIN_MONTH
   const upperBound = _getCurrentMonthKey()
-  return /^\d{4}-\d{2}$/.test(value || '') && value >= DASHBOARD_MIN_MONTH && value <= upperBound ? value : fallback
+  if (value > upperBound) return upperBound
+  return value
 }
 
 export const useFinanceStore = defineStore('finance', () => {
@@ -49,12 +52,15 @@ export const useFinanceStore = defineStore('finance', () => {
   const reviewCount = ref(0)
   const isReadOnly = ref(false)
   const autoAiRefine = ref(safeStorageGet(AUTO_AI_REFINE_KEY) !== 'false')
-  const hideNumbers = ref(safeStorageGet(HIDE_NUMBERS_KEY) !== 'false')
+  const hideNumbers = ref(safeStorageGet(HIDE_NUMBERS_KEY) === 'true')
 
   const now = new Date()
   const currentMonthKey = computed(() => _getCurrentMonthKey())
   const dashboardStartMonth = ref(normalizeDashboardMonth(safeStorageGet(DASHBOARD_START_KEY), DASHBOARD_MIN_MONTH))
   const dashboardEndMonth = ref(normalizeDashboardMonth(safeStorageGet(DASHBOARD_END_KEY), currentMonthKey.value))
+  // Eagerly persist so defaults are always in localStorage (watchers only fire on change)
+  safeStorageSet(DASHBOARD_START_KEY, dashboardStartMonth.value)
+  safeStorageSet(DASHBOARD_END_KEY, dashboardEndMonth.value)
 
   // Clamp selectedYear/selectedMonth to dashboard range end on init
   const _initEnd = dashboardEndMonth.value || currentMonthKey.value
@@ -123,6 +129,9 @@ export const useFinanceStore = defineStore('finance', () => {
         health.value = value
         reviewCount.value = value?.needs_review ?? 0
         isReadOnly.value = value?.read_only === true
+        if (isReadOnly.value && safeStorageGet(HIDE_NUMBERS_KEY) === null) {
+          hideNumbers.value = true
+        }
       }, options)
     } catch {
       // no cached fallback available

@@ -155,11 +155,20 @@ class Orchestrator:
         subject = item.get("subject", "(No Subject)")
         date = (item.get("date_received") or ""
                 )[:16].replace("T", " ")
+
+        if result.provider.startswith("fallback_error:"):
+            body = (item.get("body_text") or "").strip()
+            content_label = "Body"
+            content = body[:800] if body else result.summary
+        else:
+            content_label = "Summary"
+            content = result.summary
+
         return (
             f"\U0001f514 {cat} "
             f"[{result.urgency.upper()}]\n"
             f"From: {sender}\n"
             f"Subject: {subject}\n"
             f"Date: {date}\n"
-            f"Summary: {result.summary}"
+            f"{content_label}: {content}"
         )
