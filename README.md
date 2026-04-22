@@ -26,13 +26,10 @@ A self-hosted, privacy-first system for email monitoring, iMessage alerts, bank 
 
 ```
 Internet (via Cloudflare Tunnel)
-  └── codingholic.fun  ·  Next.js public homepage  ·  port 3003 on NAS
-        Public: about, articles, planned BaZi app
-        Tool cards: private services labelled "Requires Tailscale"
-
-Tailscale VPN (private access only)
-  ├── mac.codingholic.fun  →  Mac finance API + PWA (:8090)  read/write
-  └── ro.codingholic.fun   →  NAS finance API + PWA (:8090)  read-only demo
+  ├── codingholic.fun  ·  Next.js public homepage  ·  port 3003 on NAS
+  │     Public: about, articles, planned BaZi app
+  ├── mac.codingholic.fun  →  Mac finance API + PWA (:8090)  read/write  ·  Cloudflare Access
+  └── ro.codingholic.fun   →  NAS finance API + PWA (:8090)  read-only   ·  Cloudflare Access
 
 Mac Mini (host)
   ├── Bridge  ·  Python  ·  127.0.0.1:9100
@@ -61,8 +58,8 @@ Synology DS920+ (always-on)
 | Surface | URL | Access |
 |---|---|---|
 | Public homepage | codingholic.fun | Open internet |
-| Finance dashboard (read/write) | mac.codingholic.fun | Tailscale only |
-| NAS read-only demo | ro.codingholic.fun | Tailscale only |
+| Finance dashboard (read/write) | mac.codingholic.fun | Cloudflare Access (password/SSO) |
+| NAS read-only demo | ro.codingholic.fun | Cloudflare Access (password/SSO) |
 | Household expense PWA | http://192.168.1.44:8088 | LAN only |
 
 ---
@@ -239,8 +236,8 @@ After each successful import the pipeline creates a new backup and syncs it to t
 
 ## Security
 
-- **Network boundary** — private tools are Tailscale-only. No public port forwarding.
-- **Authentication** — bridge bearer token: constant-time `hmac.compare_digest` with length equality pre-check. Finance API `X-Api-Key`: constant-time compare resolved at startup.
+- **Network boundary** — private tools protected by Cloudflare Access (password/SSO) + service tokens for programmatic API access. No public port forwarding.
+- **Authentication** — Cloudflare Access service tokens for API clients; Finance API `X-Api-Key`: constant-time compare at startup; bridge bearer token uses `hmac.compare_digest` with length equality pre-check.
 - **Injection defenses** — NAS SSH remote path uses `shlex.quote()`; mdfind predicate validates RFC 2822 message-ID format; PDF password tempfiles use `chmod 0o600` + zero-wipe before deletion. Gmail app passwords are stored in a gitignored `secrets/gmail.toml`, never in env vars or config.
 - **API hardening** — CORS wildcards forbidden at startup; all `limit=` params server-side capped at 1000; Pydantic request models have `max_length` bounds; `snapshot_date` validated as `YYYY-MM-DD` at the API boundary.
 - **Local-first** — financial data never leaves your Mac/NAS. No Google APIs, no external database, no cloud auth.
@@ -258,7 +255,7 @@ After each successful import the pipeline creates a new backup and syncs it to t
 | Docker Desktop | For agent + finance API containers |
 | Node.js 20+ | For PWA build |
 | Synology NAS *(optional)* | For read-only replica and NAS sync |
-| Tailscale *(optional)* | For private remote access from iPhone |
+| Cloudflare Tunnel + Access | For secure remote access (replaces Tailscale dependency) |
 
 ---
 

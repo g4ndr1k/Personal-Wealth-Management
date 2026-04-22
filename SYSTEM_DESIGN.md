@@ -1,6 +1,6 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.20.1 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅ · Public homepage with Snake game live ✅ · Multi-provider IMAP (Gmail + iCloud) ✅ · Household Expense PWA on NAS ✅ · Goal view (Investment Income tracking) ✅
+**Version:** 3.21.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅ · Public homepage with Snake game live ✅ · Multi-provider IMAP (Gmail + iCloud) ✅ · Household Expense PWA on NAS ✅ · Goal view (Investment Income tracking) ✅ · Premium monochromatic SVG icon system across all PWA views ✅
 **Platform:** Apple Silicon Mac · macOS · Synology DS920+ (AMD64 Docker)
 **Last validated against:** checked-in codebase 2026-04-22
 
@@ -60,7 +60,7 @@
 ### NAS — Read-Only Replica (live ✅)
 
 41. [NAS Read-Only Replica](#41-nas-read-only-replica)
-42. [HTTPS via Tailscale + Synology Reverse Proxy](#42-https-via-tailscale--synology-reverse-proxy)
+42. [HTTPS via Cloudflare Access](#42-https-via-cloudflare-access)
 
 ### Satellite — Household Expense PWA (NAS, port 8088)
 
@@ -234,15 +234,15 @@ The system alerts on:
   - `pwa/src/views/GroupDrilldown.vue` — Level 1 drill-down: group → category list with amounts, tx counts, mini bar chart
   - `pwa/src/views/CategoryDrilldown.vue` — Level 2 drill-down: category → transaction list with inline edit (merchant, category, alias, notes, apply-to-similar); breadcrumb back to group
   - `pwa/src/views/Transactions.vue` — unified filter panel card with 6-column labelled grid (year, month, owner, account with institution+owner labels sorted by owner→institution, category group, category), full-width search bar, and conditional reset button; server-side `account` filter param for exact match; supports deep-link query params (`year`, `month`, `owner`, `account`, `categoryGroup`, `category`, `q`) so the Call Over and Goal views can navigate to pre-filtered transactions; uses both `onMounted` and `onActivated` to re-sync filters from query params — required because the component is kept alive via `<KeepAlive>` and `onMounted` only fires on first render; paginated list (50/page), uncategorised-only filter, mobile expandable detail rows, desktop sortable table + detail panel; category-group filtering is resolved server-side via the `categories.category_group` reference data; transaction fetches bypass the long-lived GET cache so review status and category changes stay current; AI AMA input box (natural-language query → `POST /api/ai/query` → applies filters client-side); AI mode active banner with clear button; standard filter bars muted while AI mode active
-  - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback; review queue fetches bypass the 24-hour GET cache so desktop badge counts and queue contents stay consistent; on load it fires `POST /api/review-queue/suggest` in the background, refreshes when new hints arrive, shows a 🤖 badge for AI-enriched rows, and pre-fills merchant/category from `suggested_merchant` + `ollama_suggestion` while still requiring explicit user confirmation
-  - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, flag emojis
+  - `pwa/src/views/ReviewQueue.vue` — inline alias form on mobile; desktop two-pane review workspace; toast feedback; review queue fetches bypass the 24-hour GET cache so desktop badge counts and queue contents stay consistent; on load it fires `POST /api/review-queue/suggest` in the background, refreshes when new hints arrive, shows an SVG robot-icon AI badge for AI-enriched rows, and pre-fills merchant/category from `suggested_merchant` + `ollama_suggestion` while still requiring explicit user confirmation
+  - `pwa/src/views/ForeignSpend.vue` — foreign transactions grouped by currency, per-currency subtotals, country flag emoji as semantic currency identifiers (intentionally kept — not UI chrome)
   - `pwa/src/views/Adjustment.vue` — focused adjustment view (`/adjustment`): quick inline editing of market value, appraisal/statement date, and unrealized P&L for Real Estate and Jamsostek/Retirement holdings only; month picker reuses the same `wealthSnapshotDates` + `collapseMonthDates` pattern as Holdings; post-save `getHoldings` uses `forceFresh: true` to bypass the mobile-only 24 h IndexedDB cache so the updated value is immediately visible; `unrealised_pnl_idr` is preserved from the holding (not recalculated from cost basis) and exposed as an editable field to allow correction of previously stored values
   - `pwa/src/views/Audit.vue` — tabbed Audit section (`/audit`): **Call Over** tab (default) — side-by-side two-month asset comparison with variance; Cash & Liquid balance cells are clickable and navigate to `/transactions?year=…&month=…&account=…` with filters pre-populated; **PDF Completeness** tab — document completeness audit grid embedded via `AuditCompleteness.vue`; Call Over resolves the two latest months within `dashboardStartMonth`–`dashboardEndMonth`, fetches balances + holdings for both, deduplicates by month-key, and renders a grouped table (Cash & Liquid, Investments, Real Estate, Physical Assets) with per-row ▲/▼ variance, group subtotals, and grand total; assets present in one month but not the other show "—"; all rows sorted by biggest movers first; theme-aware styles with desktop dark-mode overrides
-  - `pwa/src/views/AuditCompleteness.vue` — document completeness audit grid (now embedded as a child tab inside Audit.vue): rows=bank entities, columns=last 3 months, cells=PDF filenames or ❌ Missing; "missing" is flagged only when an entity has files in other months but not this one (new entities with no files in any month show "—"); powered by `GET /api/audit/completeness`; Refresh button and `onMounted` both bypass the IndexedDB cache (`forceFresh: true`) so the view always reflects the current filesystem state
+  - `pwa/src/views/AuditCompleteness.vue` — document completeness audit grid (now embedded as a child tab inside Audit.vue): rows=bank entities, columns=last 3 months, cells=PDF filenames or an SVG X icon for "Missing"; "missing" is flagged only when an entity has files in other months but not this one (new entities with no files in any month show "—"); powered by `GET /api/audit/completeness`; Refresh button and `onMounted` both bypass the IndexedDB cache (`forceFresh: true`) so the view always reflects the current filesystem state
   - `pwa/src/views/Settings.vue` — Sync + Import actions, pipeline run/status card, API health status card, category editor (create + edit + rename existing categories with metadata such as icon/group/subcategory/budget/recurring), grouped PDF workspace, hash-retained PDF processing state, recursive subfolder support, persisted dashboard month-range controls, and a manual “Refresh Mobile Data Now” action for the iPhone PWA cache; desktop Settings now keeps the Backup and Household Expense sections collapsed by default and expands them on demand
   - `pwa/src/composables/useLayout.js` — responsive layout detection + persisted manual desktop override for wide-screen use
   - `pwa/src/composables/useFmt.js` — privacy-aware currency formatter composable; wraps `formatIDR` and returns `'Rp ••••••••'` when `store.hideNumbers` is true; used by all views and components instead of importing `formatIDR` directly, so a single store toggle masks every monetary value simultaneously
-  - `pwa/src/components/AppHeader.vue` — route-aware mobile header with sync status pill (red dot when offline) and `🙈/👁` privacy toggle button; tap sets `store.hideNumbers` and persists to `localStorage` (key `finance.hideNumbers`, default `true` so amounts are hidden on first open)
+  - `pwa/src/components/AppHeader.vue` — route-aware mobile header with sync status pill (red dot when offline) and SVG eye-icon privacy toggle button; tap sets `store.hideNumbers` and persists to `localStorage` (key `finance.hideNumbers`, default `true` so amounts are hidden on first open)
   - `pwa/src/components/` + `pwa/src/layouts/` — extracted shell pieces for mobile header/nav, desktop sidebar, desktop transactions table, and desktop review workspace; mobile offline state is indicated by the header status dot turning red instead of showing a blocking banner
   - `pwa/src/composables/useOfflineSync.js` — connectivity detection via periodic heartbeat (`GET /ping`, 30 s interval, 5 s `AbortController` timeout); catches `TypeError` (ERR_CONNECTION_REFUSED) and `AbortError` (ETIMEDOUT); probes immediately on mount and on tab foreground; browser `offline` event triggers immediate offline transition; `online` event triggers a probe rather than blindly trusting the OS signal; on recovery drains IndexedDB sync queue then calls the `onReconnect` callback
   - `pwa/src/stores/finance.js` — Pinia store: shared owners, accounts (distinct account numbers with institution/owner labels), categories, years, selectedYear/Month (initialized to `dashboardEndMonth` so Flows/Wealth/Assets open on the configured range end, not the current calendar month), reviewCount badge, reactive `currentMonthKey` computed property, dashboard month range with upper-bound validation, optional `forceFresh` bootstrap/resource loading for desktop and explicit refresh paths, `hideNumbers` ref (default `true`) + `setHideNumbers()` for the global privacy toggle, and **server-backed preferences**: on `bootstrap()` the store fetches `GET /api/preferences` and overrides localStorage values so the dashboard range is consistent across browsers and survives hard refreshes; `setDashboardRange()` debounces a `PUT /api/preferences` call (500 ms) so changes persist server-side while still writing to localStorage for instant local recovery
@@ -256,7 +256,7 @@ The system alerts on:
   - `bridge/gold_price.py` — fetches IDR price per gram of gold via the fawazahmed0 XAU/IDR API (same free no-key API as `bridge/fx_rate.py`; works for historical dates). Converts troy-ounce price to per-gram: `xau_idr / 31.1035`. Returns `None` on failure.
   - `scripts/seed_gold_holdings.py` — one-time (and repeatable) seeder for 14 Antam Logam Mulia gold bars in three weight classes (100 gr × 5, 50 gr × 5, 25 gr × 4). Fetches end-of-month XAU/IDR spot prices for every month from 2026-01 to today (excluding current incomplete month), inserts 3 `holdings` rows per month (`asset_class="gold"`), stores certificate numbers in `notes`. Uses `open_db()` from `finance.db`. Supports `--dry-run`, `--owner`, `--from YYYY-MM`, `--db`, `--institution` flags. Re-running refreshes prices (ON CONFLICT DO UPDATE).
 - Stage 3 Vue 3 PWA additions (`pwa/`) — see §38
-  - `pwa/src/views/MainDashboard.vue` — root landing page (`/`): premium desktop-first dashboard with total net worth hero, 30-day change, Chart.js asset-allocation doughnut, Chart.js assets-over-time bar chart, Chart.js cash-flow summary line chart, and a compact KPI stack embedded beside the allocation chart for better iPad/desktop proportions; all filtered by a user-selected month range (hard floor: Jan 2026)
+  - `pwa/src/views/MainDashboard.vue` — root landing page (`/`): premium desktop-first dashboard with total net worth hero, 30-day change, Chart.js asset-allocation doughnut, Chart.js assets-over-time bar chart, Chart.js cash-flow summary line chart, and a compact KPI stack (assets/liability/income/spending — each with a monochromatic SVG icon from `KPI_SVGS`) embedded beside the allocation chart for better iPad/desktop proportions; all filtered by a user-selected month range (hard floor: Jan 2026)
   - `pwa/src/views/Wealth.vue` — net worth dashboard: arrow month navigation, hero net-worth card with MoM change, asset-group breakdown bars with sub-category chips, month-over-month movement card, AI explanation panel, Chart.js trend, "Refresh Snapshot" button, FAB to Assets
   - `pwa/src/views/Holdings.vue` — asset manager: group filter tabs (All/Cash/Investments/Real Estate/Physical), snapshot date picker, per-item delete, FAB → bottom-sheet modal with 2-mode entry form (Balance / Holding), "Save Snapshot" button; ↺ inline refresh button in month-nav bar; holdings/balance fetches use `forceFresh: true` so newly added wealth items (for example `Grogol 2`) are visible immediately on desktop instead of being hidden behind stale IndexedDB GET cache
   - `pwa/src/views/Goal.vue` — Investment Income goal tracker (`/goal`): tracks progress toward Rp 600M/year target using `Investment Income` category only; summary stats (YTD total, monthly average, % of annual goal, on-track indicator); Chart.js monthly bar chart with dashed Rp 50M/month target line; Chart.js cumulative progress line vs prorated goal; month breakdown table with clickable amounts that drill to pre-filtered Transactions view (`category=Investment Income` + `year`/`month`); follows `dashboardStartMonth`–`dashboardEndMonth` range
@@ -264,7 +264,8 @@ The system alerts on:
   - `pwa/src/router/index.js` — root dashboard at `/`, restored Flows view at `/flows`, plus `/wealth`, `/holdings`, `/audit` (tabbed: Call Over + PDF Completeness), `/adjustment`, and `/goal` (Investment Income goal tracker, keepAlive)
   - `pwa/src/App.vue` — shell switcher between mobile and desktop layouts; route-aware title; desktop bootstrap forces fresh shared data while the iPhone/mobile PWA keeps the 24-hour cache policy; mobile bottom nav and desktop sidebar expose Dashboard, Flows, Wealth, Assets, Transactions, Goal, Review, Foreign Spend, Adjustment, Audit, and Settings/More
   - `pwa/src/components/BottomNav.vue` — mobile bottom nav: Dashboard, Flows, Wealth, Assets, Txns, Goal, Review, Adjust, More
-  - `pwa/src/components/DesktopSidebar.vue` — desktop sidebar: Dashboard, Flows, Wealth, Assets, Transactions, Goal, Review, Foreign Spend, Adjustment, Audit, Settings
+  - `pwa/src/components/DesktopSidebar.vue` — desktop sidebar: Dashboard, Flows, Wealth, Assets, Transactions, Goal, Review, Foreign Spend, Adjustment, Audit, Settings; all nav links use monochromatic thin-stroke SVG icons from `utils/icons.js`; footer shows formatted transaction count + SVG eye toggle
+  - `pwa/src/utils/icons.js` — **shared SVG icon constants** (single source of truth): `GROUP_SVGS` (8 spending groups), `NAV_SVGS` (11 nav links), `KPI_SVGS` (assets/liability/income/spending), `SECTION_SVGS` (cash/investments/bonds/stocks/funds/property/retirement/liability); plus named single-use SVGs: `EYE_SVG`, `CAMERA_SVG`, `COIN_SVG`, `SPARKLE_SVG`, `REFRESH_SVG`, `SAVE_SVG`, `FOLDER_SVG`, `CHECK_SVG`, `X_SVG`, `PEN_SVG`, `ROBOT_SVG`, `POINTER_SVG`, `DOCUMENT_SVG`, `DATABASE_SVG`, `INFO_SVG`, `GLOBE_SVG`; all use `viewBox="0 0 20 20" stroke="currentColor" stroke-width="1.5"` (hairline monochromatic, dark-mode–native)
 - NAS Read-Only Replica (`docker-compose.nas.yml`, `finance/backup.py`, `finance/api.py`, `pwa/`) — see §41
   - `FINANCE_READ_ONLY` env flag — when `true`, all write endpoints return 403; `GET /api/health` exposes `"read_only": true`
   - `require_writable` dependency guarded on 15+ write routes (aliases, backfill, category edits, import, wealth CRUD, review-queue suggest, nas-sync)
@@ -2059,10 +2060,10 @@ This section documents the security posture of the system following the April 20
 
 Access is protected at two levels:
 
-1. **Network layer** — Tailscale VPN. The finance API and PWA are only reachable from devices enrolled in your Tailscale tailnet. There is no public port forwarding.
-2. **Application layer** — `X-Api-Key` header on all finance API calls, bearer token on all bridge calls.
+1. **Network layer** — Cloudflare Access (password/SSO) for browser access; service tokens for programmatic API access. No public port forwarding.
+2. **Application layer** — `X-Api-Key` header on all finance API calls, bearer token on all bridge calls, `CF-Access-Client-Id` + `CF-Access-Client-Secret` headers on API requests.
 
-The API key embedded in the built PWA bundle is visible to anyone who can load the PWA. This is intentional — the key is a secondary signal; real protection is the Tailscale network boundary. Do not reuse this key for any external service.
+The API key embedded in the built PWA bundle is visible to anyone who can load the PWA. This is intentional — the key is a secondary signal; real protection is Cloudflare Access. Do not reuse this key for any external service.
 
 ### Authentication & authorization
 
@@ -2070,8 +2071,8 @@ The API key embedded in the built PWA bundle is visible to anyone who can load t
 |---|---|---|
 | Bridge HTTP API | Bearer token (constant-time `hmac.compare_digest` + length check) | `secrets/bridge.token` or macOS Keychain |
 | Finance FastAPI | `X-Api-Key` header (constant-time compare at startup) | `FINANCE_API_KEY` env var |
-| NAS replica | `FINANCE_READ_ONLY=true` + Tailscale | Write endpoints return 403 |
-| PWA | Same `X-Api-Key` embedded at build time | Tailscale ACLs are the real boundary |
+| NAS replica | `FINANCE_READ_ONLY=true` + Cloudflare Access | Write endpoints return 403 |
+| PWA | `X-Api-Key` + CF Access service token at build time | Cloudflare Access is the real boundary |
 
 ### Injection defenses
 
@@ -2096,7 +2097,7 @@ The API key embedded in the built PWA bundle is visible to anyone who can load t
 
 ### PWA security
 
-- `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: same-origin` should be added as middleware headers in `finance/api.py` for any future public-facing deployment. Currently the Tailscale-only access model makes CSP enforcement a low-priority addition.
+- `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: same-origin` should be added as middleware headers in `finance/api.py` for any future public-facing deployment. Currently Cloudflare Access-only protects write operations; CSP enforcement is a medium-priority addition.
 - The service worker mutations-cache has a 300-second max age so stale responses expire quickly.
 - Sensitive financial data is cleared from IndexedDB when the PWA is backgrounded (`visibilitychange` → `cacheClearAll()`).
 - The `/:pathMatch(.*)*` catch-all route redirects unknown URLs to `/` rather than showing a blank screen.
@@ -2116,7 +2117,7 @@ The bridge sends iMessages via AppleScript. The message **body** is passed via s
 
 | Risk | Mitigation status |
 |---|---|
-| API key visible in JS bundle | Documented; Tailscale-only trust model in place |
+| API key visible in JS bundle | Documented; Cloudflare Access + service tokens mitigate exposure |
 | No CSRF tokens on state-changing endpoints | Acceptable while key is in header (not cookie); document if auth ever moves to cookies |
 | No per-IP rate limiting on finance API | Current limiter is per-path shared across clients; `slowapi` or nginx would improve this |
 | Ollama prompt injection from email bodies | Input fenced and response validated; full isolation would require a sandboxed model |
@@ -2189,7 +2190,7 @@ ssh-copy-id -i secrets/nas_sync_key.pub -p 22 user@ds920plus
 | PDF parser | 3-layer pipeline (pdfplumber → regex → Ollama); complex or unusual statement formats may need a new parser file |
 | Categorizer | Layer 3 Ollama suggestions require manual confirmation; no auto-apply to prevent silent miscategorization |
 | NAS sync | 24-hour throttle on auto-sync; manual sync available via Settings or `POST /api/nas-sync` |
-| API key in bundle | `VITE_FINANCE_API_KEY` is embedded in the built PWA JS and visible in DevTools; mitigated by Tailscale-only access |
+| API key in bundle | `VITE_FINANCE_API_KEY` is embedded in the built PWA JS and visible in DevTools; mitigated by Cloudflare Access + service tokens |
 | Rate limiter | Per-path (not per-IP); a single client can saturate an endpoint for all others |
 | Timezone | Several datetime fields use local (naive) datetimes; `APPLE_EPOCH` and NAS sync state now use UTC but not all timestamps have been migrated |
 
@@ -2456,7 +2457,7 @@ The database and backup files are expected to use restrictive local permissions 
 
 ### AI refinement toggle
 
-AI enrichment in the Review Queue, Flows trend explanation, and Wealth trend explanation is **manual by default**. A toggle in Settings → "AI Refinement" controls `autoAiRefine` (Pinia store, persisted to localStorage). When off, a "✨ Get AI suggestions" / "✨ Refine with AI" button appears in each view for on-demand enrichment. When on, enrichment fires automatically on page load (original behaviour).
+AI enrichment in the Review Queue, Flows trend explanation, and Wealth trend explanation is **manual by default**. A toggle in Settings → "AI Refinement" controls `autoAiRefine` (Pinia store, persisted to localStorage). When off, a sparkle-icon "Get AI suggestions" / "Refine with AI" button appears in each view for on-demand enrichment. When on, enrichment fires automatically on page load (original behaviour).
 
 ### Alias backfill
 
@@ -2582,7 +2583,7 @@ The PWA provides:
 
 - Dashboard (main KPI landing page with Charts.js visualizations)
 - **Transactions** — filterable list with category-group/category/owner/search/date filters and inline category editing
-  - **Income group**: a `💰 Income` pseudo-group sends `income_only=true` to the API rather than a `category_group` param
+  - **Income group**: an "Income" pseudo-group option sends `income_only=true` to the API rather than a `category_group` param
   - **Save button**: category edit panel always starts with an empty dropdown selection; the Save button enables as soon as a category is chosen (prevents false-disabled state on re-open)
 - **Flows** — monthly income/expense bars (Transfer, Adjustment, Ignored, Opening Balance excluded from totals)
 - **Review Queue** — AI suggestions (on-demand or auto depending on `autoAiRefine` toggle)
@@ -2594,7 +2595,7 @@ GET responses are cached in IndexedDB (24 h TTL) for offline/mobile use, while s
 
 #### Read-only mode indicator
 
-When `FINANCE_READ_ONLY=true`, the PWA shows a small 👁 eye icon in the app header. Clicking it shows the read-only notice. Write controls (category edit, alias save, import, snapshot generation, etc.) are hidden via `v-if="!store.isReadOnly"`.
+When `FINANCE_READ_ONLY=true`, the PWA shows a small monochromatic SVG eye icon in the app header. Clicking it shows the read-only notice. Write controls (category edit, alias save, import, snapshot generation, etc.) are hidden via `v-if="!store.isReadOnly"`.
 
 ---
 
@@ -2845,6 +2846,19 @@ All endpoints under `/api/wealth/`. All require `X-Api-Key` header.
 
 ## 38. Stage 3 PWA Views
 
+### PWA Design System
+
+All views share a **premium monochromatic fintech aesthetic** ("Apple Wealth" style):
+
+| Principle | Implementation |
+|---|---|
+| No emoji as UI chrome | All section headers, nav links, KPI cards, and status indicators use thin-stroke SVGs |
+| Shared icon constants | `pwa/src/utils/icons.js` — single source of truth for all SVG strings; imported per view via named exports |
+| Monochromatic palette | All icons use `stroke="currentColor"` — they inherit `var(--primary-deep)` from the parent's CSS color, so they adapt to dark/light mode with zero extra CSS |
+| Hairline strokes | `stroke-width="1.5"` on a 20×20 grid; rendered at 14–20px so visual weight matches the typography |
+| `v-html` rendering | Each icon is a raw SVG string injected via `v-html`; `:deep(svg)` scoped selectors control the sizing |
+| Currency flags kept | `ForeignSpend.vue` retains flag emoji (🇺🇸🇪🇺…) — these are semantic currency identifiers, not UI decoration |
+
 ### `MainDashboard.vue` (`/`)
 
 Root landing page. Desktop-first premium layout with:
@@ -2923,7 +2937,7 @@ Tabbed audit view:
 
 ### `AuditCompleteness.vue`
 
-Document completeness grid: rows = bank entities, columns = last 3 months, cells = PDF filenames or ❌ Missing. New entities with no files in any month show "—". Always bypasses IndexedDB cache (`forceFresh: true`).
+Document completeness grid: rows = bank entities, columns = last 3 months, cells = PDF filenames or a monochromatic SVG X icon for "Missing". New entities with no files in any month show "—". Always bypasses IndexedDB cache (`forceFresh: true`).
 
 ---
 
@@ -2955,7 +2969,7 @@ Open `/review` in PWA. Assign categories to unrecognized merchants. Apply aliase
 
 ### 4. Update manually-tracked holdings via Adjustment view
 
-Open `/adjustment` in PWA (🔧 Adjust in bottom nav / sidebar):
+Open `/adjustment` in PWA (Adjust in bottom nav / sidebar):
 
 1. Select the target month from the date picker
 2. **Real Estate section**: for each property (Grogol, Kemanggisan, etc.):
@@ -3019,10 +3033,10 @@ Open `/audit` → PDF Completeness. Confirm all expected statements are present 
 
 ### Overview
 
-The Mac (authoritative) periodically syncs `finance.db` to a Synology DS920+ NAS via SSH. The NAS runs the same `finance-api` Docker image with `FINANCE_READ_ONLY=true`. iPhone connects to the NAS via **Tailscale** at `http://ds920plus.tail55bdc2.ts.net:8090` — this means the iPhone always hits the NAS container, never the Mac.
+The Mac (authoritative) periodically syncs `finance.db` to a Synology DS920+ NAS via SSH. The NAS runs the same `finance-api` Docker image with `FINANCE_READ_ONLY=true`. iPhone connects to the NAS via **Cloudflare Access** at `https://ro.codingholic.fun` — this means the iPhone always hits the NAS container, never the Mac.
 
 ```
-iPhone ──Tailscale──▶ ds920plus:8090  (NAS, always-on, read-only)
+iPhone ──Cloudflare Access──▶ ro.codingholic.fun ──▶ NAS:8090  (read-only)
 Mac                 ──LAN──▶ 192.168.1.44:8090  (NAS, local access)
 Mac                 ──localhost──▶ 127.0.0.1:8090  (Mac, read+write)
 ```
@@ -3039,7 +3053,7 @@ finance-api :8090  (read+write)                 finance-api-nas :8090 (read-only
 
 - NAS runs the **same Docker image** built for `linux/amd64` — no separate codebase
 - PWA detects `read_only: true` in `/api/health` and adapts the UI automatically
-- Read-only indicator is a 👁 eye icon in the app header (not a banner)
+- Read-only indicator is a monochromatic SVG eye icon in the app header (not a banner)
 
 ### Sync mechanism
 
@@ -3119,55 +3133,47 @@ docker run -d \
 ### Verification
 
 1. **NAS reachable (LAN)**: `curl -s http://192.168.1.44:8090/api/health` → `{"status":"ok","read_only":true}`
-2. **NAS reachable (Tailscale)**: `curl -s http://ds920plus.tail55bdc2.ts.net:8090/api/health` → same
+2. **NAS reachable (Cloudflare Access)**: `curl -s -H "CF-Access-Client-Id: ..." -H "CF-Access-Client-Secret: ..." https://ro.codingholic.fun/api/health` → same
 3. **Write blocked**: `curl -X POST http://192.168.1.44:8090/api/alias -H 'X-Api-Key: ...'` → 403
 4. **Data present**: `curl -s http://192.168.1.44:8090/api/transactions?limit=1` → returns transaction data
-5. **PWA loads on iPhone**: Open `http://ds920plus.tail55bdc2.ts.net:8090` — 👁 eye icon visible in header, write buttons hidden
+5. **PWA loads on iPhone**: Open `http://ds920plus.tail55bdc2.ts.net:8090` — SVG eye icon visible in header, write buttons hidden
 6. **sw.js cache header**: `curl -I http://192.168.1.44:8090/sw.js` → `cache-control: no-cache, no-store, must-revalidate`
 5. **Sync works**: Trigger manual sync from Mac Settings → verify `finance_readonly.db` timestamp updated on NAS
 
 ---
 
-## 42. HTTPS via Tailscale + Synology Reverse Proxy
+## 42. HTTPS via Cloudflare Access
 
 ### Goal
 
-Allow secure access to the NAS-hosted **read-only Finance Dashboard** using a custom domain:
+Allow secure access to the NAS-hosted **read-only Finance Dashboard** and Mac-hosted **read/write Dashboard** using custom domains protected by Cloudflare Access:
 
-https://codingholic.fun
+- https://ro.codingholic.fun (read-only, NAS)
+- https://mac.codingholic.fun (read/write, Mac)
 
 Requirements:
-- Only accessible when Tailscale VPN is ON
-- Not exposed to the public internet
-- Uses valid HTTPS (no browser warning)
-- Automatically renews certificates
+- Accessible from anywhere via Cloudflare Tunnel
+- Password-protected or SSO-gated via Cloudflare Access
+- Valid HTTPS with automatic certificate renewal
+- Service tokens for programmatic API access
 
 ### Architecture
 
 ```
-iPhone / Laptop (Tailscale ON)
+Browser / Mobile Client
         ↓
-codingholic.fun
-        ↓ (AdGuard DNS rewrite)
-100.x.x.x (Tailscale IP)
+Cloudflare Tunnel (ro.codingholic.fun or mac.codingholic.fun)
+        ↓ (Cloudflare Access login + service token validation)
+NAS:8090 or Mac:8090
         ↓
-Synology Reverse Proxy (DSM)
-        ↓
-127.0.0.1:8090
-        ↓
-finance-api (read-only, Docker)
+finance-api (Docker)
 ```
 
 ### DNS Setup
 
 #### Cloudflare (Public DNS)
 
-```
-Type: A
-Name: codingholic.fun
-Content: 100.x.x.x (Tailscale IP)
-Proxy: DNS only (IMPORTANT)
-```
+Configured via Cloudflare Tunnel ingress rules. No manual DNS records needed for `ro.codingholic.fun` or `mac.codingholic.fun` — the tunnel manages routing automatically.
 
 ⚠️ Do NOT enable proxy (orange cloud)
 
@@ -3193,54 +3199,33 @@ Destination:
   Port: 8090
 ```
 
-#### HTTPS Rule
+### Cloudflare Access Setup
+
+1. **Create Access Application** (Zero Trust → Access → Applications):
+   - Application name: `PWM Edit` (for `mac.codingholic.fun`)
+   - Domain: `mac.codingholic.fun`
+   - Authentication method: Password / SSO (your choice)
+   - Policies: Add policies for who can access
+
+2. **Create Service Token** (Access controls → Service credentials → Service Tokens):
+   - Name: `finance-pwa`
+   - This generates a `Client ID` and `Client Secret` for API programmatic access
+
+3. **Add Service Token Policy** to the Access application:
+   - Policy name: `finance-pwa`
+   - Action: `Service Auth`
+   - Include rule: `Service Token = finance-pwa`
+   - This allows the PWA to bypass the login challenge when `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers are present
+
+4. **Cloudflare Tunnel ingress** (on NAS, `.cloudflared/config.yml`):
+```yaml
+ingress:
+  - hostname: ro.codingholic.fun
+    service: http://127.0.0.1:8090
+  - hostname: mac.codingholic.fun
+    service: http://192.168.1.205:8090
+  - service: http_status:404
 ```
-Source:
-  Protocol: HTTPS
-  Hostname: codingholic.fun
-  Port: 443
-
-Destination:
-  Protocol: HTTP
-  Hostname: 127.0.0.1
-  Port: 8090
-```
-
-### HTTPS via acme.sh (DNS Challenge)
-
-#### Install acme.sh
-
-```bash
-cd ~
-curl -L https://github.com/acmesh-official/acme.sh/archive/master.tar.gz -o acme.tar.gz
-tar -xzf acme.tar.gz
-cd acme.sh-master
-./acme.sh --install --force
-```
-
-#### Set Let's Encrypt
-
-```bash
-~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-```
-
-#### Issue Certificate
-
-```bash
-export CF_Token="YOUR_CLOUDFLARE_API_TOKEN"
-
-~/.acme.sh/acme.sh --issue \
-  --dns dns_cf \
-  -d codingholic.fun \
-  -d '*.codingholic.fun'
-```
-
-#### Deploy to Synology DSM
-
-```bash
-export SYNO_SCHEME="http"
-export SYNO_HOSTNAME="localhost"
-export SYNO_PORT="5000"
 export SYNO_USERNAME="YOUR_DSM_ADMIN_USERNAME"
 export SYNO_PASSWORD="YOUR_DSM_ADMIN_PASSWORD"
 export SYNO_CREATE=1
@@ -3332,12 +3317,12 @@ Internet → Cloudflare Tunnel → codingholic.fun → NAS 127.0.0.1:3002 (prod)
 | Snake game | `/game` | Live | Canvas-based, localStorage leaderboard (top 3 initials + scores), keyboard/WASD/swipe/mobile D-pad |
 | Homepage card | `/` | Live | "Things anyone can explore" section |
 
-### Private Tools (Tailscale only)
+### Private Tools (Cloudflare Access)
 
 | Tool | URL | Notes |
 |------|-----|-------|
-| Personal Wealth Management | mac.codingholic.fun | Read/write finance dashboard |
-| Demo of PWM | ro.codingholic.fun | NAS read-only replica |
+| Personal Wealth Management | mac.codingholic.fun | Read/write finance dashboard — password/SSO protected |
+| Demo of PWM | ro.codingholic.fun | NAS read-only replica — password/SSO protected |
 | Future Lab | future.codingholic.fun | Internal experiments |
 
 ### Deploy Workflow
