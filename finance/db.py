@@ -445,9 +445,11 @@ def open_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA secure_delete=ON")
     conn.execute("PRAGMA auto_vacuum=FULL")
     conn.executescript(SCHEMA)
-    # Create the resolved view (DROP + CREATE to pick up schema changes)
-    conn.execute("DROP VIEW IF EXISTS transactions_resolved")
-    conn.executescript(TRANSACTIONS_RESOLVED_VIEW)
+    # Recreate the resolved view in a single executescript call so DROP and
+    # CREATE run back-to-back with no commit between them.  Splitting into
+    # execute() + executescript() committed the DROP before the CREATE ran,
+    # causing "no such table: transactions_resolved" on concurrent requests.
+    conn.executescript("DROP VIEW IF EXISTS transactions_resolved;\n" + TRANSACTIONS_RESOLVED_VIEW)
     if _needs_holdings_migration(conn):
         _rebuild_holdings_table(conn)
     if _needs_liabilities_migration(conn):

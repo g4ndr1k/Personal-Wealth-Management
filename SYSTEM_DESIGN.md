@@ -3281,6 +3281,117 @@ Permissions:
 chmod 600 /var/services/homes/g4ndr1k/.config/acme/env.sh
 ```
 
+### Cloudflare Security Rules (Custom Rules)
+
+#### Why this is needed
+
+The Finance PWA uses normal browser GET requests for page rendering, but some API endpoints also need legitimate non-GET requests (for example POST for manual write actions). A previous global rule blocked **all non-GET requests**, which unintentionally broke valid API calls to `mac.codingholic.fun/api/...` and caused `403 Attention Required` failures.
+
+To keep the public site protected **without** breaking the private finance API, the Cloudflare custom rules must exclude `/api/` traffic from the broad browser-style blocking rules.
+
+#### Current rule design
+
+These rules are configured in **Cloudflare Dashboard → Security → Security rules → Custom rules**.
+
+##### Rule 1 — Block path traversal
+Action: **Block**
+
+Expression:
+
+```text
+http.request.uri.path contains "../"
+```
+
+Purpose:
+- Blocks obvious path traversal probes
+- Applies to all paths, including `/api/`
+
+##### Rule 2 — Block non-GET/non-HEAD except API
+Action: **Block**
+
+Expression:
+
+```text
+(http.request.method ne "GET"
+ and http.request.method ne "HEAD"
+ and not starts_with(http.request.uri.path, "/api/"))
+```
+
+Purpose:
+- Keeps the public site mostly read-only from the internet
+- Still allows legitimate API POST/PUT/DELETE-style traffic under `/api/`
+
+##### Rule 3 — Block curl except API
+Action: **Block**
+
+Expression:
+
+```text
+(http.user_agent contains "curl"
+ and not starts_with(http.request.uri.path, "/api/"))
+```
+
+Purpose:
+- Blocks casual command-line probing of non-API routes
+- Still allows controlled API testing with `curl` for `/api/...`
+
+##### Rule 4 — Challenge non-browser traffic except API
+Action: **Managed Challenge** (or **Challenge**, depending on current Cloudflare UI)
+
+Expression:
+
+```text
+(not cf.client.bot
+ and not http.user_agent contains "Mozilla"
+ and not starts_with(http.request.uri.path, "/api/"))
+```
+
+Purpose:
+- Challenges suspicious non-browser traffic on normal site routes
+- Excludes `/api/` so the application API is not mistaken for a bot client
+
+#### Bot Fight Mode
+
+Bot Fight Mode may remain **ON**, but the custom rules above are still required.
+
+Reason:
+- Bot Fight Mode is acceptable for general site protection
+- The custom-rule exclusions ensure `/api/` traffic is not blocked by the stricter browser-oriented rules
+
+#### Important design note
+
+Do **not** use a global "block all non-GET" rule without the `/api/` exclusion.
+
+This was the direct cause of the earlier finance API issue:
+- `POST /api/wealth/holdings/rollover` was blocked at Cloudflare
+- the Assets / Holdings page depended on that POST during load
+- the page failed to render when Cloudflare returned 403
+
+#### Operational guidance
+
+When adding future Cloudflare custom rules:
+
+1. Assume browser-facing routes and API routes have different needs
+2. For broad traffic filters, always consider whether `/api/` must be excluded
+3. Prefer narrow exceptions over lowering zone-wide security settings
+4. Test both:
+   - normal browser navigation
+   - API requests such as:
+     ```bash
+     curl -X POST https://mac.codingholic.fun/api/wealth/holdings/rollover -v
+     ```
+
+#### Recommended long-term app behavior
+
+Even with the correct Cloudflare rules, frontend page load should **not** depend on a write operation.
+
+Preferred behavior:
+- page load uses GET only
+- backend handles any required carry-forward logic safely
+- page still renders even if a write path fails
+
+This avoids turning an edge security/proxy issue into a full UI outage.
+
 ### Security Notes
 
 - Domain resolves to Tailscale IP (100.x.x.x) → not publicly reachable

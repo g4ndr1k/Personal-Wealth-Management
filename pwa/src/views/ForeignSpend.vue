@@ -138,6 +138,7 @@ function ccyFlag() { return 'FX' }
 const { fmt } = useFmt()
 
 function fmtIDRCell(n) {
+  if (store.hideNumbers) return '••••••••'
   if (n === null || n === undefined) return '0'
   return new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 0,
@@ -146,6 +147,7 @@ function fmtIDRCell(n) {
 }
 
 function fmtFX(n) {
+  if (store.hideNumbers) return '••••'
   if (n === null || n === undefined) return '—'
   return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(n))
 }

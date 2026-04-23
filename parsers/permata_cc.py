@@ -123,7 +123,7 @@ _SEPARATOR_PATTERN = re.compile(
 
 # FX note: "US DOLLAR 12.99 (1 USD = Rp 16,919.17)"
 _FX_PATTERN = re.compile(
-    r"([A-Z]+)\s+([\d.]+)\s+\(1\s+\w+\s+=\s+Rp\s+([\d,.]+)\)"
+    r"[A-Z][A-Z ]+\s+([\d.]+)\s+\(1\s+([A-Z]+)\s+=\s+Rp\s+([\d,.]+)\)"
 )
 
 
@@ -184,8 +184,8 @@ def _parse_transactions_from_lines(
         fx_m = _FX_PATTERN.search(line)
         if fx_m and txns:
             # Attach FX to the last transaction
-            currency = fx_m.group(1)
-            fc_amount = float(fx_m.group(2).replace(",", ""))
+            currency = fx_m.group(2)   # ISO code from "(1 USD = ...)"
+            fc_amount = float(fx_m.group(1).replace(",", ""))
             rate = float(fx_m.group(3).replace(",", ""))
             last = txns[-1]
             last.currency = currency

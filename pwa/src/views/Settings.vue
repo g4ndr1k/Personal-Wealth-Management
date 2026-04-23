@@ -1,7 +1,35 @@
 <template>
-  <div>
-    <div class="section-hd"><span class="settings-head-icon" v-html="NAV_SVGS.Settings"></span> Settings</div>
-    <div class="settings-grid">
+  <div :class="['settings-page', { 'settings-page--desktop': isDesktop }]">
+
+    <div v-if="!isDesktop" class="section-hd">
+      <span class="settings-head-icon" v-html="NAV_SVGS.Settings"></span> Settings
+    </div>
+
+    <nav v-if="isDesktop" class="settings-sub-nav">
+      <div class="settings-sub-nav__title">Settings</div>
+      <template v-for="group in NAV_GROUPS" :key="group.label">
+        <div class="settings-sub-nav__group-label">{{ group.label }}</div>
+        <button
+          v-for="item in group.items"
+          :key="item.id"
+          class="settings-sub-nav__item"
+          :class="{ 'is-active': activeSection === item.id }"
+          @click="setActiveSection(item.id)"
+        >
+          <span class="settings-sub-nav__icon" v-html="item.icon"></span>
+          <span>{{ item.label }}</span>
+        </button>
+        <div class="settings-sub-nav__divider"></div>
+      </template>
+    </nav>
+
+    <div class="settings-content">
+      <div v-if="isDesktop" class="section-hd">
+        <span class="settings-head-icon" v-html="NAV_SVGS.Settings"></span> Settings
+      </div>
+
+      <Transition name="settings-fade" mode="out-in">
+      <div :key="isDesktop ? activeSection : 'all'" class="settings-grid">
 
     <ReadOnlyBanner />
 
@@ -32,9 +60,9 @@
       </div>
     </div>
 
-    <div class="settings-section-label">Preferences & Reference Data</div>
+    <div class="settings-section-label" v-show="!isDesktop">Preferences & Reference Data</div>
 
-    <div class="setting-card">
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'dashboard-range'">
       <div class="setting-title"><span class="setting-title-icon" v-html="NAV_SVGS.Dashboard"></span> Dashboard Range</div>
       <div class="setting-desc">
         Choose which months appear on the main dashboard. Months before Jan 2026 are always hidden.
@@ -78,7 +106,7 @@
       </div>
     </div>
 
-    <div class="setting-card">
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'categories'">
       <div class="setting-title"><span class="setting-title-icon" v-html="DOCUMENT_SVG"></span> Categories</div>
       <div class="setting-desc">
         Add a new category or edit an existing one. Renaming a category also updates existing transactions, overrides, and aliases.
@@ -156,7 +184,7 @@
     </div>
 
     <!-- Health status -->
-    <div class="setting-card">
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'api-status'">
       <div class="setting-title"><span class="setting-title-icon" v-html="INFO_SVG"></span> API Status</div>
       <div v-if="!store.health" class="loading" style="padding:10px 0"><div class="spinner"></div> Checking…</div>
       <div v-else>
@@ -185,7 +213,7 @@
       </div>
     </div>
 
-    <div class="setting-card">
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'mobile-cache'">
       <div class="setting-title"><span class="setting-title-icon" v-html="DATABASE_SVG"></span> Mobile Data Cache</div>
       <div class="setting-desc">
         iPhone PWA reads cached API data for up to 24 hours. Use this to pull fresh data immediately instead of waiting for the daily refresh window.
@@ -209,10 +237,10 @@
       </div>
     </div>
 
-    <div class="settings-section-label" v-if="!store.isReadOnly">Desktop Operations</div>
+    <div class="settings-section-label" v-show="!isDesktop" v-if="!store.isReadOnly">Desktop Operations</div>
 
     <!-- Import from XLSX -->
-    <div v-if="!store.isReadOnly" class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card" v-show="!isDesktop || activeSection === 'import-xlsx'">
       <div class="setting-title"><span class="setting-title-icon" v-html="DOCUMENT_SVG"></span> Import from XLSX</div>
       <div class="setting-desc">
         Read
@@ -262,7 +290,7 @@
       </div>
     </div>
 
-    <div v-if="!store.isReadOnly" class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card" v-show="!isDesktop || activeSection === 'pdf-pipeline'">
       <div class="setting-title"><span class="setting-title-icon" v-html="DOCUMENT_SVG"></span> PDF Pipeline</div>
       <div class="setting-desc">
         Run the end-to-end pipeline from <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">data/pdf_inbox</code>
@@ -310,7 +338,7 @@
     </div>
 
     <!-- ── Process Local PDFs ──────────────────────────────────────────────── -->
-    <div v-if="!store.isReadOnly" class="setting-card">
+    <div v-if="!store.isReadOnly" class="setting-card" v-show="!isDesktop || activeSection === 'process-pdfs'">
       <div class="setting-title"><span class="setting-title-icon" v-html="FOLDER_SVG"></span> Process Local PDFs</div>
       <div class="setting-desc">
         Scan <code style="font-size:11px;background:var(--bg);padding:2px 5px;border-radius:3px">data/pdf_inbox</code>
@@ -342,200 +370,194 @@
         </div>
 
         <div v-if="showPdfWorkspace" class="pdf-workspace">
-          <div class="pdf-workspace-toolbar">
-            <button
-              class="btn btn-ghost btn-sm"
-              :disabled="pdfWorkspace.loading || pdf.phase === 'processing'"
-              @click="loadPdfWorkspace"
-            >
-              {{ pdfWorkspace.loading ? 'Refreshing…' : 'Refresh' }}
-            </button>
-            <input
-              v-model.trim="pdfWorkspace.search"
-              class="pdf-search"
-              type="search"
-              placeholder="Search filename…"
-              :disabled="pdfWorkspace.loading"
-            />
-            <select
-              v-model="pdfWorkspace.folder"
-              class="pdf-filter"
-              :disabled="pdfWorkspace.loading"
-            >
-              <option value="all">All folders</option>
-              <option value="pdf_inbox">pdf_inbox</option>
-              <option value="pdf_unlocked">pdf_unlocked</option>
-            </select>
-          </div>
+          <div class="pdf-layout">
 
-          <div v-if="pdf.fatalError" class="alert alert-error" style="margin-top:10px">
-            {{ pdf.fatalError }}
-          </div>
-          <div v-else-if="pdfWorkspace.error" class="alert alert-error" style="margin-top:10px">
-            {{ pdfWorkspace.error }}
-          </div>
-
-          <div v-if="pdf.phase === 'processing' && pdf.total > 0" style="margin-top:12px">
-            <div class="pdf-summary-bar">
-              <span class="pdf-badge pdf-badge-ok"><span class="inline-icon" v-html="CHECK_SVG"></span>{{ pdfCounts.ok }}</span>
-              <span v-if="pdfCounts.skipped > 0" class="pdf-badge pdf-badge-skip">{{ pdfCounts.skipped }} skipped</span>
-              <span v-if="pdfCounts.error > 0" class="pdf-badge pdf-badge-err"><span class="inline-icon" v-html="X_SVG"></span>{{ pdfCounts.error }} failed</span>
-              <span class="pdf-badge pdf-badge-pend">{{ pdf.processed }} / {{ pdf.total }}</span>
-            </div>
-            <div class="pdf-progress-bar-wrap">
-              <div
-                class="pdf-progress-bar"
-                :style="{ width: Math.round(100 * pdf.processed / pdf.total) + '%' }"
-              ></div>
-            </div>
-            <div v-if="pdf.current" class="pdf-current-file">↳ {{ pdf.current }}</div>
-          </div>
-
-          <div v-if="pdfWorkspace.loading" class="pdf-empty-state">
-            <span class="spinner" style="width:16px;height:16px;border-width:2px"></span>
-            Loading local PDFs…
-          </div>
-
-          <template v-else>
-            <div v-if="visiblePdfFiles.length === 0" class="pdf-empty-state">
-              {{ pdfWorkspace.files.length === 0 ? 'No PDF files found in pdf_inbox or pdf_unlocked.' : 'No PDFs match the current search or folder filter.' }}
-            </div>
-
-            <div v-else class="pdf-groups">
-              <div class="pdf-groups-toolbar">
-                <label class="pdf-master-toggle">
-                  <input
-                    type="checkbox"
-                    :checked="allVisibleSelected"
-                    :disabled="pdf.phase === 'processing'"
-                    @change="toggleVisibleSelection($event.target.checked)"
-                  />
-                  <span>Select all matching PDFs</span>
-                </label>
+            <!-- ── LEFT: Controls sidebar ── -->
+            <div class="pdf-controls">
+              <div class="pdf-controls-toolbar">
+                <button
+                  class="btn btn-ghost btn-sm"
+                  :disabled="pdfWorkspace.loading || pdf.phase === 'processing'"
+                  @click="loadPdfWorkspace"
+                >
+                  {{ pdfWorkspace.loading ? 'Refreshing…' : 'Refresh' }}
+                </button>
+                <input
+                  v-model.trim="pdfWorkspace.search"
+                  class="pdf-search"
+                  type="search"
+                  placeholder="Search filename…"
+                  :disabled="pdfWorkspace.loading"
+                />
+                <select
+                  v-model="pdfWorkspace.folder"
+                  class="pdf-filter"
+                  :disabled="pdfWorkspace.loading"
+                >
+                  <option value="all">All folders</option>
+                  <option value="pdf_inbox">pdf_inbox</option>
+                  <option value="pdf_unlocked">pdf_unlocked</option>
+                </select>
               </div>
 
-              <section
-                v-for="institution in groupedPdfFiles"
-                :key="institution.key"
-                class="pdf-group-card"
-              >
-                <button
-                  class="pdf-group-header"
-                  type="button"
-                  @click="toggleInstitutionGroup(institution.key)"
-                >
-                  <div class="pdf-group-title">
-                    <span class="pdf-group-chevron">{{ isInstitutionExpanded(institution.key) ? '▾' : '▸' }}</span>
-                    <span>{{ institution.label }}</span>
-                  </div>
-                  <div class="pdf-group-meta">
-                    <span>{{ institution.fileCount }} PDFs</span>
-                    <span>{{ institution.months.length }} months</span>
-                  </div>
-                </button>
+              <div v-if="pdf.fatalError" class="alert alert-error">
+                {{ pdf.fatalError }}
+              </div>
+              <div v-else-if="pdfWorkspace.error" class="alert alert-error">
+                {{ pdfWorkspace.error }}
+              </div>
 
-                <div v-if="isInstitutionExpanded(institution.key)" class="pdf-month-list">
-                  <section
-                    v-for="month in institution.months"
-                    :key="month.key"
-                    class="pdf-month-card"
+              <div v-if="pdf.phase === 'processing' && pdf.total > 0" class="pdf-progress-panel">
+                <div class="pdf-summary-bar">
+                  <span class="pdf-badge pdf-badge-ok"><span class="inline-icon" v-html="CHECK_SVG"></span>{{ pdfCounts.ok }}</span>
+                  <span v-if="pdfCounts.skipped > 0" class="pdf-badge pdf-badge-skip">{{ pdfCounts.skipped }} skipped</span>
+                  <span v-if="pdfCounts.error > 0" class="pdf-badge pdf-badge-err"><span class="inline-icon" v-html="X_SVG"></span>{{ pdfCounts.error }} failed</span>
+                  <span class="pdf-badge pdf-badge-pend">{{ pdf.processed }} / {{ pdf.total }}</span>
+                </div>
+                <div class="pdf-progress-bar-wrap" style="margin-top:8px">
+                  <div
+                    class="pdf-progress-bar"
+                    :style="{ width: Math.round(100 * pdf.processed / pdf.total) + '%' }"
+                  ></div>
+                </div>
+                <div v-if="pdf.current" class="pdf-current-file">↳ {{ pdf.current }}</div>
+              </div>
+
+              <label v-if="!pdfWorkspace.loading && visiblePdfFiles.length > 0" class="pdf-master-toggle">
+                <input
+                  type="checkbox"
+                  :checked="allVisibleSelected"
+                  :disabled="pdf.phase === 'processing'"
+                  @change="toggleVisibleSelection($event.target.checked)"
+                />
+                <span>Select all matching PDFs</span>
+              </label>
+
+              <div class="pdf-controls-footer">
+                <div class="pdf-selection-note">
+                  {{ selectedPdfCount }} selected · {{ visiblePdfFiles.length }} shown · {{ pdfWorkspace.files.length }} total
+                </div>
+                <div class="pdf-controls-actions">
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    :disabled="selectedPdfCount === 0 || pdf.phase === 'processing'"
+                    @click="clearPdfSelection"
                   >
+                    Clear Selection
+                  </button>
+                  <button
+                    class="btn btn-primary btn-sm"
+                    :disabled="selectedPdfCount === 0 || pdf.phase === 'processing' || pdfWorkspace.loading"
+                    @click="processSelectedPdfs"
+                  >
+                    <span v-if="pdf.phase === 'processing'">
+                      <span class="spinner" style="width:14px;height:14px;border-width:2px"></span>
+                      Processing {{ pdf.processed }} / {{ pdf.total }}…
+                    </span>
+                    <span v-else>
+                      Process Selected
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── RIGHT: Content area ── -->
+            <div class="pdf-content">
+              <div v-if="pdfWorkspace.loading" class="pdf-empty-state">
+                <span class="spinner" style="width:16px;height:16px;border-width:2px"></span>
+                Loading local PDFs…
+              </div>
+
+              <template v-else>
+                <div v-if="visiblePdfFiles.length === 0" class="pdf-empty-state">
+                  {{ pdfWorkspace.files.length === 0 ? 'No PDF files found in pdf_inbox or pdf_unlocked.' : 'No PDFs match the current search or folder filter.' }}
+                </div>
+
+                <div v-else class="pdf-groups">
+                  <!-- Ready to Process (aggregate view) -->
+                  <section class="pdf-group-card">
                     <button
-                      class="pdf-month-header"
+                      class="pdf-group-header"
                       type="button"
-                      @click="toggleMonthGroup(month.key)"
+                      @click="pdfExpanded.readyToProcess = !pdfExpanded.readyToProcess"
                     >
                       <div class="pdf-group-title">
-                        <span class="pdf-group-chevron">{{ isMonthExpanded(month.key) ? '▾' : '▸' }}</span>
-                        <span>{{ month.label }}</span>
+                        <span class="pdf-group-chevron">{{ pdfExpanded.readyToProcess ? '▾' : '▸' }}</span>
+                        <span>Ready to Process</span>
                       </div>
                       <div class="pdf-group-meta">
-                        <span>{{ month.files.length }} PDFs</span>
+                        <span>{{ readyToProcessFiles.length }} PDFs</span>
+                        <span>{{ groupedReadyToProcess.length }} banks</span>
+                      </div>
+                    </button>
+                    <div v-if="pdfExpanded.readyToProcess" class="pdf-month-list">
+                      <template v-if="readyToProcessFiles.length === 0">
+                        <div class="pdf-empty-state" style="padding:16px">All processed</div>
+                      </template>
+                      <template v-else>
+                        <PdfFileTable :files="readyToProcessFiles" :processing="pdf.phase === 'processing'" />
+                      </template>
+                    </div>
+                  </section>
+
+                  <!-- Bank sections -->
+                  <section
+                    v-for="institution in groupedPdfFiles"
+                    :key="institution.key"
+                    class="pdf-group-card"
+                  >
+                    <button
+                      class="pdf-group-header"
+                      type="button"
+                      @click="toggleInstitutionGroup(institution.key)"
+                    >
+                      <div class="pdf-group-title">
+                        <span class="pdf-group-chevron">{{ isInstitutionExpanded(institution.key) ? '▾' : '▸' }}</span>
+                        <span>{{ institution.label }}</span>
+                      </div>
+                      <div class="pdf-group-meta">
+                        <span>{{ institution.fileCount }} PDFs</span>
+                        <span>{{ institution.months.length }} months</span>
                       </div>
                     </button>
 
-                    <div v-if="isMonthExpanded(month.key)" class="pdf-table-wrap">
-                      <table class="pdf-table">
-                        <thead>
-                          <tr>
-                            <th class="pdf-checkbox-col"></th>
-                            <th>PDF File</th>
-                            <th>Folder</th>
-                            <th>Last Processed</th>
-                            <th>Status</th>
-                            <th>Details</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr v-for="file in month.files" :key="file.key">
-                            <td class="pdf-checkbox-col">
-                              <input
-                                v-model="file.selected"
-                                type="checkbox"
-                                :disabled="pdf.phase === 'processing'"
-                              />
-                            </td>
-                            <td>
-                              <div class="pdf-name-cell">
-                                <div class="pdf-name-main">{{ file.filename }}</div>
-                                <div class="pdf-name-sub">
-                                  <span v-if="file.relativeDir">{{ file.relativeDir }} · </span>
-                                  {{ formatPdfSize(file.sizeKb) }} · Modified {{ formatPdfDate(file.mtime) }}
-                                </div>
-                              </div>
-                            </td>
-                            <td>
-                              <span class="pdf-folder-pill">{{ file.folder }}</span>
-                            </td>
-                            <td>{{ formatPdfDate(file.lastProcessedAt, true) }}</td>
-                            <td>
-                              <span :class="['pdf-status-chip', `pdf-status-${getPdfStatusClass(file)}`]">
-                                {{ getPdfStatusLabel(file) }}
-                              </span>
-                            </td>
-                            <td class="pdf-detail-cell">{{ getPdfDetail(file) }}</td>
-                          </tr>
-                        </tbody>
-                      </table>
+                    <div v-if="isInstitutionExpanded(institution.key)" class="pdf-month-list">
+                      <section
+                        v-for="month in institution.months"
+                        :key="month.key"
+                        class="pdf-month-card"
+                      >
+                        <button
+                          class="pdf-month-header"
+                          type="button"
+                          @click="toggleMonthGroup(month.key)"
+                        >
+                          <div class="pdf-group-title">
+                            <span class="pdf-group-chevron">{{ isMonthExpanded(month.key) ? '▾' : '▸' }}</span>
+                            <span>{{ month.label }}</span>
+                          </div>
+                          <div class="pdf-group-meta">
+                            <span>{{ month.files.length }} PDFs</span>
+                          </div>
+                        </button>
+
+                        <div v-if="isMonthExpanded(month.key)" class="pdf-table-wrap">
+                          <PdfFileTable :files="month.files" :processing="pdf.phase === 'processing'" />
+                        </div>
+                      </section>
                     </div>
                   </section>
                 </div>
-              </section>
+              </template>
             </div>
-          </template>
 
-          <div class="pdf-workspace-footer">
-            <div class="pdf-selection-note">
-              {{ selectedPdfCount }} selected · {{ visiblePdfFiles.length }} shown · {{ pdfWorkspace.files.length }} total
-            </div>
-            <div class="pdf-workspace-footer-actions">
-              <button
-                class="btn btn-ghost btn-sm"
-                :disabled="selectedPdfCount === 0 || pdf.phase === 'processing'"
-                @click="clearPdfSelection"
-              >
-                Clear Selection
-              </button>
-              <button
-                class="btn btn-primary btn-sm"
-                :disabled="selectedPdfCount === 0 || pdf.phase === 'processing' || pdfWorkspace.loading"
-                @click="processSelectedPdfs"
-              >
-                <span v-if="pdf.phase === 'processing'">
-                  <span class="spinner" style="width:14px;height:14px;border-width:2px"></span>
-                  Processing {{ pdf.processed }} / {{ pdf.total }}…
-                </span>
-                <span v-else>
-                  Process Selected
-                </span>
-              </button>
-            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <div v-if="!store.isReadOnly" class="setting-card setting-card--collapsible">
+    <div v-if="!store.isReadOnly" class="setting-card setting-card--collapsible" v-show="!isDesktop || activeSection === 'backup'">
       <button
         class="setting-card__toggle"
         type="button"
@@ -589,7 +611,7 @@
     </div>
 
     <!-- NAS Sync (only when writable and NAS is configured) -->
-    <div v-if="!store.isReadOnly && nasSyncStatus.configured" class="setting-card">
+    <div v-if="!store.isReadOnly && nasSyncStatus.configured" class="setting-card" v-show="!isDesktop || activeSection === 'nas-sync'">
       <div class="setting-title"><span class="setting-title-icon" v-html="REFRESH_SVG"></span> NAS Sync</div>
       <div class="setting-desc">
         Push the latest available backup to the NAS replica so the always-on copy stays current.
@@ -615,9 +637,9 @@
       </div>
     </div>
 
-    <div class="settings-section-label">Connected Satellites & Automation</div>
+    <div class="settings-section-label" v-show="!isDesktop">Connected Satellites & Automation</div>
 
-    <div v-if="!store.isReadOnly" class="setting-card setting-card--collapsible">
+    <div v-if="!store.isReadOnly" class="setting-card setting-card--collapsible" v-show="!isDesktop || activeSection === 'household'">
       <button
         class="setting-card__toggle"
         type="button"
@@ -829,7 +851,7 @@
     </div>
 
 
-    <div class="setting-card">
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'ai-refinement'">
       <div class="setting-title"><span class="setting-title-icon" v-html="ROBOT_SVG"></span> AI Refinement</div>
       <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
         When enabled, Flows and Wealth automatically call the local AI (Ollama) to enrich trend explanations, and Review Queue auto-generates category suggestions.
@@ -848,7 +870,7 @@
       </div>
     </div>
 
-    <div class="setting-card">
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'about'">
       <div class="setting-title"><span class="setting-title-icon" v-html="INFO_SVG"></span> About</div>
       <div class="about-stack">
         <div><strong>Finance Dashboard</strong> — Stage 3 wealth cockpit + operations console</div>
@@ -868,6 +890,9 @@
       </div>
     </div>
     </div>
+    </Transition>
+    </div>
+
   </div>
 </template>
 
@@ -876,11 +901,64 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api/client.js'
 import { useFinanceStore } from '../stores/finance.js'
 import ReadOnlyBanner from '../components/ReadOnlyBanner.vue'
+import PdfFileTable from '../components/PdfFileTable.vue'
+import { formatPdfDate, formatPdfSize, truncateText, getPdfStatusClass, getPdfStatusLabel, getPdfDetail, isPdfReadyToProcess, groupFilesByInstitution } from '../utils/pdfFormatters.js'
 import { useLayout } from '../composables/useLayout.js'
 import { NAV_SVGS, EYE_SVG, REFRESH_SVG, SAVE_SVG, CHECK_SVG, X_SVG, ROBOT_SVG, DOCUMENT_SVG, FOLDER_SVG, DATABASE_SVG, INFO_SVG } from '../utils/icons.js'
 
 const store = useFinanceStore()
 const { isDesktop } = useLayout()
+
+// ── Desktop two-column nav state ──
+const SETTINGS_SECTION_KEY = 'settings_active_section'
+
+function readStoredSection() {
+  try { return localStorage.getItem(SETTINGS_SECTION_KEY) || 'dashboard-range' } catch { return 'dashboard-range' }
+}
+
+const activeSection = ref(readStoredSection())
+
+function setActiveSection(id) {
+  activeSection.value = id
+  try { localStorage.setItem(SETTINGS_SECTION_KEY, id) } catch {}
+  if (isDesktop.value) {
+    requestAnimationFrame(() => {
+      document.querySelector('.settings-content')?.scrollTo({ top: 0 })
+    })
+  }
+}
+
+const showNasNav = computed(() => !store.isReadOnly && nasSyncStatus.value.configured)
+
+const NAV_GROUPS = computed(() => [
+  {
+    label: 'Preferences',
+    items: [
+      { id: 'dashboard-range', label: 'Dashboard Range',  icon: NAV_SVGS.Dashboard },
+      { id: 'categories',      label: 'Categories',       icon: DOCUMENT_SVG },
+      { id: 'api-status',      label: 'API Status',       icon: INFO_SVG },
+      { id: 'mobile-cache',    label: 'Mobile Data Cache', icon: DATABASE_SVG },
+    ],
+  },
+  ...(!store.isReadOnly ? [{
+    label: 'Desktop Ops',
+    items: [
+      { id: 'import-xlsx',  label: 'Import from XLSX',   icon: DOCUMENT_SVG },
+      { id: 'pdf-pipeline', label: 'PDF Pipeline',       icon: REFRESH_SVG },
+      { id: 'process-pdfs', label: 'Process Local PDFs', icon: FOLDER_SVG },
+      { id: 'backup',       label: 'Backup',             icon: SAVE_SVG },
+      ...(nasSyncStatus.value.configured ? [{ id: 'nas-sync', label: 'NAS Sync', icon: REFRESH_SVG }] : []),
+    ],
+  }] : []),
+  {
+    label: 'Connected',
+    items: [
+      ...(!store.isReadOnly ? [{ id: 'household', label: 'Household Expense', icon: NAV_SVGS.Assets }] : []),
+      { id: 'ai-refinement', label: 'AI Refinement', icon: ROBOT_SVG },
+      { id: 'about',         label: 'About',         icon: INFO_SVG },
+    ],
+  },
+])
 
 const importState    = ref({ loading: false, result: null, error: null })
 const backupState    = ref({ loading: false, error: null, status: null, result: null })
@@ -1003,9 +1081,22 @@ const pdfWorkspace = ref({
 const pdfExpanded = ref({
   institutions: {},
   months: {},
+  readyToProcess: true,
 })
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+// ── Derived Data Flow ─────────────────────────────────────────────────────
+//
+//   pdfWorkspace.files        (single source — raw from API)
+//     → visiblePdfFiles        (search + folder filter)
+//     → readyToProcessFiles    (filter: isPdfReadyToProcess, sorted oldest-first)
+//     → groupedReadyToProcess  (groupFilesByInstitution)
+//     → groupedPdfFiles        (groupFilesByInstitution, byPeriod: true)
+//
+//   All transformations are derived (no mutation of source).
+//   pdfWorkspace.files is never modified by display logic.
+// ──────────────────────────────────────────────────────────────────────────
 
 const visiblePdfFiles = computed(() => {
   const q = pdfWorkspace.value.search.trim().toLowerCase()
@@ -1032,49 +1123,23 @@ const allVisibleSelected = computed(() =>
   visiblePdfFiles.value.length > 0 && visiblePdfFiles.value.every(file => file.selected)
 )
 
-const groupedPdfFiles = computed(() => {
-  const groups = new Map()
-
-  for (const file of visiblePdfFiles.value) {
-    const institutionKey = file.institutionKey
-    if (!groups.has(institutionKey)) {
-      groups.set(institutionKey, {
-        key: institutionKey,
-        label: file.institutionLabel,
-        months: new Map(),
-        fileCount: 0,
-      })
-    }
-
-    const institution = groups.get(institutionKey)
-    institution.fileCount += 1
-
-    if (!institution.months.has(file.monthKey)) {
-      institution.months.set(file.monthKey, {
-        key: file.monthKey,
-        label: file.monthLabel,
-        sortKey: file.monthSortKey,
-        files: [],
-      })
-    }
-
-    institution.months.get(file.monthKey).files.push(file)
-  }
-
-  return Array.from(groups.values())
-    .map((institution) => ({
-      ...institution,
-      months: Array.from(institution.months.values())
-        .sort((a, b) => b.sortKey.localeCompare(a.sortKey))
-        .map((month) => ({
-          ...month,
-          files: month.files.slice().sort((a, b) =>
-            a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true, sensitivity: 'base' })
-          ),
-        })),
-    }))
-    .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+const readyToProcessFiles = computed(() => {
+  const files = visiblePdfFiles.value.filter(isPdfReadyToProcess)
+  files.sort((a, b) => {
+    const byInst = a.institutionLabel.localeCompare(b.institutionLabel, undefined, { sensitivity: 'base' })
+    if (byInst !== 0) return byInst
+    return a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true, sensitivity: 'base' })
+  })
+  return files
 })
+
+const groupedReadyToProcess = computed(() =>
+  groupFilesByInstitution(readyToProcessFiles.value)
+)
+
+const groupedPdfFiles = computed(() =>
+  groupFilesByInstitution(visiblePdfFiles.value, { byPeriod: true })
+)
 
 const pdfCounts = computed(() => {
   const counts = { ok: 0, skipped: 0, error: 0 }
@@ -1165,23 +1230,6 @@ async function pollStatus(jobId, timeoutMs = 180_000, signal = null) {
   throw new Error('Timed out after 3 min')
 }
 
-function formatPdfDate(value, includeTime = false) {
-  if (!value) return 'Never'
-  const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Never'
-  return date.toLocaleString([], includeTime
-    ? { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
-    : { year: 'numeric', month: 'short', day: 'numeric' })
-}
-
-function formatPdfSize(sizeKb) {
-  return `${Number(sizeKb || 0).toFixed(1)} KB`
-}
-
-function truncateText(text, max = 80) {
-  return text && text.length > max ? `${text.slice(0, max - 1)}…` : (text || '')
-}
-
 function inferInstitution(filename) {
   const upper = filename.toUpperCase()
   if (upper.includes('BNI_SEKURITAS')) return { key: 'bni-sekuritas', label: 'BNI Sekuritas' }
@@ -1201,6 +1249,8 @@ function inferMonthBucket(filename) {
   const monthNameMap = {
     JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
     JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
+    JANUARY: '01', FEBRUARY: '02', MARCH: '03', APRIL: '04', JUNE: '06',
+    JULY: '07', AUGUST: '08', SEPTEMBER: '09', OCTOBER: '10', NOVEMBER: '11', DECEMBER: '12',
   }
 
   const candidates = [
@@ -1209,6 +1259,10 @@ function inferMonthBucket(filename) {
     name.match(/(20\d{2})-(\d{2})-(\d{2})/),
     name.match(/(20\d{2})(\d{2})(\d{2})/),
     name.match(/(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(20\d{2})/),
+    // Full or abbreviated month names with space/underscore, e.g. "February 26 0226"
+    name.match(/(?:^|[\s_])(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|JAN|FEB|MAR|APR|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[\s_]\d{1,2}[\s_](\d{2,4})(?=\.|[\s_]|$)/),
+    // 4-digit MMYY code near end of filename, e.g. "...0226.pdf" where MM=02, YY=26
+    name.match(/(\d{2})(\d{2})\.PDF$/),
   ].filter(Boolean)
 
   for (const match of candidates) {
@@ -1227,6 +1281,17 @@ function inferMonthBucket(filename) {
     } else {
       year = match[1]
       month = match[2]
+    }
+
+    // Normalize year to 4-digit: "26" → "2026", "0226" (MMYY) → "2026"
+    if (/^\d{2}$/.test(year)) {
+      year = '20' + year
+    } else if (/^\d{4}$/.test(year) && !year.startsWith('20')) {
+      // MMYY format: first 2 digits are month, last 2 are year
+      const yPart = year.slice(2)
+      if (Number(year.slice(0, 2)) >= 1 && Number(year.slice(0, 2)) <= 12) {
+        year = '20' + yPart
+      }
     }
 
     if (/^20\d{2}$/.test(year) && Number(month) >= 1 && Number(month) <= 12) {
@@ -1320,34 +1385,6 @@ function toggleInstitutionGroup(key) {
 
 function toggleMonthGroup(key) {
   pdfExpanded.value.months[key] = !pdfExpanded.value.months[key]
-}
-
-function getPdfStatusClass(file) {
-  if (file.processingState) return file.processingState
-  if (file.lastStatus === 'done') return 'ok'
-  if (file.lastStatus === 'error') return 'error'
-  if (file.lastStatus === 'pending') return 'pending'
-  return 'new'
-}
-
-function getPdfStatusLabel(file) {
-  const status = getPdfStatusClass(file)
-  return {
-    new: 'New',
-    pending: 'Pending',
-    processing: 'Processing',
-    ok: 'Done',
-    skipped: 'Skipped',
-    error: 'Failed',
-  }[status] || 'New'
-}
-
-function getPdfDetail(file) {
-  if (file.processingState === 'processing') return 'Processing now…'
-  if (file.processingMeta) return file.processingMeta
-  if (file.lastStatus === 'error' && file.lastError) return truncateText(file.lastError, 120)
-  if (file.lastStatus === 'done') return 'Processed previously'
-  return 'Ready to process'
 }
 
 function applyPdfRunResult(file, final) {
@@ -1708,6 +1745,15 @@ onMounted(async () => {
   await loadPipelineStatus()
   await loadNasSyncStatus()
   await loadHouseholdSettings()
+
+  // ── Guard: reset active section if invalid for current mode ──
+  const RESTRICTED = ['import-xlsx','pdf-pipeline','process-pdfs','backup','nas-sync','household']
+  if (store.isReadOnly && RESTRICTED.includes(activeSection.value)) {
+    activeSection.value = 'dashboard-range'
+  }
+  if (activeSection.value === 'nas-sync' && !nasSyncStatus.value.configured) {
+    activeSection.value = 'dashboard-range'
+  }
 })
 </script>
 
@@ -2243,15 +2289,15 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
 }
 
 .pdf-master-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: rgba(255,255,255,0.72);
 }
 
@@ -2317,8 +2363,8 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  font-size: 11px;
-  color: rgba(255,255,255,0.56);
+  font-size: 12px;
+  color: rgba(255,255,255,0.72);
 }
 
 .pdf-table-wrap {
@@ -2329,81 +2375,7 @@ onMounted(async () => {
   background: rgba(7,14,25,0.82);
 }
 
-.pdf-table {
-  width: 100%;
-  min-width: 760px;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.pdf-table th {
-  padding: 10px 12px;
-  text-align: left;
-  font-size: 11px;
-  color: rgba(191,219,254,0.72);
-  text-transform: uppercase;
-  letter-spacing: .03em;
-  border-bottom: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.03);
-}
-
-.pdf-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-  vertical-align: middle;
-  color: rgba(255,255,255,0.82);
-}
-
-.pdf-table tbody tr:hover td {
-  background: rgba(59,130,246,0.10);
-}
-
-.pdf-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.pdf-checkbox-col {
-  width: 38px;
-}
-
-.pdf-name-cell {
-  min-width: 0;
-}
-
-.pdf-name-main {
-  font-weight: 600;
-  color: rgba(255,255,255,0.95);
-  word-break: break-word;
-}
-
-.pdf-name-sub {
-  margin-top: 2px;
-  font-size: 11px;
-  color: rgba(255,255,255,0.54);
-}
-
-.pdf-folder-pill,
-.pdf-status-chip {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.pdf-folder-pill {
-  background: rgba(148,163,184,0.14);
-  color: rgba(191,219,254,0.90);
-}
-
-.pdf-status-new        { background: rgba(148,163,184,0.18); color: rgba(226,232,240,0.95); }
-.pdf-status-pending    { background: rgba(59,130,246,0.18); color: #93c5fd; }
-.pdf-status-processing { background: rgba(96,165,250,0.24); color: #dbeafe; }
-.pdf-status-ok         { background: rgba(34,197,94,0.18); color: #86efac; }
-.pdf-status-skipped    { background: rgba(245,158,11,0.18); color: #fcd34d; }
-.pdf-status-error      { background: rgba(239,68,68,0.18); color: #fca5a5; }
+/* PdfFileTable.vue owns its own grid + chip styles via scoped <style scoped> */
 
 .pdf-detail-cell {
   max-width: 240px;
@@ -2447,14 +2419,89 @@ onMounted(async () => {
   accent-color: #60a5fa;
 }
 
+/* ── Two-column layout ─────────────────────────────────────────────────── */
+.pdf-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.pdf-controls {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pdf-controls-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.pdf-controls-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+.pdf-controls-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pdf-controls-actions .btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.pdf-progress-panel {
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.02);
+}
+
+.pdf-content {
+  min-width: 0;
+}
+
+.pdf-content .pdf-groups {
+  margin-top: 0;
+}
+
+@media (max-width: 1024px) {
+  .pdf-layout {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .pdf-controls {
+    position: static;
+  }
+
+  .pdf-controls-toolbar {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .pdf-controls-toolbar .btn {
+    flex: 0 0 auto;
+    width: auto;
+  }
+}
+
 @media (max-width: 820px) {
   .pdf-workspace {
     padding: 10px;
   }
 
-  .pdf-workspace-toolbar,
-  .pdf-workspace-footer,
-  .pdf-groups-toolbar,
   .pdf-group-header,
   .pdf-month-header {
     flex-direction: column;
@@ -2465,13 +2512,8 @@ onMounted(async () => {
     justify-content: space-between;
   }
 
-  .pdf-workspace-footer-actions {
-    justify-content: stretch;
-  }
-
-  .pdf-workspace-footer-actions .btn {
-    width: 100%;
-    justify-content: center;
+  .pdf-row {
+    grid-template-columns: minmax(0, 1fr) 110px 80px;
   }
 }
 
@@ -2482,5 +2524,119 @@ onMounted(async () => {
     gap: 16px;
     align-items: start;
   }
+}
+
+/* ── Two-column desktop shell ──────────────────────────────────────────── */
+.settings-page--desktop {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  align-items: start;
+  min-height: 100%;
+}
+
+.settings-content { min-width: 0; }
+
+/* ── Left nav — pixel-match DesktopSidebar.vue ─────────────────────────── */
+.settings-sub-nav {
+  width: 240px;
+  position: sticky;
+  top: 0;
+  padding: 16px 10px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid rgba(136,189,242,0.16);
+  min-height: calc(100vh - 48px);
+  margin-right: 24px;
+}
+
+.settings-sub-nav__title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  padding: 4px 12px 12px;
+}
+
+.settings-sub-nav__group-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 8px 12px 4px;
+}
+
+.settings-sub-nav__divider {
+  height: 1px;
+  background: rgba(136,189,242,0.12);
+  margin: 6px 12px;
+}
+
+/* mirrors .desktop-sidebar__link exactly */
+.settings-sub-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.70);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  width: 100%;
+}
+.settings-sub-nav__item:hover {
+  background: rgba(136,189,242,0.12);
+  color: #fff;
+}
+.settings-sub-nav__item.is-active {
+  background: linear-gradient(180deg, rgba(136,189,242,0.22), rgba(106,137,167,0.15));
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(189,221,252,0.22);
+}
+
+/* mirrors .sidebar-icon exactly */
+.settings-sub-nav__icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--primary-deep);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.75;
+  transition: opacity 0.12s;
+}
+.settings-sub-nav__icon :deep(svg) { width: 16px; height: 16px; }
+.settings-sub-nav__item:hover .settings-sub-nav__icon,
+.settings-sub-nav__item.is-active .settings-sub-nav__icon {
+  opacity: 1;
+  color: var(--primary);
+}
+
+/* Force single card per row in right panel (existing grid is 1fr 1fr on desktop) */
+.settings-page--desktop .settings-grid {
+  grid-template-columns: 1fr !important;
+}
+
+/* ── Section switch fade (140ms, snappy) ────────────────────────────────── */
+.settings-fade-enter-active,
+.settings-fade-leave-active { transition: opacity 0.14s ease, transform 0.14s ease; }
+.settings-fade-enter-from,
+.settings-fade-leave-to { opacity: 0; transform: translateY(4px); }
+
+/* Ready-to-process bank sub-label */
+.rtp-bank-label {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
 }
 </style>
