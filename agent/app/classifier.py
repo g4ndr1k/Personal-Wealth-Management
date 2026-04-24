@@ -1,7 +1,10 @@
 import time
 import logging
 from collections import OrderedDict
-from app.providers.ollama_provider import OllamaProvider
+
+import httpx
+
+from app.providers.rule_based_provider import RuleBasedProvider
 from app.schemas import Classification
 
 logger = logging.getLogger("agent.classifier")
@@ -55,38 +58,107 @@ class Classifier:
         self.circuit_breaker = CircuitBreaker(max_failures=3, cooldown_seconds=300)
         self.cloud_fallback_enabled = settings["classifier"].get("cloud_fallback_enabled", True)
 
-        # Domain allowlist — empty list means no restriction (all senders pass)
-        raw_domains = settings["classifier"].get("allowed_sender_domains", [])
-        self.allowed_sender_domains: list[str] = [
-            d.lower().lstrip("@") for d in raw_domains
+        # Finance API for dynamic rule loading
+        self._finance_api_url = settings["classifier"].get("finance_api_url", "")
+        self._finance_api_key = settings["classifier"].get("finance_api_key", "")
+        self._reload_interval = int(
+            settings["classifier"].get("rule_reload_interval_seconds", 3600))
+        self._last_rule_reload = 0.0
+
+        # Rule sets (populated by _load_rules, fallback to TOML)
+        self.email_rules: set[str] = set()
+        self.domain_rules: set[str] = set()
+        self.keyword_rules: set[str] = set()
+
+        # TOML fallback for domains when Finance API is unreachable
+        self._toml_domains = [
+            d.lower().lstrip("@")
+            for d in settings["classifier"].get("allowed_sender_domains", [])
         ]
-        if self.allowed_sender_domains:
-            logger.info(
-                "Domain allowlist active: %s",
-                ", ".join(self.allowed_sender_domains),
-            )
-        else:
-            logger.info("Domain allowlist: disabled (all senders allowed)")
+
+        # Legacy alias used by _domain_not_allowed (TOML-only fallback)
+        self.allowed_sender_domains: list[str] = list(self._toml_domains)
 
         self.providers = []
         for name in settings["classifier"]["provider_order"]:
-            if name == "ollama":
+            if name == "rule_based":
+                self.providers.append(RuleBasedProvider())
+            elif name == "ollama":
                 self.providers.append(OllamaProvider(settings))
             elif name == "anthropic":
                 logger.info("Anthropic provider removed — skipping")
 
+        # Load rules on startup (Finance API or TOML fallback)
+        self._load_rules()
+
+    def reload_rules(self) -> None:
+        """Public entry point for on-demand rule reload (e.g. from /trigger)."""
+        self._load_rules()
+
+    def _load_rules(self) -> None:
+        """Fetch mail rules from Finance API; fall back to TOML domains."""
+        if self._finance_api_url:
+            try:
+                resp = httpx.get(
+                    f"{self._finance_api_url}/api/mail-rules",
+                    headers={"X-Api-Key": self._finance_api_key},
+                    timeout=5.0,
+                )
+                resp.raise_for_status()
+                rules = resp.json()
+                self.email_rules = {
+                    r["pattern"].lower()
+                    for r in rules
+                    if r["rule_type"] == "sender_email" and r.get("enabled")
+                }
+                self.domain_rules = {
+                    r["pattern"].lower()
+                    for r in rules
+                    if r["rule_type"] == "sender_domain" and r.get("enabled")
+                }
+                self.keyword_rules = {
+                    r["pattern"].lower()
+                    for r in rules
+                    if r["rule_type"] == "subject_keyword" and r.get("enabled")
+                }
+                self._last_rule_reload = time.time()
+                logger.info(
+                    "Mail rules loaded from API: %d email, %d domain, %d keyword",
+                    len(self.email_rules), len(self.domain_rules),
+                    len(self.keyword_rules),
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "Failed to load mail rules from Finance API: %s "
+                    "— falling back to TOML", e)
+
+        # Fallback: TOML allowed_sender_domains
+        self.domain_rules = set(self._toml_domains)
+        self.email_rules = set()
+        self.keyword_rules = set()
+        self.allowed_sender_domains = list(self._toml_domains)
+        logger.info(
+            "Mail rules: using TOML fallback (%d domains)",
+            len(self.domain_rules))
+
     def classify(self, message: dict) -> Classification:
-        # Domain allowlist pre-filter: skip senders not on the allowed list
-        if self._domain_not_allowed(message):
+        # Periodic rule reload
+        if (self._finance_api_url
+                and time.time() - self._last_rule_reload > self._reload_interval):
+            self._load_rules()
+
+        # Rule-based pre-filter: skip senders not matching any rule
+        if not self._matches_any_rule(message):
             sender_email = message.get("sender_email", "")
             logger.debug(
-                "Domain filter: skipping %s (%s)",
+                "Rule filter: skipping %s (%s)",
                 message.get("bridge_id"), sender_email,
             )
             return Classification(
                 category="not_financial",
                 urgency="low",
-                summary=f"Skipped: sender domain not in allowlist ({sender_email})",
+                summary=f"Skipped: sender not in mail rules ({sender_email})",
                 requires_action=False,
                 provider="domain_prefilter",
             )
@@ -152,18 +224,43 @@ class Classifier:
             except Exception as e:
                 logger.warning("Provider close failed for %s: %s", provider.name, e)
 
-    def _domain_not_allowed(self, message: dict) -> bool:
-        """Return True if the sender's domain is NOT in the allowlist.
+    def _matches_any_rule(self, message: dict) -> bool:
+        """Return True if the message matches at least one active mail rule.
 
-        If allowed_sender_domains is empty, every sender is allowed (returns False).
-        The check is case-insensitive and tolerates missing/malformed sender_email.
+        Checks in order: sender_email (exact) → sender_domain → subject_keyword.
+        If all rule sets are empty (API unreachable AND no TOML fallback),
+        block everything to avoid notification spam.
+        """
+        if (not self.email_rules
+                and not self.domain_rules
+                and not self.keyword_rules):
+            return False  # no rules → block all
+
+        sender = (message.get("sender_email") or "").lower().strip()
+        domain = sender.rsplit("@", 1)[-1] if "@" in sender else ""
+        subject = (message.get("subject") or "").lower()
+
+        return (
+            (bool(self.email_rules)
+             and sender in self.email_rules)
+            or
+            (bool(self.domain_rules)
+             and domain in self.domain_rules)
+            or
+            (bool(self.keyword_rules)
+             and any(kw in subject for kw in self.keyword_rules))
+        )
+
+    def _domain_not_allowed(self, message: dict) -> bool:
+        """Legacy domain check — kept for TOML-only fallback path.
+
+        Returns True if the sender's domain is NOT in allowed_sender_domains.
         """
         if not self.allowed_sender_domains:
             return False  # allowlist disabled — let everything through
 
         sender_email = (message.get("sender_email") or "").lower().strip()
         if not sender_email or "@" not in sender_email:
-            # No parseable email address — block by default when allowlist is active
             return True
 
         domain = sender_email.rsplit("@", 1)[1]

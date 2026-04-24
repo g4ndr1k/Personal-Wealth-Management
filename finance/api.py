@@ -1291,6 +1291,17 @@ class HouseholdCashPoolUpdateRequest(BaseModel):
     status: Optional[str] = Field(None, max_length=50)
 
 
+class MailRuleRequest(BaseModel):
+    rule_type: str           = Field(..., pattern=r"^(sender_email|sender_domain|subject_keyword)$")
+    pattern:   str           = Field(..., min_length=1, max_length=200)
+    enabled:   bool          = True
+
+
+class MailRulePatchRequest(BaseModel):
+    enabled: Optional[bool]  = None
+    pattern: Optional[str]   = Field(None, min_length=1, max_length=200)
+
+
 class WealthQuestionRequest(BaseModel):
     snapshot_date: Optional[str] = None
     question:      str           = Field(..., max_length=1000)
@@ -1564,6 +1575,79 @@ def post_category(req: CategoryUpsertRequest):
         ).fetchone()
 
     return _row(row)
+
+
+# ── /api/mail-rules ──────────────────────────────────────────────────────────
+
+@app.get("/api/mail-rules", dependencies=[Depends(require_api_key)])
+def get_mail_rules():
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, rule_type, pattern, enabled, created_at, updated_at "
+            "FROM mail_notification_rules ORDER BY rule_type, pattern"
+        ).fetchall()
+    return [_row(r) for r in rows]
+
+
+@app.post("/api/mail-rules", dependencies=[Depends(require_api_key), Depends(require_writable)])
+def post_mail_rule(req: MailRuleRequest):
+    pattern = req.pattern.strip()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO mail_notification_rules (rule_type, pattern, enabled, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(rule_type, pattern) DO UPDATE SET
+                   enabled    = excluded.enabled,
+                   updated_at = excluded.updated_at""",
+            (req.rule_type, pattern, int(req.enabled), now, now),
+        )
+        row = conn.execute(
+            "SELECT id, rule_type, pattern, enabled, created_at, updated_at "
+            "FROM mail_notification_rules WHERE rule_type = ? AND pattern = ?",
+            (req.rule_type, pattern),
+        ).fetchone()
+    return _row(row)
+
+
+@app.patch("/api/mail-rules/{rule_id}", dependencies=[Depends(require_api_key), Depends(require_writable)])
+def patch_mail_rule(rule_id: int, req: MailRulePatchRequest):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with _db() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM mail_notification_rules WHERE id = ?", (rule_id,)
+        ).fetchone():
+            raise HTTPException(404, f"Mail rule {rule_id} not found")
+        updates: dict = {}
+        if req.enabled is not None:
+            updates["enabled"] = int(req.enabled)
+        if req.pattern is not None:
+            updates["pattern"] = req.pattern.strip()
+        if not updates:
+            raise HTTPException(400, "Nothing to update")
+        updates["updated_at"] = now
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        conn.execute(
+            f"UPDATE mail_notification_rules SET {set_clause} WHERE id = ?",
+            (*updates.values(), rule_id),
+        )
+        row = conn.execute(
+            "SELECT id, rule_type, pattern, enabled, created_at, updated_at "
+            "FROM mail_notification_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+    return _row(row)
+
+
+@app.delete("/api/mail-rules/{rule_id}", dependencies=[Depends(require_api_key), Depends(require_writable)])
+def delete_mail_rule(rule_id: int):
+    with _db() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM mail_notification_rules WHERE id = ?", (rule_id,)
+        ).fetchone():
+            raise HTTPException(404, f"Mail rule {rule_id} not found")
+        conn.execute("DELETE FROM mail_notification_rules WHERE id = ?", (rule_id,))
+    return {"ok": True, "id": rule_id}
 
 
 # ── /api/transactions ─────────────────────────────────────────────────────────

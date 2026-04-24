@@ -14,6 +14,7 @@ class CommandHandler:
         self.paused = state.get_bool_flag("paused")
         self.quiet = state.get_bool_flag("quiet")
         self.scan_requested = False
+        self.force_scan = False
 
     def handle(self, text: str) -> str:
         cmd = text.strip().lower()

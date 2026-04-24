@@ -269,6 +269,19 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ── Mail Agent Notification Rules ────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mail_notification_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_type  TEXT    NOT NULL,   -- 'sender_email', 'sender_domain', or 'subject_keyword'
+    pattern    TEXT    NOT NULL,
+    enabled    INTEGER DEFAULT 1,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(rule_type, pattern)
+);
+CREATE INDEX IF NOT EXISTS idx_mail_rules_type
+    ON mail_notification_rules(rule_type, enabled);
 """
 
 TRANSACTIONS_RESOLVED_VIEW = """
@@ -475,6 +488,39 @@ def open_db(db_path: str) -> sqlite3.Connection:
     ver = _get_schema_version(conn)
     if ver < 2:
         _set_schema_version(conn, 2)
+        conn.commit()
+    if ver < 3:
+        # Seed mail_notification_rules from known bank domains on first deployment.
+        # Only inserts when the table is empty; user edits via the PWA take precedence.
+        count = conn.execute(
+            "SELECT COUNT(*) FROM mail_notification_rules"
+        ).fetchone()[0]
+        if count == 0:
+            domains = [
+                "maybank.co.id", "cimbniaga.co.id", "permatabank.co.id",
+                "bca.co.id", "klikbca.com",
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO mail_notification_rules"
+                " (rule_type, pattern, enabled) VALUES ('sender_domain', ?, 1)",
+                [(d,) for d in domains],
+            )
+        _set_schema_version(conn, 3)
+        conn.commit()
+    if ver < 4:
+        # Transition from domain-only matching to full-email matching.
+        # Disable existing domain seeds so only explicit sender_email rules
+        # trigger alerts by default. Domains can be re-enabled via the PWA.
+        conn.execute(
+            "UPDATE mail_notification_rules SET enabled = 0"
+            " WHERE rule_type = 'sender_domain'"
+        )
+        # Seed the first full-email rule.
+        conn.execute(
+            "INSERT OR IGNORE INTO mail_notification_rules"
+            " (rule_type, pattern, enabled) VALUES ('sender_email', 'permataalert@permatabank.co.id', 1)"
+        )
+        _set_schema_version(conn, 4)
         conn.commit()
     # Prune sync_log entries older than 90 days
     conn.execute(

@@ -1,8 +1,8 @@
 # Agentic Mail Alert & Personal Finance System — Build & Operations Guide
 
-**Version:** 3.21.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅ · Public homepage with Snake game live ✅ · Multi-provider IMAP (Gmail + iCloud) ✅ · Household Expense PWA on NAS ✅ · Goal view (Investment Income tracking) ✅ · Premium monochromatic SVG icon system across all PWA views ✅
+**Version:** 3.22.0 · Stage 1 complete · Stage 2 SQLite migration complete · Stage 3 fully built ✅ · NAS read-only replica live ✅ · Security hardening applied ✅ · Public homepage with Snake game live ✅ · Multi-provider IMAP (Gmail + iCloud) ✅ · Household Expense PWA on NAS ✅ · Goal view (Investment Income tracking) ✅ · Premium monochromatic SVG icon system across all PWA views ✅ · Mail agent wake-recovery reliability ✅ · Rule-based classifier (Ollama removed from alert path) ✅
 **Platform:** Apple Silicon Mac · macOS · Synology DS920+ (AMD64 Docker)
-**Last validated against:** checked-in codebase 2026-04-22
+**Last validated against:** checked-in codebase 2026-04-24
 
 ---
 
@@ -73,12 +73,13 @@
 A **personal email monitoring, iMessage alert, and bank statement processing system** for macOS that:
 
 - Reads Apple Mail's local SQLite database
-- Classifies messages with a local Ollama model (primary; cloud fallbacks removed)
+- Classifies messages with a rule-based provider (Ollama removed from alert path; domain allowlist is the primary gate)
 - Suppresses promotions using Apple Mail category metadata
 - Sends iMessage alerts to your iPhone via Messages.app + AppleScript
 - Polls iMessage conversations for `agent:` commands from your device
 - Runs the host-sensitive bridge on macOS bare metal and the agent logic in Docker
 - Parses password-protected bank statement PDFs into structured Excel workbooks
+- Recovers reliably from macOS sleep/wake cycles (launchd catch-up trigger + bridge reconnect with backoff)
 
 ### Alert categories
 
@@ -98,7 +99,8 @@ The system alerts on:
 - Reply to email
 - Modify mailboxes or move messages
 - Browse websites
-- Use OpenAI, Gemini, or Anthropic in the current production flow (cloud provider stubs removed or disabled; Ollama-primary)
+- Use OpenAI, Gemini, or Anthropic in the current production flow (cloud provider stubs removed or disabled)
+- Use Ollama in the mail-agent alert path (Ollama is still used for finance transaction categorization during import)
 
 ---
 
@@ -135,9 +137,11 @@ The system alerts on:
 │  ┌───────────────────────────────────────────┐  │
 │  │ Agent (Docker container)                  │  │
 │  │ · Polls bridge for mail & commands        │  │
-│  │ · Classifies via Ollama (local only)      │  │
+│  │ · Rule-based classifier (no LLM needed)  │  │
 │  │ · Sends alerts through bridge             │  │
 │  │ · Handles iMessage commands               │  │
+│  │ · POST /trigger for wake-catch-up        │  │
+│  │ · port 8080 exposed to host               │  │
 │  └───────────────────────────────────────────┘  │
 │                                                 │
 │  Gmail IMAP    → imap.gmail.com:993              │
@@ -183,13 +187,16 @@ The system alerts on:
 - Messages.app SQLite command polling
 - iMessage sending via AppleScript (with injection-safe argument passing)
 - Ollama local LLM classification (cloud fallbacks removed)
+- Rule-based mail classifier (no LLM in alert hot path; domain allowlist + Apple ML pre-filter as gates)
 - macOS Keychain secret management (`bridge/secret_manager.py`) — single source of truth for all secrets
 - `.app` bundle TCC identity (`/Applications/AgenticAI.app`) — stable Full Disk Access for Messages.app across Homebrew upgrades
 - Docker secret export bridge (`scripts/export-secrets-for-docker.py`) — populates `secrets/` for containers
 - Apple Mail category prefilter (skips promotions)
 - Message-ID deduplication
 - Persistent `paused` and `quiet` flags (survive container restarts)
-- Agent health endpoint on port `8080`
+- Agent health endpoint on port `8080` (exposed to host, includes `POST /trigger`)
+- Wake-recovery reliability: `scan_executed` semantics, bridge reconnect with 45s backoff, scan lock, dedup-break
+- launchd catch-up trigger (`com.agentic.scan-trigger`) — dual POST /trigger on wake + 30-min interval
 - Docker container healthcheck
 - Rotating bridge log file
 - Bearer token auth on all bridge endpoints except `/healthz`
@@ -406,11 +413,12 @@ agentic-ai/
 │       ├── classifier.py         # Provider routing, circuit breaker, prefilter
 │       ├── bridge_client.py      # HTTP client for bridge API
 │       ├── state.py              # SQLite state DB (agent.db)
-│       ├── health.py             # Lightweight JSON stats server :8080
+│       ├── health.py             # Lightweight JSON stats server + POST /trigger :8080
 │       ├── config.py             # TOML config loader
 │       ├── schemas.py            # ClassificationResult dataclass
 │       └── providers/
 │           ├── base.py           # Abstract provider base
+│           ├── rule_based_provider.py  # Rule-based (no LLM) — production default
 │           ├── ollama_provider.py
 │           ├── anthropic_provider.py   # disabled (cloud fallback removed)
 │           ├── openai_provider.py   # stub
@@ -531,6 +539,8 @@ agentic-ai/
 │   ├── tahoe_validate.sh         # Mail schema validator
 │   ├── run_bridge.sh             # Bridge startup wrapper
 │   └── start_agent.sh            # Docker agent startup wrapper (waits for Docker Desktop)
+├── launchd/                      # macOS LaunchAgent plist templates
+│   └── com.agentic.scan-trigger.plist  # Wake-catch-up scan trigger (dual POST /trigger)
 ├── secrets/                      # Docker-only secret files (gitignored, exported from Keychain)
 │   ├── bridge.token              # Bearer token for bridge API auth
 │   ├── banks.toml                # Bank PDF passwords
@@ -741,8 +751,8 @@ File: `config/settings.toml`
 
 | Key | Default | Description |
 |---|---|---|
-| `provider_order` | `["ollama"]` | Try providers in this order (cloud fallbacks removed) |
-| `cloud_fallback_enabled` | `false` | Cloud fallback disabled — Ollama is the sole provider |
+| `provider_order` | `["rule_based"]` | Try providers in this order (`rule_based` = no LLM, `ollama` = local model) |
+| `cloud_fallback_enabled` | `false` | Cloud fallback disabled |
 | `generic_alert_on_total_failure` | `true` | Alert with `financial_other` if all providers fail |
 
 ### `[ollama]`
@@ -1000,7 +1010,7 @@ Do not mix these up when debugging date issues.
 2. Open/initialize `data/agent.db`
 3. Initialize classifier (load providers per `provider_order`)
 4. Restore persisted `paused` and `quiet` flags from `agent.db`
-5. Start health server on `127.0.0.1:8080`
+5. Start health server on `0.0.0.0:8080` (exposed to host via Docker port mapping)
 6. Retry bridge connectivity for up to ~3 minutes (18 attempts × 10s)
 7. Send startup notification if `startup_notifications = true`
 8. Enter main loop
@@ -1009,10 +1019,48 @@ Do not mix these up when debugging date issues.
 
 ```
 Every 2 seconds:
+  - Bridge reconnect: if bridge_ok=False, attempt health check every 45s
   - If (now - last_mail_scan) >= poll_interval_seconds  → scan_mail_once()
-  - If (now - last_cmd_scan)  >= command_poll_interval  → scan_commands_once()
-  - If scan_requested flag set (by "agent: scan" command) → scan_mail_once()
+  - If scan_requested or force_scan flag set              → scan_mail_once()
+  - If (now - last_cmd_scan)  >= command_poll_interval   → scan_commands_once()
 ```
+
+### Wake-recovery reliability
+
+The agent is designed to be robust after macOS sleep/wake cycles where Docker
+Desktop networking may be temporarily unavailable:
+
+**Problem:** After wake, the Docker Linux VM resumes with stale network state.
+DNS cache invalidation, NAT re-binding, and virtual interface reset take several
+seconds. If a scan fires during this window, bridge calls fail — but the old code
+still advanced `last_mail`, black-holing the next 30-minute poll interval.
+
+**Fixes (Phase 1):**
+
+1. **`scan_executed` semantics** — `scan_mail_once()` returns `True` (bridge reachable)
+   or `False` (bridge down). `last_mail` only advances on `True`. On failure, the
+   `scan_requested` / `force_scan` flags stay set and the timer stays overdue, so the
+   next 2-second loop iteration retries automatically.
+
+2. **`bridge_ok` reconnect with backoff** — On any bridge connection error during scan,
+   `orchestrator.bridge_ok = False`. The main loop attempts a `bridge.health()` call
+   every 45 seconds until the bridge recovers. No log spam — one warning per attempt.
+
+3. **Scan lock** — `threading.Lock()` prevents the external `/trigger` endpoint and
+   the internal timer from running simultaneous scans.
+
+4. **`POST /trigger` endpoint** — External trigger for the launchd catch-up job (and
+   manual testing). Accepts `?force=1` to bypass the poll timer. Returns `{queued,
+   force, last_mail, bridge_ok}` for debugging from a single curl.
+
+5. **Dedup-break** — If an entire batch of emails are already processed (all deduped),
+   the scan cycle breaks out immediately to avoid re-fetching the same items forever.
+
+6. **launchd catch-up trigger** (`com.agentic.scan-trigger`) — Fires every 30 minutes
+   via `StartInterval`, plus immediately on wake (launchd tracks last-fire time and
+   catches up after sleep). Each fire does two `POST /trigger` calls 45s apart: the
+   first catches immediate wake, the second catches the settled state after Docker
+   networking and bridge have recovered.
 
 ### Mail scan cycle
 
@@ -1021,6 +1069,7 @@ Every 2 seconds:
 3. Classify each unprocessed message
 4. If category in `alert_on_categories` → send alert via bridge
 5. ACK checkpoint back to bridge
+6. If entire batch was deduped → break (prevents infinite re-fetch loop)
 
 ### Command scan cycle
 
@@ -1029,9 +1078,9 @@ Every 2 seconds:
 3. Send reply via alert endpoint
 4. ACK checkpoint back to bridge
 
-### Health stats endpoint
+### Health & trigger endpoints
 
-`GET http://127.0.0.1:8080` returns JSON:
+`GET http://127.0.0.1:8080/` returns JSON stats:
 
 ```json
 {
@@ -1046,6 +1095,14 @@ Every 2 seconds:
   "last_error": null
 }
 ```
+
+`POST http://127.0.0.1:8080/trigger` queues a mail scan:
+
+```json
+{"queued": true, "force": false, "last_mail": 1776985656.36, "bridge_ok": true}
+```
+
+`POST http://127.0.0.1:8080/trigger?force=1` queues a forced scan (bypasses timer).
 
 ### State database
 
@@ -1062,9 +1119,17 @@ Every 2 seconds:
 
 ## 12. Classifier & Providers
 
-### Pre-filter (Apple Mail metadata)
+### Pre-filter layers
 
-Before calling any LLM, the classifier checks:
+Before calling any provider, two pre-filter checks run:
+
+1. **Domain allowlist** — If `allowed_sender_domains` is set, emails from senders
+   not on the list are classified as `not_financial` immediately (provider =
+   `domain_prefilter`). This is the primary gate.
+
+2. **Apple Mail category** — If Apple flagged as Promotion (`category == 3`) and
+   the message is not marked high-impact or urgent, return `not_financial`
+   (provider = `apple_ml_prefilter`).
 
 ```python
 if apple_category == 3       # Apple flagged as Promotion
@@ -1075,20 +1140,40 @@ if apple_category == 3       # Apple flagged as Promotion
 
 ### Provider chain
 
-Providers are tried in `provider_order` from `settings.toml`:
+Providers are tried in `provider_order` from `settings.toml`. Production config:
 
 ```
-ollama
+rule_based
 ```
 
-Cloud providers (Anthropic, OpenAI, Gemini) have been removed from the production flow. The `anthropic_provider.py` file is retained but disabled. If re-enabled, store API keys in Keychain and set `cloud_fallback_enabled = true`.
+The **rule-based provider** classifies every email that passes the pre-filters as
+`financial_other` with `medium` urgency. This removes the Ollama dependency from
+the alert hot path entirely — no network call, no model loading, no wake-recovery
+delay. The domain allowlist + Apple ML pre-filter remain the primary gates that
+decide which emails reach classification.
+
+Ollama is still used by the finance categorizer (`finance/categorizer.py`) for
+transaction categorization, but that runs on-demand during import, not in the
+time-sensitive mail alert path.
+
+Cloud providers (Anthropic, OpenAI, Gemini) have been removed from the production
+flow. The `anthropic_provider.py` file is retained but disabled. If re-enabled,
+store API keys in Keychain and set `cloud_fallback_enabled = true`.
 
 Each provider has an in-memory **circuit breaker**:
 - Opens after **3 consecutive failures**
 - Cooldown period: **300 seconds**
 - Skipped while open; retried after cooldown
 
-### Ollama provider
+### Rule-based provider (`agent/app/providers/rule_based_provider.py`)
+
+Returns `financial_other` / `medium` / `requires_action=True` for every email.
+No LLM call, no HTTP request, no model loading. Used when the domain allowlist
+is narrow enough that any email passing the filter is likely important.
+
+### Ollama provider (`agent/app/providers/ollama_provider.py`)
+
+> **Not used in production mail-agent flow** (kept available for future use).
 
 - POST to `{host}/api/generate` with `stream: false`
 - Extracts JSON between first `{` and last `}` from response text
@@ -1108,26 +1193,31 @@ Each provider has an in-memory **circuit breaker**:
 
 ### iMessage alert format
 
-Normal (Ollama succeeded):
+Rule-based classification (current production):
 ```
-🔔 Transaction Alert [HIGH]
+🔔 Financial Other
 From: notification@bca.co.id
 Subject: Transaksi BCA
 Date: 2026-04-19 10:00
-Summary: Debit Rp 250,000 at GrabFood — 19 Apr 10:00
+
+Dengan hormat, kami informasikan bahwa telah terjadi transaksi...
+[raw email body, up to 1500 chars]
 ```
 
-Classification failed (Ollama unreachable/timed out):
+Classification failed (fallback_error provider):
 ```
-🔔 Financial Other [MEDIUM]
+🔔 Financial Other
 From: notification@bca.co.id
 Subject: Transaksi BCA
 Date: 2026-04-19 10:00
-Body: Dengan hormat, kami informasikan bahwa telah terjadi transaksi...
-      [first 800 chars of raw email body]
+
+Dengan hormat, kami informasikan bahwa telah terjadi transaksi...
+[raw email body, up to 1500 chars]
 ```
 
-The `Summary:` / `Body:` label distinguishes the two cases. Format logic: `agent/app/orchestrator.py` `_format_alert()`.
+Format logic: `agent/app/orchestrator.py` `_format_alert()`. The rule-based and
+fallback_error providers both show raw body content (up to 1500 chars) instead
+of an LLM summary.
 
 ---
 
@@ -1139,16 +1229,13 @@ The `Summary:` / `Body:` label distinguishes the two cases. Format logic: `agent
 | `false` | Returns `not_financial` → no alert, mail silently skipped |
 
 When all providers fail and `generic_alert_on_total_failure = true`, the iMessage alert
-replaces the (unavailable) LLM summary with the first **800 chars of the raw email body**,
-so the content is visible even without a successful classification. The label changes from
-`Summary:` to `Body:` to distinguish the two cases. Logic lives in
+shows the raw email body (up to 1500 chars). Logic lives in
 `agent/app/orchestrator.py` `_format_alert()`.
 
 ### Classification output schema
 
 ```python
-@dataclass
-class ClassificationResult:
+class Classification(BaseModel):
     category: Literal[
         "transaction_alert", "bill_statement", "bank_clarification",
         "payment_due", "security_alert", "financial_other", "not_financial"
@@ -1156,7 +1243,7 @@ class ClassificationResult:
     urgency: Literal["low", "medium", "high"]
     summary: str          # max 200 chars
     requires_action: bool
-    provider: str         # "ollama", "anthropic", etc.
+    provider: str         # "rule_based", "ollama", etc.
 ```
 
 ---
@@ -1211,6 +1298,8 @@ services:
     mem_limit: 2g
     security_opt:
       - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8080:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -1294,6 +1383,7 @@ Four macOS LaunchAgents ensure everything starts after a login:
 | `com.agentic.ollama` | Ollama LLM server | `true` |
 | `com.agentic.bridge` | Bridge HTTP service | `true` |
 | `com.agentic.agent` | Docker agent container | `false` (one-shot) |
+| `com.agentic.scan-trigger` | Wake-catch-up scan trigger | `StartInterval` (1800s) |
 
 > The `com.agentic.mailapp` LaunchAgent is no longer needed — mail is fetched directly from Gmail via IMAP. You can unload and remove it if present.
 
@@ -1460,6 +1550,42 @@ Create `~/Library/LaunchAgents/com.agentic.agent.plist`:
 
 ---
 
+### Scan Trigger LaunchAgent plist
+
+Create `~/Library/LaunchAgents/com.agentic.scan-trigger.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentic.scan-trigger</string>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>date; curl -sf --max-time 5 -X POST http://127.0.0.1:8080/trigger; echo; sleep 45; date; curl -sf --max-time 5 -X POST http://127.0.0.1:8080/trigger; echo</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/Users/g4ndr1k/agentic-ai/logs/scan-trigger.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/g4ndr1k/agentic-ai/logs/scan-trigger-err.log</string>
+</dict>
+</plist>
+```
+
+**Why two triggers 45s apart:** On macOS wake, Docker Desktop networking and the bridge may take several seconds to recover. The first trigger catches the immediate wake state; the second catches the settled state after network and bridge have recovered. The agent's scan lock ensures they can't overlap.
+
+**Why `StartInterval` gives catch-up:** launchd tracks the last fire time. On wake, if `now - last_fire >= StartInterval`, launchd fires immediately — regardless of how long the Mac was asleep.
+
+---
+
 ### Load the LaunchAgents
 
 ```bash
@@ -1467,8 +1593,8 @@ mkdir -p ~/agentic-ai/logs
 
 launchctl load ~/Library/LaunchAgents/com.agentic.ollama.plist
 launchctl load ~/Library/LaunchAgents/com.agentic.bridge.plist
-launchctl load ~/Library/LaunchAgents/com.agentic.mailapp.plist
 launchctl load ~/Library/LaunchAgents/com.agentic.agent.plist
+launchctl load ~/Library/LaunchAgents/com.agentic.scan-trigger.plist
 
 launchctl list | grep agentic
 ```
@@ -1477,12 +1603,15 @@ launchctl list | grep agentic
 
 After login:
 
-1. **launchd** starts Ollama, bridge, Mail.app, and the agent startup script in parallel
+1. **launchd** starts Ollama, bridge, and the agent startup script in parallel
 2. Bridge waits for Mail DB to be accessible before serving requests
 3. **`start_agent.sh`** waits for Docker Desktop to be ready (up to 120 s)
 4. Once Docker is ready, `docker compose up -d` starts the `mail-agent` container
 5. Agent retries bridge connectivity for up to ~3 minutes
 6. Once connected, agent sends startup iMessage and enters its main loop
+7. **`com.agentic.scan-trigger`** fires immediately (RunAtLoad), then every 30 minutes
+   via StartInterval. On wake after sleep, launchd catches up by firing immediately
+   if the interval has elapsed. Each fire does two `POST /trigger` calls 45s apart.
 
 ### Post-reboot health check script
 

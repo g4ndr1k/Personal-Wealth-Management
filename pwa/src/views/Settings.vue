@@ -851,6 +851,107 @@
     </div>
 
 
+    <div class="setting-card" v-show="!isDesktop || activeSection === 'mail-rules'">
+      <div class="setting-title"><span class="setting-title-icon" v-html="MAIL_SVG"></span> Mail Rules</div>
+      <div class="setting-desc">
+        Emails matching sender addresses, domains, or subject keywords trigger iMessage alerts.
+        Edit here to take effect on next scan.
+      </div>
+
+      <div class="mail-rules-section">
+        <div class="mail-rules-label">Sender Emails</div>
+        <div v-if="!emailRules.length" class="mail-rules-empty">No email rules yet.</div>
+        <div v-for="rule in emailRules" :key="rule.id" class="mail-rule-row">
+          <span class="mail-rule-pattern" :class="{ 'mail-rule-pattern--disabled': !rule.enabled }">{{ rule.pattern }}</span>
+          <div class="mail-rule-actions">
+            <button class="btn btn-ghost btn-sm" @click="toggleMailRule(rule)" :disabled="mailRulesState.loading">
+              {{ rule.enabled ? 'Disable' : 'Enable' }}
+            </button>
+            <button class="btn btn-ghost btn-sm mail-rule-delete" @click="deleteMailRule(rule)" :disabled="mailRulesState.loading">
+              <span class="inline-icon" v-html="X_SVG"></span>
+            </button>
+          </div>
+        </div>
+        <div class="mail-rule-add-row">
+          <input
+            v-model="mailRuleInputEmail"
+            class="form-input"
+            type="text"
+            placeholder="e.g. alerts@mybank.com"
+            @keydown.enter="addMailRule('sender_email')"
+          />
+          <button
+            class="btn btn-primary btn-sm"
+            :disabled="mailRulesState.loading || !mailRuleInputEmail.trim()"
+            @click="addMailRule('sender_email')"
+          >Add</button>
+        </div>
+      </div>
+
+      <div class="mail-rules-section">
+        <div class="mail-rules-label">Sender Domains</div>
+        <div v-if="!domainRules.length" class="mail-rules-empty">No domain rules yet.</div>
+        <div v-for="rule in domainRules" :key="rule.id" class="mail-rule-row">
+          <span class="mail-rule-pattern" :class="{ 'mail-rule-pattern--disabled': !rule.enabled }">{{ rule.pattern }}</span>
+          <div class="mail-rule-actions">
+            <button class="btn btn-ghost btn-sm" @click="toggleMailRule(rule)" :disabled="mailRulesState.loading">
+              {{ rule.enabled ? 'Disable' : 'Enable' }}
+            </button>
+            <button class="btn btn-ghost btn-sm mail-rule-delete" @click="deleteMailRule(rule)" :disabled="mailRulesState.loading">
+              <span class="inline-icon" v-html="X_SVG"></span>
+            </button>
+          </div>
+        </div>
+        <div class="mail-rule-add-row">
+          <input
+            v-model="mailRuleInputDomain"
+            class="form-input"
+            type="text"
+            placeholder="e.g. maybank.co.id"
+            @keydown.enter="addMailRule('sender_domain')"
+          />
+          <button
+            class="btn btn-primary btn-sm"
+            :disabled="mailRulesState.loading || !mailRuleInputDomain.trim()"
+            @click="addMailRule('sender_domain')"
+          >Add</button>
+        </div>
+      </div>
+
+      <div class="mail-rules-section">
+        <div class="mail-rules-label">Subject Keywords</div>
+        <div v-if="!keywordRules.length" class="mail-rules-empty">No keyword rules yet.</div>
+        <div v-for="rule in keywordRules" :key="rule.id" class="mail-rule-row">
+          <span class="mail-rule-pattern" :class="{ 'mail-rule-pattern--disabled': !rule.enabled }">{{ rule.pattern }}</span>
+          <div class="mail-rule-actions">
+            <button class="btn btn-ghost btn-sm" @click="toggleMailRule(rule)" :disabled="mailRulesState.loading">
+              {{ rule.enabled ? 'Disable' : 'Enable' }}
+            </button>
+            <button class="btn btn-ghost btn-sm mail-rule-delete" @click="deleteMailRule(rule)" :disabled="mailRulesState.loading">
+              <span class="inline-icon" v-html="X_SVG"></span>
+            </button>
+          </div>
+        </div>
+        <div class="mail-rule-add-row">
+          <input
+            v-model="mailRuleInputKeyword"
+            class="form-input"
+            type="text"
+            placeholder="e.g. transfer"
+            @keydown.enter="addMailRule('subject_keyword')"
+          />
+          <button
+            class="btn btn-primary btn-sm"
+            :disabled="mailRulesState.loading || !mailRuleInputKeyword.trim()"
+            @click="addMailRule('subject_keyword')"
+          >Add</button>
+        </div>
+      </div>
+
+      <div v-if="mailRulesState.error" class="alert alert-error" style="margin-top:10px">{{ mailRulesState.error }}</div>
+      <div v-else-if="mailRulesState.success" class="alert alert-success" style="margin-top:10px">{{ mailRulesState.success }}</div>
+    </div>
+
     <div class="setting-card" v-show="!isDesktop || activeSection === 'ai-refinement'">
       <div class="setting-title"><span class="setting-title-icon" v-html="ROBOT_SVG"></span> AI Refinement</div>
       <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
@@ -906,6 +1007,8 @@ import { formatPdfDate, formatPdfSize, truncateText, getPdfStatusClass, getPdfSt
 import { useLayout } from '../composables/useLayout.js'
 import { NAV_SVGS, EYE_SVG, REFRESH_SVG, SAVE_SVG, CHECK_SVG, X_SVG, ROBOT_SVG, DOCUMENT_SVG, FOLDER_SVG, DATABASE_SVG, INFO_SVG } from '../utils/icons.js'
 
+const MAIL_SVG = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="16" height="11" rx="1.5"/><polyline points="2,5 10,12 18,5"/></svg>`
+
 const store = useFinanceStore()
 const { isDesktop } = useLayout()
 
@@ -954,6 +1057,7 @@ const NAV_GROUPS = computed(() => [
     label: 'Connected',
     items: [
       ...(!store.isReadOnly ? [{ id: 'household', label: 'Household Expense', icon: NAV_SVGS.Assets }] : []),
+      ...(!store.isReadOnly ? [{ id: 'mail-rules', label: 'Mail Rules',       icon: MAIL_SVG }] : []),
       { id: 'ai-refinement', label: 'AI Refinement', icon: ROBOT_SVG },
       { id: 'about',         label: 'About',         icon: INFO_SVG },
     ],
@@ -969,6 +1073,11 @@ const importOpts  = ref({ dry_run: false, overwrite: false })
 const refreshCacheState = ref({ loading: false, error: null, doneAt: '' })
 const pipelineState = ref({ loading: false, status: null, error: null })
 const categoryEditorState = ref({ loading: false, error: null, success: '' })
+const mailRules          = ref([])
+const mailRulesState     = ref({ loading: false, error: null, success: '' })
+const mailRuleInputDomain  = ref('')
+const mailRuleInputKeyword = ref('')
+const mailRuleInputEmail   = ref('')
 const showPdfWorkspace = ref(false)
 const householdCollapsed = ref(true)
 const householdState = ref({
@@ -1155,6 +1264,56 @@ const pdfCounts = computed(() => {
 const editableCategories = computed(() =>
   [...(store.categories || [])].sort((a, b) => a.category.localeCompare(b.category))
 )
+const domainRules  = computed(() => mailRules.value.filter(r => r.rule_type === 'sender_domain'))
+const keywordRules = computed(() => mailRules.value.filter(r => r.rule_type === 'subject_keyword'))
+const emailRules   = computed(() => mailRules.value.filter(r => r.rule_type === 'sender_email'))
+
+async function loadMailRules() {
+  try {
+    mailRules.value = await api.getMailRules({ maxAgeMs: 0 })
+  } catch (e) {
+    mailRulesState.value = { loading: false, error: e.message, success: '' }
+  }
+}
+
+async function addMailRule(ruleType) {
+  const inputRef = ruleType === 'sender_email' ? mailRuleInputEmail
+    : ruleType === 'sender_domain' ? mailRuleInputDomain
+    : mailRuleInputKeyword
+  const pattern = inputRef.value.trim()
+  if (!pattern) return
+  mailRulesState.value = { loading: true, error: null, success: '' }
+  try {
+    await api.addMailRule({ rule_type: ruleType, pattern, enabled: true })
+    await loadMailRules()
+    inputRef.value = ''
+    mailRulesState.value = { loading: false, error: null, success: 'Rule added.' }
+  } catch (e) {
+    mailRulesState.value = { loading: false, error: e.message, success: '' }
+  }
+}
+
+async function deleteMailRule(rule) {
+  mailRulesState.value = { loading: true, error: null, success: '' }
+  try {
+    await api.deleteMailRule(rule.id)
+    await loadMailRules()
+    mailRulesState.value = { loading: false, error: null, success: 'Rule removed.' }
+  } catch (e) {
+    mailRulesState.value = { loading: false, error: e.message, success: '' }
+  }
+}
+
+async function toggleMailRule(rule) {
+  mailRulesState.value = { loading: true, error: null, success: '' }
+  try {
+    await api.patchMailRule(rule.id, { enabled: !rule.enabled })
+    await loadMailRules()
+    mailRulesState.value = { loading: false, error: null, success: '' }
+  } catch (e) {
+    mailRulesState.value = { loading: false, error: e.message, success: '' }
+  }
+}
 
 const backupTiers = computed(() => {
   const status = backupState.value.status
@@ -1745,6 +1904,7 @@ onMounted(async () => {
   await loadPipelineStatus()
   await loadNasSyncStatus()
   await loadHouseholdSettings()
+  await loadMailRules()
 
   // ── Guard: reset active section if invalid for current mode ──
   const RESTRICTED = ['import-xlsx','pdf-pipeline','process-pdfs','backup','nas-sync','household']
@@ -1800,6 +1960,44 @@ onMounted(async () => {
   width: 13px;
   height: 13px;
 }
+
+.mail-rules-section { margin-top: 16px; }
+.mail-rules-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.mail-rules-empty { font-size: 13px; color: var(--text-muted); padding: 4px 0 8px; }
+.mail-rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(0,0,0,.06));
+}
+.mail-rule-pattern {
+  font-size: 13px;
+  font-family: monospace;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mail-rule-pattern--disabled { opacity: .4; text-decoration: line-through; }
+.mail-rule-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.mail-rule-delete { color: var(--text-muted); }
+.mail-rule-delete:hover { color: #ef4444; }
+.mail-rule-add-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mail-rule-add-row .form-input { flex: 1; min-width: 0; }
 
 .settings-grid {
   display: grid;

@@ -1,6 +1,7 @@
 import time
 import signal
 import logging
+import threading
 from datetime import datetime, timezone
 from threading import Event
 
@@ -48,9 +49,36 @@ def main():
         "last_error": None,
     })
 
-    # Bind health server to localhost inside container
-    start_health_server(stats, host="127.0.0.1", port=8080)
-    logger.info("Health server on 127.0.0.1:8080")
+    # Shared state accessible from health handler
+    _shared = {
+        "last_mail": 0.0,
+        "orch": None,
+    }
+
+    # Scan lock prevents /trigger and main loop from overlapping
+    _scan_lock = threading.Lock()
+
+    def trigger_callback(force: bool = False) -> dict:
+        commands.scan_requested = True
+        if force:
+            commands.force_scan = True
+        # Reload mail rules from Finance API before the next scan
+        if _shared["orch"]:
+            _shared["orch"].classifier.reload_rules()
+        return {
+            "queued": True,
+            "force": force,
+            "last_mail": _shared["last_mail"],
+            "bridge_ok": (
+                _shared["orch"].bridge_ok
+                if _shared["orch"] else False),
+        }
+
+    # Bind health server to all interfaces so Docker port mapping works
+    start_health_server(
+        stats, host="0.0.0.0", port=8080,
+        trigger_callback=trigger_callback)
+    logger.info("Health server on 0.0.0.0:8080")
 
     # Retry bridge connection (3 minutes)
     bridge = BridgeClient()
@@ -74,6 +102,7 @@ def main():
     orch = Orchestrator(
         bridge, classifier, state, commands,
         settings, stats)
+    _shared["orch"] = orch
 
     if settings["imessage"].get(
             "startup_notifications", True):
@@ -87,7 +116,8 @@ def main():
         settings["agent"]["poll_interval_seconds"])
     poll_cmd = int(
         settings["agent"]["command_poll_interval_seconds"])
-    last_mail = last_cmd = 0.0
+    _shared["last_mail"] = 0.0
+    last_cmd = 0.0
 
     logger.info(
         "Main loop (mail %ds, commands %ds)",
@@ -96,12 +126,43 @@ def main():
     while not shutdown_event.is_set():
         now = time.time()
         try:
-            if (now - last_mail >= poll_mail
-                    or commands.scan_requested):
-                orch.scan_mail_once()
-                last_mail = now
-                commands.scan_requested = False
+            # --- Bridge reconnect with backoff ---
+            if not orch.bridge_ok:
+                now_r = time.time()
+                if now_r - orch._last_bridge_retry >= orch.BRIDGE_RETRY_INTERVAL:
+                    logger.info(
+                        "Bridge down, attempting reconnect...")
+                    try:
+                        health = bridge.health()
+                        orch.bridge_ok = True
+                        orch._last_bridge_retry = now_r
+                        logger.info("Bridge reconnect OK: %s", health)
+                    except Exception as e:
+                        orch._last_bridge_retry = now_r
+                        logger.warning(
+                            "Bridge still unreachable: %s", e)
 
+            # --- Mail scan ---
+            should_scan = (
+                (now - _shared["last_mail"] >= poll_mail)
+                or commands.scan_requested
+                or commands.force_scan)
+
+            if should_scan and _scan_lock.acquire(blocking=False):
+                try:
+                    scan_executed = orch.scan_mail_once()
+                    if scan_executed:
+                        _shared["last_mail"] = now
+                        commands.scan_requested = False
+                        commands.force_scan = False
+                    # If scan_executed is False (bridge down),
+                    # flags stay set so next loop retries.
+                    # last_mail is NOT advanced, so the timer
+                    # remains overdue -> retry on next cycle.
+                finally:
+                    _scan_lock.release()
+
+            # --- Command scan ---
             if now - last_cmd >= poll_cmd:
                 orch.scan_commands_once()
                 last_cmd = now

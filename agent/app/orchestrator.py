@@ -2,6 +2,8 @@ import time
 import logging
 from datetime import datetime, timezone
 
+import httpx
+
 logger = logging.getLogger("agent.orchestrator")
 
 MAX_PER_CYCLE = 50
@@ -18,10 +20,21 @@ class Orchestrator:
         self.settings = settings
         self.stats = stats
 
-    def scan_mail_once(self):
+        # Bridge health tracking for reconnect with backoff
+        self.bridge_ok = True
+        self._last_bridge_retry = 0.0
+        self.BRIDGE_RETRY_INTERVAL = 45  # seconds
+
+    def scan_mail_once(self) -> bool:
+        """Scan pending mail and process.
+
+        Returns True if the bridge was reachable (regardless of
+        whether any emails were found). Returns False if the bridge
+        was unreachable — the caller should NOT advance last_mail.
+        """
         if self.commands.paused:
             logger.info("Scan skipped: paused")
-            return
+            return True  # bridge is fine, just paused
 
         cycle_start = time.time()
         total = 0
@@ -31,8 +44,21 @@ class Orchestrator:
                 logger.info("Cycle budget exceeded")
                 break
 
-            payload = self.bridge.mail_pending(
-                limit=self.settings["mail"]["max_batch"])
+            try:
+                payload = self.bridge.mail_pending(
+                    limit=self.settings["mail"]["max_batch"])
+            except (httpx.ConnectError, httpx.TimeoutException,
+                    ConnectionRefusedError, OSError) as e:
+                logger.error(
+                    "Bridge unreachable during scan: %s", e)
+                self.bridge_ok = False
+                return False
+            except Exception as e:
+                logger.error(
+                    "Bridge error during scan: %s", e)
+                self.bridge_ok = False
+                return False
+
             items = payload.get("items", [])
             if not items:
                 break
@@ -40,6 +66,7 @@ class Orchestrator:
             logger.info(
                 "Processing %d emails (cycle total: %d)",
                 len(items), total)
+            batch_start_total = total
             last_ack = None
 
             for item in items:
@@ -116,9 +143,17 @@ class Orchestrator:
                 self.bridge.mail_ack(last_ack)
                 logger.info("Acked through %s", last_ack)
 
+            # If the entire batch was already processed (all deduped),
+            # break out to avoid re-fetching the same items forever.
+            if total == batch_start_total:
+                logger.info("All items deduped, ending scan cycle")
+                break
+
         self.stats.update(
             last_scan=(
                 datetime.now(timezone.utc).isoformat()))
+
+        return True
 
     def scan_commands_once(self):
         payload = self.bridge.commands_pending(limit=20)
@@ -156,19 +191,18 @@ class Orchestrator:
         date = (item.get("date_received") or ""
                 )[:16].replace("T", " ")
 
-        if result.provider.startswith("fallback_error:"):
-            body = (item.get("body_text") or "").strip()
-            content_label = "Body"
-            content = body[:800] if body else result.summary
+        # For rule_based and fallback_error providers, show raw body
+        if result.provider in ("rule_based",) or result.provider.startswith("fallback_error:"):
+            body = (item.get("body_text")
+                    or item.get("snippet") or "").strip()
+            content = body[:1500] if body else "(no body)"
         else:
-            content_label = "Summary"
             content = result.summary
 
         return (
-            f"\U0001f514 {cat} "
-            f"[{result.urgency.upper()}]\n"
+            f"\U0001f514 {cat}\n"
             f"From: {sender}\n"
             f"Subject: {subject}\n"
-            f"Date: {date}\n"
-            f"{content_label}: {content}"
+            f"Date: {date}\n\n"
+            f"{content}"
         )

@@ -48,7 +48,11 @@ services:
       SETTINGS_FILE: /app/config/settings.toml
       BRIDGE_URL: http://host.docker.internal:9100
       BRIDGE_TOKEN_FILE: /run/secrets/bridge.token
+      FINANCE_API_URL: http://finance-api:8090
+      FINANCE_API_KEY: ${FINANCE_API_KEY}
 
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./config/settings.toml:/app/config/settings.toml:ro
       - ./data:/app/data

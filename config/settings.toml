@@ -27,11 +27,15 @@ shutdown_notifications = false
 allow_same_account_commands = true
 
 [classifier]
-provider_order = ["ollama"]
+provider_order = ["rule_based"]
 cloud_fallback_enabled = false
 generic_alert_on_total_failure = true
+finance_api_url = ""                  # overridden by FINANCE_API_URL env var in Docker
+rule_reload_interval_seconds = 3600
 # Only process emails whose sender_email domain matches one of these.
 # All other senders are silently skipped before any LLM call is made.
+# NOTE: When Finance API is reachable, mail rules are loaded from the DB
+# (GET /api/mail-rules) instead of this TOML list.
 allowed_sender_domains = [
   "maybank.co.id",
   "cimbniaga.co.id",

@@ -262,6 +262,11 @@ export const api = {
   nasSyncStatus: (options = {}) => get('/nas-sync/status', {}, options),
   nasSync: () => post('/nas-sync'),
 
+  getMailRules:  (options = {}) => get('/mail-rules', {}, options),
+  addMailRule:   (body)         => post('/mail-rules', body),
+  patchMailRule: (id, body)     => patch(`/mail-rules/${id}`, body),
+  deleteMailRule:(id)           => del(`/mail-rules/${id}`),
+
   householdSettings: (options = {}) => get('/household/settings', {}, options),
   createHouseholdCategory: (body) => post('/household/categories', body),
   updateHouseholdCategory: (code, body) => put(`/household/categories/${code}`, body),
