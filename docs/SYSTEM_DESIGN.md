@@ -72,6 +72,13 @@ The PWA owns user workflows. Settings -> Process Local PDFs runs preflight first
 
 The Household Expense PWA is an implemented LAN-only satellite service under `household-expense/`. It lets household staff record daily cash expenses from an Android/browser PWA while keeping those records in a separate NAS-local SQLite database.
 
+Current NAS automation defaults:
+
+- SSH user: `chfun`
+- SSH port: `22`
+- Finance replica sync target: `chfun@192.168.1.44:/volume1/finance/finance_readonly.db`
+- Local deploy scripts read the Synology sudo password from `secrets/nas_sudo_password`
+
 Runtime shape:
 
 ```text

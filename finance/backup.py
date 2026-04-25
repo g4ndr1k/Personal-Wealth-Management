@@ -63,9 +63,10 @@ SCHEDULER_POLL_SECONDS = 300
 
 # Set this env var to enable NAS sync.
 # Examples:
-#   user@192.168.1.10:/volume1/finance/finance_readonly.db   (SSH cat pipe, port 68)
+#   user@192.168.1.10:/volume1/finance/finance_readonly.db   (SSH cat pipe, default port 22)
 #   /Volumes/finance/finance_readonly.db                     (SMB local mount, shutil.copy2)
 NAS_SYNC_TARGET: str = os.environ.get("NAS_SYNC_TARGET", "")
+NAS_SYNC_SSH_PORT: str = os.environ.get("NAS_SYNC_SSH_PORT", "22")
 
 _NAS_SYNC_STATE_FILE = PROJECT_ROOT / "data" / ".nas_sync_state.json"
 _scheduler_lock = threading.Lock()
@@ -237,7 +238,7 @@ def sync_to_nas(db_path: str, force: bool = False, backup_dir: str | None = None
         "ssh",
         "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={Path.home() / '.ssh' / 'known_hosts'}",
-        "-p", "68",
+        "-p", NAS_SYNC_SSH_PORT,
     ]
     if Path(ssh_key).exists():
         ssh_base += ["-i", ssh_key]

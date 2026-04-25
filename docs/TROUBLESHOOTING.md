@@ -75,6 +75,44 @@ If `secrets/bridge.token` is a directory, remove the stale directory and re-expo
 - Use `scripts/setup-app.sh` / LaunchAgent setup for stable startup.
 - Keep bridge token validation strict: missing, empty, or directory token paths must fail with clear `503`.
 
+## NAS Deploy Or Sync Fails
+
+### Symptoms
+
+- `scripts/deploy_nas.sh` fails before upload, during image load, or while recreating the container.
+- `finance.backup.sync_to_nas()` returns SSH or permission errors.
+- Household NAS deploy works inconsistently after changing Synology users.
+
+### Likely Cause
+
+- NAS automation is still pointed at the old Synology account.
+- `secrets/nas_sudo_password` does not match the current NAS sudo password.
+- The NAS user can SSH, but does not own the sync target file.
+- Backup sync is using the wrong SSH port.
+
+### How To Diagnose
+
+```bash
+grep '^NAS_SYNC_TARGET=' .env
+ssh -i secrets/nas_sync_key chfun@192.168.1.44 'whoami'
+ssh -i secrets/nas_sync_key chfun@192.168.1.44 "printf '%s\n' \"$(cat secrets/nas_sudo_password)\" | sudo -S whoami"
+ssh -i secrets/nas_sync_key chfun@192.168.1.44 'ls -ld /volume1/finance && ls -l /volume1/finance/finance_readonly.db'
+```
+
+### Fix
+
+- Set NAS automation to the current SSH user, currently `chfun`.
+- Update `secrets/nas_sudo_password` after changing the Synology sudo password.
+- Ensure `NAS_SYNC_TARGET` points to `chfun@192.168.1.44:/volume1/finance/finance_readonly.db`.
+- If the target file is still owned by the old NAS user, change ownership so `chfun` can overwrite it.
+- Keep backup sync on SSH port `22` unless the NAS SSH listener is intentionally moved.
+
+### Prevention
+
+- When creating a new Synology admin/deploy user, install `secrets/nas_sync_key.pub` into that user’s `authorized_keys` before changing scripts.
+- Keep `scripts/deploy_nas.sh` and `household-expense/deploy_household.sh` aligned on the same NAS username.
+- Re-test both `bash scripts/deploy_nas.sh` and a real `finance.backup.sync_to_nas()` call after NAS account changes.
+
 ## Stale Python Path
 
 ### Symptoms

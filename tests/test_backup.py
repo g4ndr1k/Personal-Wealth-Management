@@ -118,3 +118,39 @@ def test_sync_to_nas_uses_latest_backup_available(tmp_path, monkeypatch):
     assert result['ok'] is True
     assert result['source'].endswith('finance_manual_20260416_120000.db')
     assert target.read_text() == 'latest-backup'
+
+
+def test_sync_to_nas_uses_configured_ssh_port(tmp_path, monkeypatch):
+    db_path = tmp_path / 'finance.db'
+    _create_db(db_path)
+
+    backup_root = tmp_path / 'backups'
+    manual_dir = backup_root / 'manual'
+    manual_dir.mkdir(parents=True)
+
+    latest_backup = manual_dir / 'finance_manual_20260416_120000.db'
+    latest_backup.write_text('latest-backup')
+
+    monkeypatch.setattr(backup, 'DEFAULT_BACKUP_DIR', str(backup_root))
+    monkeypatch.setattr(backup, 'NAS_SYNC_TARGET', 'chfun@192.168.1.44:/volume1/finance/finance_readonly.db')
+    monkeypatch.setattr(backup, 'NAS_SYNC_SSH_PORT', '22')
+    monkeypatch.setattr(backup, 'datetime', FixedDateTime)
+
+    called = {}
+
+    def fake_run(cmd, stdin=None, capture_output=None, timeout=None):
+        called['cmd'] = cmd
+        called['timeout'] = timeout
+        return type('R', (), {'returncode': 0, 'stderr': b''})()
+
+    monkeypatch.setattr(backup.subprocess, 'run', fake_run)
+
+    result = backup.sync_to_nas(str(db_path), force=True)
+
+    assert result['ok'] is True
+    assert called['cmd'][:5] == [
+        'ssh',
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', f'UserKnownHostsFile={Path.home() / ".ssh" / "known_hosts"}',
+    ]
+    assert called['cmd'][5:7] == ['-p', '22']

@@ -11,11 +11,45 @@ const LAYOUT_STORAGE_KEY = 'pwa_layout_mode'
 const API_KEY = import.meta.env.VITE_FINANCE_API_KEY || ''
 const CF_CLIENT_ID = import.meta.env.VITE_CF_ACCESS_CLIENT_ID || ''
 const CF_CLIENT_SECRET = import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET || ''
+const API_AUTH_RECOVERY_KEY = 'finance_api_auth_recovery_v1'
 if (!API_KEY) console.warn('VITE_FINANCE_API_KEY not set — requests will be unauthenticated')
 const AUTH_HEADERS = {
   ...(API_KEY ? { 'X-Api-Key': API_KEY } : {}),
   ...(CF_CLIENT_ID ? { 'CF-Access-Client-Id': CF_CLIENT_ID } : {}),
   ...(CF_CLIENT_SECRET ? { 'CF-Access-Client-Secret': CF_CLIENT_SECRET } : {}),
+}
+
+async function recoverFromUnauthorized() {
+  if (typeof window === 'undefined') return false
+
+  try {
+    if (window.sessionStorage.getItem(API_AUTH_RECOVERY_KEY) === '1') return false
+    window.sessionStorage.setItem(API_AUTH_RECOVERY_KEY, '1')
+  } catch {
+    return false
+  }
+
+  try {
+    await cacheClearAll()
+  } catch {}
+
+  try {
+    if (typeof caches !== 'undefined') {
+      const names = await caches.keys()
+      await Promise.all(names.map((name) => caches.delete(name)))
+    }
+  } catch {}
+
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(regs.map((reg) => reg.update().catch(() => undefined)))
+      await Promise.all(regs.map((reg) => reg.unregister().catch(() => undefined)))
+    }
+  } catch {}
+
+  window.location.reload()
+  return true
 }
 
 function isNetworkError(error) {
@@ -72,6 +106,9 @@ async function get(path, params = {}, options = {}) {
   try {
     const res = await fetch(url.toString(), { headers: AUTH_HEADERS })
     if (!res.ok) {
+      if (res.status === 401 && await recoverFromUnauthorized()) {
+        return new Promise(() => {})
+      }
       const text = await res.text().catch(() => '')
       const isHtml = text.trimStart().startsWith('<')
       const detail = isHtml
@@ -113,6 +150,9 @@ async function post(path, body = {}) {
     body: JSON.stringify(body),
   })
   if (!res.ok) {
+    if (res.status === 401 && await recoverFromUnauthorized()) {
+      return new Promise(() => {})
+    }
     const text = await res.text().catch(() => '')
     const isHtml = text.trimStart().startsWith('<')
     const detail = isHtml

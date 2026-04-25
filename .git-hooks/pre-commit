@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -z "$staged_files" ] && exit 0
+
+blocked_paths_regex='^(\.env(\..*)?$|pwa/\.env\.local$|secrets/|.*\.pem$|.*\.key$|.*\.p12$|.*\.pfx$)'
+secret_regex='(cfat_[A-Za-z0-9_-]{20,}|CF-Access-Client-Secret:[[:space:]]*[A-Za-z0-9._-]{16,}|CF-Access-Client-Id:[[:space:]]*[A-Za-z0-9._-]{10,}|(^|[^A-Za-z0-9_])FINANCE_API_KEY[[:space:]]*[=:][[:space:]]*[A-Za-z0-9._-]{16,}|(^|[^A-Za-z0-9_])VITE_FINANCE_API_KEY[[:space:]]*[=:][[:space:]]*[A-Za-z0-9._-]{16,}|Authorization:[[:space:]]*Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'
+
+while IFS= read -r path; do
+  [ -z "$path" ] && continue
+  if [ "$path" = ".git-hooks/pre-commit" ]; then
+    continue
+  fi
+  if printf '%s
+' "$path" | grep -Eq "$blocked_paths_regex"; then
+    echo "pre-commit: refusing to commit secret-bearing path: $path" >&2
+    exit 1
+  fi
+  if git diff --cached --unified=0 -- "$path" | grep -E '^\+[^+]' | grep -E "$secret_regex" >/dev/null; then
+    echo "pre-commit: possible secret detected in staged diff: $path" >&2
+    exit 1
+  fi
+done <<< "$staged_files"

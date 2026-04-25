@@ -224,7 +224,7 @@ Paste:
 #!/usr/bin/env bash
 set -euo pipefail
 
-NAS_USER="g4ndr1k"
+NAS_USER="chfun"
 NAS_HOST="192.168.1.44"
 STAG_DIR="/volume1/docker/codingholic-homepage/stag"
 MOUNT_PATH="/Volumes/docker/codingholic-homepage/stag"
@@ -276,7 +276,7 @@ Paste:
 #!/usr/bin/env bash
 set -euo pipefail
 
-NAS_USER="g4ndr1k"
+NAS_USER="chfun"
 NAS_HOST="192.168.1.44"
 BASE_DIR="/volume1/docker/codingholic-homepage"
 STAG_DIR="${BASE_DIR}/stag"

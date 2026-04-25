@@ -78,6 +78,13 @@ python3 -m finance.backup --kind manual
 
 `finance.importer` reads `output/xls/ALL_TRANSACTIONS.xlsx` and writes to `data/finance.db`.
 
+NAS automation defaults:
+
+- NAS SSH user: `chfun`
+- NAS SSH port: `22`
+- Finance replica sync target: `chfun@192.168.1.44:/volume1/finance/finance_readonly.db`
+- Local sudo password file for NAS automation: `secrets/nas_sudo_password`
+
 ## Process Local PDF Workflow
 
 Use Settings -> Process Local PDFs in the PWA for manual processing.
@@ -173,6 +180,8 @@ Expected secret files:
 | `secrets/gmail.toml` | Gmail app passwords if file fallback is used. |
 | `secrets/banks.toml` | Bank PDF passwords if file fallback is used. |
 | `secrets/nas_sync_key` | NAS SSH private key. |
+| `secrets/nas_sudo_password` | Synology sudo password used by NAS deploy scripts. |
+| `secrets/finance_api.key` | Exported finance API key used by NAS finance deploy script. |
 
 `secrets/bridge.token` must be a file, not a directory, and should have mode `600`.
 
@@ -194,6 +203,8 @@ Backups:
 - The finance DB is backed up with SQLite online backup helpers.
 - Manual backups can be triggered from Settings or `python3 -m finance.backup --kind manual`.
 - NAS sync uses SSH and the configured NAS target.
+- Current default NAS sync target is `chfun@192.168.1.44:/volume1/finance/finance_readonly.db`.
+- `finance.backup` now uses SSH port `22` by default; override with `NAS_SYNC_SSH_PORT` only if the NAS SSH port changes.
 
 PDF registry:
 
