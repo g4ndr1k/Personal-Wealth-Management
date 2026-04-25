@@ -1,23 +1,37 @@
 """
-pdf_handler.py — new HTTP endpoints added to the bridge for PDF→XLS processing.
+pdf_handler.py — PDF→XLS processing endpoints for the bridge.
 
-Registers these routes into bridge/server.py:
-  POST /pdf/upload          multipart/form-data, field "file", optional field "password"
-  POST /pdf/process         JSON {"job_id": "...", "password": "..."}  (for auto-detected)
-  GET  /pdf/status/<job_id> job progress and result
-  GET  /pdf/download/<job_id> download the produced XLS
-  GET  /pdf/jobs            list recent jobs
-  GET  /pdf/attachments     list auto-detected bank PDFs from Mail.app
+Registered routes (exposed via bridge/server.py):
+  POST /pdf/process-file   JSON {"folder", "relative_path", "password"} — queue a local PDF
+  GET  /pdf/status/<id>     job progress and result
+  GET  /pdf/jobs            list recent jobs (query param: limit)
+  GET  /pdf/preflight       validate config, folders, DB, and providers
+
+The finance API (finance/api.py) proxies these as:
+  POST /api/pdf/process-local
+  GET  /api/pdf/local-status/<id>
+  GET  /api/pdf/preflight
+  GET  /api/pdf/local-workspace  (merged local files + registry + job history)
 
 All endpoints require the same bearer token as the rest of the bridge.
 
 Jobs are queued and executed in background worker threads. Clients submit work
 then poll /pdf/status for progress instead of blocking the HTTP request until
 PDF parsing/export completes.
+
+Status vocabulary (shared with frontend via pwa/src/utils/pdfFormatters.js):
+  pending   — queued, waiting for worker
+  running   — actively processing
+  done      — fully succeeded (parse + export + secondary writes)
+  partial   — main parse succeeded but secondary writes (balance/holdings) failed
+  error     — parse or import failure
 """
 import os
+import sys
 import uuid
 import queue
+import hashlib
+import subprocess
 import logging
 import sqlite3
 import threading
@@ -26,6 +40,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 log = logging.getLogger(__name__)
+
+# ── PDF job status vocabulary (shared with frontend) ──────────────────────────
+STATUS_PENDING  = "pending"
+STATUS_RUNNING  = "running"
+STATUS_DONE     = "done"
+STATUS_ERROR    = "error"
+STATUS_PARTIAL  = "partial"   # main parse succeeded, secondary writes failed
 
 # These are set by init_pdf_handler() called from bridge/server.py
 _config = {}
@@ -142,6 +163,87 @@ def _describe_pdf_source(source_path: str) -> tuple[str, str, str]:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _record_processed_pdf(src_path: str, result: dict, logs: list[str]) -> None:
+    """Record manual PDF jobs in the shared processed_files registry."""
+    try:
+        from finance.pdf_log_sync import DEFAULT_REGISTRY_DB
+        from scripts.batch_process import Registry
+
+        sha256 = _sha256_file(src_path)
+        raw_status = result.get("status", "error")
+        if raw_status == STATUS_DONE:
+            status = "ok"
+        elif raw_status == STATUS_PARTIAL:
+            status = "partial"
+        else:
+            status = "error"
+        registry = Registry(DEFAULT_REGISTRY_DB)
+        registry.record(
+            sha256=sha256,
+            filename=Path(src_path).name,
+            source_path=src_path,
+            status=status,
+            bank=result.get("bank", ""),
+            stmt_type=result.get("stmt_type", ""),
+            period=result.get("period", ""),
+            transactions=int(result.get("transactions") or 0),
+            output_file=result.get("output_file", ""),
+            error=result.get("error", ""),
+            error_category="" if status in ("ok", "partial") else "parse_error",
+        )
+        logs.append(f"Registry: recorded {status} for {Path(src_path).name} ({sha256[:8]})")
+    except Exception as exc:
+        logs.append(f"Registry update warning: {exc}")
+
+
+def _run_finance_import(logs: list[str]) -> dict:
+    """Import ALL_TRANSACTIONS.xlsx into finance.db after a manual PDF job."""
+    from finance.categorizer import Categorizer
+    from finance.config import (
+        get_finance_config,
+        get_ollama_finance_config,
+        load_config,
+    )
+    from finance.importer import direct_import
+
+    cfg = load_config()
+    finance_cfg = get_finance_config(cfg)
+    ollama_cfg = get_ollama_finance_config(cfg)
+    categorizer = Categorizer(
+        aliases=[],
+        categories=[],
+        ollama_host=ollama_cfg.host,
+        ollama_model=ollama_cfg.model,
+        ollama_timeout=ollama_cfg.timeout_seconds,
+    )
+    stats = direct_import(
+        xlsx_path=finance_cfg.xlsx_input,
+        db_path=finance_cfg.sqlite_db,
+        categorizer=categorizer,
+        overwrite=False,
+        dry_run=False,
+        import_file_label=Path(finance_cfg.xlsx_input).name,
+    )
+    logs.append(
+        "Import: "
+        f"added={stats.get('added', 0)} "
+        f"skipped={stats.get('skipped', 0)} "
+        f"parse_err={stats.get('parse_err', 0)} "
+        f"review={stats.get('by_layer', {}).get(4, 0)}"
+    )
+    return stats
+
+
 def _run_verification(pdf_path: str, result, logs: list[str]) -> None:
     if not _config.get("verify_enabled", True):
         return
@@ -201,6 +303,11 @@ def get_bank_password(bank_name: str) -> str:
         except ImportError:
             pass
         # Keychain miss — fall through to file
+        passwords_file = _config.get("bank_passwords_file", "")
+        if not passwords_file or not os.path.exists(passwords_file):
+            raise LookupError(
+                f"No password for bank '{bank_name}' (source=keychain, "
+                f"no file fallback configured)")
 
     # File-based fallback
     passwords_file = _config.get("bank_passwords_file", "")
@@ -219,8 +326,9 @@ def get_bank_password(bank_name: str) -> str:
 def run_pdf_pipeline_file(src_path: str, password: str = "", bank_hint: str = "") -> dict:
     """Run the shared PDF pipeline and return structured results."""
     logs: list[str] = []
+    secondary_errors: list[str] = []
     result = {
-        "status": "error",
+        "status": STATUS_ERROR,
         "bank": bank_hint or "Unknown",
         "stmt_type": "unknown",
         "period": "",
@@ -272,6 +380,11 @@ def run_pdf_pipeline_file(src_path: str, password: str = "", bank_hint: str = ""
             logs.append(f"Parser warnings: {parsed.raw_errors}")
         _run_verification(unlocked_path, parsed, logs)
 
+        # Secondary wealth/balance/holding writes.
+        # These functions catch their own errors and append "warning:" to logs.
+        # We track the log position to detect any secondary failures.
+        _secondary_log_start = len(logs)
+
         if parsed.statement_type in ("savings", "consol", "consolidated") and parsed.accounts:
             _upsert_closing_balance(parsed, logs)
 
@@ -291,11 +404,20 @@ def run_pdf_pipeline_file(src_path: str, password: str = "", bank_hint: str = ""
         if parsed.statement_type in ("portfolio", "statement") and parsed.accounts:
             _upsert_closing_balance(parsed, logs)
 
+        # Collect any secondary-write warnings from the log
+        for entry in logs[_secondary_log_start:]:
+            if " upsert warning: " in entry:
+                secondary_errors.append(entry)
+
         output_dir = _config.get("xls_output_dir", "output/xls")
         output_path, _ = export(parsed, output_dir, owner_mappings)
         logs.append(f"Exported: {Path(output_path).name}")
 
-        result["status"] = "done"
+        if secondary_errors:
+            result["status"] = STATUS_PARTIAL
+            result["error"] = "; ".join(secondary_errors)
+        else:
+            result["status"] = STATUS_DONE
         result["output_path"] = output_path
         result["output_file"] = Path(output_path).name
     except Exception as exc:
@@ -450,6 +572,82 @@ def handle_jobs(limit: int = 50) -> tuple[int, dict]:
     return 200, {"jobs": safe}
 
 
+def handle_preflight() -> tuple[int, dict]:
+    """GET /pdf/preflight — validate config, folders, and DB for PDF processing."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # 1. Config loaded
+    if not _config:
+        errors.append("PDF handler not initialized — config is empty")
+        return 200, {"ok": False, "errors": errors, "warnings": warnings}
+
+    # 2. Provider order validation
+    try:
+        from app.providers import PROVIDERS
+        valid_providers = set(PROVIDERS)
+    except ImportError:
+        valid_providers = {"ollama", "rule_based"}
+    provider_order = _config.get("provider_order", [])
+    for p in provider_order:
+        if p not in valid_providers:
+            errors.append(
+                f"Config validation failed: provider '{p}' is not in "
+                f"allowed list {sorted(valid_providers)}"
+            )
+
+    # 3. Required folders
+    folder_map = _pdf_folder_map()
+    for name, path in folder_map.items():
+        if not path:
+            errors.append(f"Folder '{name}' is not configured (empty path)")
+        elif not os.path.isdir(path):
+            errors.append(f"Folder '{name}' does not exist: {path}")
+
+    # 4. Database connectivity
+    if _db_path:
+        try:
+            con = sqlite3.connect(_db_path, timeout=3)
+            con.execute("SELECT 1")
+            con.close()
+        except Exception as exc:
+            errors.append(f"Database unreachable at {_db_path}: {exc}")
+    else:
+        errors.append("Database path not configured")
+
+    # 5. Check pdf_jobs table exists
+    if _db_path and not errors:
+        try:
+            con = sqlite3.connect(_db_path, timeout=3)
+            con.execute("SELECT COUNT(*) FROM pdf_jobs LIMIT 1")
+            con.close()
+        except Exception as exc:
+            warnings.append(f"pdf_jobs table missing or unreadable: {exc}")
+
+    ok = len(errors) == 0
+    # ── Runtime diagnostics for tracing regressions ──
+    git_commit = ""
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        pass
+
+    return 200, {
+        "ok": ok,
+        "errors": errors,
+        "warnings": warnings,
+        "runtime": {
+            "python": sys.executable,
+            "git_commit": git_commit,
+            "api_version": "3.0.0",
+        },
+    }
+
+
 # ── Job runner ────────────────────────────────────────────────────────────────
 def _run_job(job_id: str, password: str):
     """Execute the full PDF→XLS pipeline for a job. Updates DB in place."""
@@ -461,12 +659,28 @@ def _run_job(job_id: str, password: str):
         _mark_job_finished(job_id)
         return
 
-    job["status"] = "running"
+    job["status"] = STATUS_RUNNING
     _upsert_job(job)
 
     try:
         src_path = job["source_path"]
         result = run_pdf_pipeline_file(src_path, password=password, bank_hint=job["bank"])
+        job_logs = []
+
+        if result["status"] in (STATUS_DONE, STATUS_PARTIAL):
+            try:
+                _run_finance_import(job_logs)
+            except Exception as exc:
+                result["status"] = STATUS_ERROR
+                result["error"] = f"SQLite import failed: {exc}"
+                job_logs.append(traceback.format_exc())
+
+        _record_processed_pdf(src_path, result, job_logs)
+        if job_logs:
+            result["log"] = "\n".join(
+                part for part in [result.get("log", ""), "\n".join(job_logs)]
+                if part
+            )
 
         job["status"] = result["status"]
         job["bank"] = result["bank"]
@@ -478,7 +692,7 @@ def _run_job(job_id: str, password: str):
 
     except Exception as e:
         log.error(f"Job {job_id} failed: {e}")
-        job["status"] = "error"
+        job["status"] = STATUS_ERROR
         job["error"] = str(e)
         job["log"] = traceback.format_exc()
     finally:
@@ -492,14 +706,14 @@ def _queue_job(job_id: str, password: str) -> None:
     job = _get_job(job_id)
     if not job:
         return
-    if job["status"] == "done":
+    if job["status"] == STATUS_DONE:
         return
-    if job["status"] == "running":
+    if job["status"] == STATUS_RUNNING:
         return
     if not _mark_job_queued(job_id):
         return
-    if job["status"] != "pending":
-        job["status"] = "pending"
+    if job["status"] != STATUS_PENDING:
+        job["status"] = STATUS_PENDING
         _upsert_job(job)
     _job_queue.put((job_id, password))
 

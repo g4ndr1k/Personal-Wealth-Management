@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import httpx
 
-from app.providers.rule_based_provider import RuleBasedProvider
+from app.providers import PROVIDERS
 from app.schemas import Classification
 
 logger = logging.getLogger("agent.classifier")
@@ -81,12 +81,14 @@ class Classifier:
 
         self.providers = []
         for name in settings["classifier"]["provider_order"]:
+            cls = PROVIDERS.get(name)
+            if cls is None:
+                raise ValueError(
+                    f"Unknown provider '{name}'. Available: {sorted(PROVIDERS)}")
             if name == "rule_based":
-                self.providers.append(RuleBasedProvider())
-            elif name == "ollama":
-                self.providers.append(OllamaProvider(settings))
-            elif name == "anthropic":
-                logger.info("Anthropic provider removed — skipping")
+                self.providers.append(cls())
+            else:
+                self.providers.append(cls(settings))
 
         # Load rules on startup (Finance API or TOML fallback)
         self._load_rules()

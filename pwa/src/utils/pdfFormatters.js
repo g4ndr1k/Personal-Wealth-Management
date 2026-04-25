@@ -42,11 +42,23 @@ export function truncateText(text, max = 80) {
   return text && text.length > max ? `${text.slice(0, max - 1)}…` : (text || '')
 }
 
+// ── PDF status vocabulary (mirrors bridge/pdf_handler.py constants) ──────────
+export const PDF_STATUS = {
+  PENDING:  'pending',
+  RUNNING:  'running',
+  DONE:     'done',
+  ERROR:    'error',
+  PARTIAL:  'partial',
+}
+
 export function getPdfStatusClass(file) {
   if (file.processingState) return file.processingState
   if (file.lastStatus === 'done') return 'ok'
   if (file.lastStatus === 'error') return 'error'
   if (file.lastStatus === 'pending') return 'pending'
+  if (file.lastStatus === 'running') return 'processing'
+  if (file.lastStatus === 'partial') return 'partial'
+  if (file.lastStatus === 'missing_source') return 'error'
   return 'new'
 }
 
@@ -57,6 +69,7 @@ export function getPdfStatusLabel(file) {
     pending: 'Pending',
     processing: 'Processing',
     ok: 'Done',
+    partial: 'Partial',
     skipped: 'Skipped',
     error: 'Failed',
   }[status] || 'New'
@@ -65,14 +78,18 @@ export function getPdfStatusLabel(file) {
 export function getPdfDetail(file) {
   if (file.processingState === 'processing') return 'Processing now…'
   if (file.processingMeta) return file.processingMeta
+  if (file.lastStatus === 'missing_source') return 'Source file missing'
   if (file.lastStatus === 'error' && file.lastError) return truncateText(file.lastError, 120)
+  if (file.lastStatus === 'partial' && file.lastError) return truncateText(file.lastError, 120)
   if (file.lastStatus === 'done') return 'Processed previously'
   return 'Ready to process'
 }
 
 export function isPdfReadyToProcess(file) {
   if (file.processingState === 'processing') return false
-  return !file.lastStatus || (file.lastStatus !== 'done' && file.lastStatus !== 'pending' && file.lastStatus !== 'error')
+  // running, partial, done, pending, error — all non-processable
+  const nonProcessable = new Set(['done', 'pending', 'running', 'error', 'partial'])
+  return !file.lastStatus || !nonProcessable.has(file.lastStatus)
 }
 
 // Group files by institution, optionally by period within each institution.

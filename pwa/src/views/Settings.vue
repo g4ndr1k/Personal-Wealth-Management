@@ -435,9 +435,24 @@
 
               <div class="pdf-controls-footer">
                 <div class="pdf-selection-note">
-                  {{ selectedPdfCount }} selected · {{ visiblePdfFiles.length }} shown · {{ pdfWorkspace.files.length }} total
+                  {{ selectedPdfCount }} selected · {{ readyToProcessFiles.length }} ready · {{ visiblePdfFiles.length }} shown · {{ pdfWorkspace.files.length }} total
                 </div>
                 <div class="pdf-controls-actions">
+                  <!-- Pre-flight errors -->
+                  <div v-if="preflightState.errors.length" class="preflight-errors" style="grid-column:1/-1">
+                    <div v-for="(err, i) in preflightState.errors" :key="i" class="preflight-error-item">
+                      ⚠ {{ err }}
+                    </div>
+                  </div>
+                  <div v-if="preflightState.warnings.length" class="preflight-warnings" style="grid-column:1/-1">
+                    <div v-for="(w, i) in preflightState.warnings" :key="i" class="preflight-warning-item">
+                      ⚡ {{ w }}
+                    </div>
+                  </div>
+                  <!-- Post-run warning: 0 processed -->
+                  <div v-if="pdfProcessWarning" class="preflight-warnings" style="grid-column:1/-1">
+                    <div class="preflight-warning-item">⚠ {{ pdfProcessWarning }}</div>
+                  </div>
                   <button
                     class="btn btn-ghost btn-sm"
                     :disabled="selectedPdfCount === 0 || pdf.phase === 'processing'"
@@ -447,7 +462,7 @@
                   </button>
                   <button
                     class="btn btn-primary btn-sm"
-                    :disabled="selectedPdfCount === 0 || pdf.phase === 'processing' || pdfWorkspace.loading"
+                    :disabled="pdfProcessableCount === 0 || pdf.phase === 'processing' || pdfWorkspace.loading"
                     @click="processSelectedPdfs"
                   >
                     <span v-if="pdf.phase === 'processing'">
@@ -455,7 +470,7 @@
                       Processing {{ pdf.processed }} / {{ pdf.total }}…
                     </span>
                     <span v-else>
-                      Process Selected
+                      {{ selectedPdfCount > 0 ? 'Process Selected' : 'Process Ready PDFs' }}
                     </span>
                   </button>
                 </div>
@@ -1177,6 +1192,7 @@ const EMPTY_PDF_STATE = () => ({
   processed: 0,
   total: 0,
   fatalError: null,
+  summary: null,   // { ok: number, error: number, partial: number } after run
 })
 const pdf = ref(EMPTY_PDF_STATE())
 const pdfWorkspace = ref({
@@ -1192,6 +1208,8 @@ const pdfExpanded = ref({
   months: {},
   readyToProcess: true,
 })
+const preflightState = ref({ loading: false, error: null, errors: [], warnings: [] })
+const pdfProcessWarning = ref('')
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -1226,6 +1244,10 @@ const visiblePdfFiles = computed(() => {
 
 const selectedPdfCount = computed(() =>
   pdfWorkspace.value.files.filter(file => file.selected).length
+)
+
+const pdfProcessableCount = computed(() =>
+  selectedPdfCount.value > 0 ? selectedPdfCount.value : readyToProcessFiles.value.length
 )
 
 const allVisibleSelected = computed(() =>
@@ -1557,6 +1579,14 @@ function applyPdfRunResult(file, final) {
     return
   }
 
+  if (final.status === 'partial') {
+    file.processingState = null
+    file.processingMeta = truncateText(final.error || 'Partial success — some secondary writes failed')
+    file.lastStatus = 'partial'
+    file.lastError = final.error || ''
+    return
+  }
+
   file.lastStatus = 'done'
   file.lastError = ''
 
@@ -1571,9 +1601,52 @@ function applyPdfRunResult(file, final) {
   file.processingMeta = match ? truncateText(match[0].trim(), 80) : 'Imported'
 }
 
+async function runPdfPreflight() {
+  preflightState.value = { loading: true, error: null, errors: [], warnings: [] }
+  try {
+    const result = await api.pdfPreflight({ forceFresh: true })
+    preflightState.value = {
+      loading: false,
+      error: null,
+      errors: result.errors || [],
+      warnings: result.warnings || [],
+    }
+    return result.ok === true
+  } catch (err) {
+    preflightState.value = {
+      loading: false,
+      error: err.message,
+      errors: [err.message],
+      warnings: [],
+    }
+    return false
+  }
+}
+
 async function processSelectedPdfs() {
-  const selected = pdfWorkspace.value.files.filter(file => file.selected)
+  // ── Pre-flight validation ──
+  const preflightOk = await runPdfPreflight()
+  if (!preflightOk) return
+  pdfProcessWarning.value = ''
+
+  const explicitSelection = pdfWorkspace.value.files
+    .filter(file => file.selected)
+    .map(file => ({
+      key: file.key,
+      folder: file.folder,
+      relativePath: file.relativePath,
+      filename: file.filename,
+    }))
+  const selected = explicitSelection.length > 0
+    ? explicitSelection
+    : readyToProcessFiles.value.map(file => ({
+        key: file.key,
+        folder: file.folder,
+        relativePath: file.relativePath,
+        filename: file.filename,
+      }))
   if (selected.length === 0) return
+  console.log(`[PDF] Processing ${selected.length} file(s):`, selected.map(f => f.filename))
 
   _pdfAbortController?.abort()
   _pdfAbortController = new AbortController()
@@ -1583,37 +1656,81 @@ async function processSelectedPdfs() {
   pdf.value.phase = 'processing'
   pdf.value.total = selected.length
 
-  for (let i = 0; i < selected.length; i++) {
+  const queued = []
+  for (const item of selected) {
     if (signal.aborted) break
-    const file = selected[i]
+    const file = pdfWorkspace.value.files.find(candidate => candidate.key === item.key)
+    if (!file) continue
+
     file.processingState = 'processing'
     file.processingMeta = ''
-    pdf.value.current = file.filename
+    pdf.value.current = item.filename
 
     try {
-      const res = await api.processLocalPdf(file.folder, file.relativePath)
+      const res = await api.processLocalPdf(item.folder, item.relativePath)
       const jobId = res.job_id
       if (!jobId) throw new Error('No job_id returned')
-      const final = await pollStatus(jobId, 180_000, signal)
-      applyPdfRunResult(file, final)
+      queued.push({ ...item, jobId })
+      console.log(`[PDF] Queued: ${item.filename} → job ${jobId}`)
     } catch (err) {
       if (err?.name === 'AbortError') break
-      await loadPdfWorkspace()
-      const refreshed = pdfWorkspace.value.files.find(candidate => candidate.key === file.key)
-      if (refreshed && refreshed.lastStatus === 'done') {
-        continue
-      }
+      console.warn(`[PDF] Failed to queue: ${item.filename} — ${err.message}`)
       file.processingState = 'error'
       file.processingMeta = truncateText(err.message)
       file.lastStatus = 'error'
       file.lastError = err.message
+      pdf.value.processed += 1
+    }
+  }
+
+  for (const item of queued) {
+    if (signal.aborted) break
+    const file = pdfWorkspace.value.files.find(candidate => candidate.key === item.key)
+    if (!file) {
+      pdf.value.processed += 1
+      continue
     }
 
-    pdf.value.processed = i + 1
+    file.processingState = 'processing'
+    file.processingMeta = ''
+    pdf.value.current = item.filename
+
+    try {
+      const final = await pollStatus(item.jobId, 180_000, signal)
+      applyPdfRunResult(file, final)
+      console.log(`[PDF] Completed: ${item.filename} → ${final.status}`)
+    } catch (err) {
+      if (err?.name === 'AbortError') break
+      console.warn(`[PDF] Poll failed: ${item.filename} — ${err.message}`)
+      file.processingState = 'error'
+      file.processingMeta = truncateText(err.message)
+      file.lastStatus = 'error'
+      file.lastError = err.message
+    } finally {
+      pdf.value.processed += 1
+    }
   }
 
   pdf.value.phase = 'idle'
   pdf.value.current = ''
+
+  // Tally per-file outcomes for the run summary
+  const tally = { ok: 0, error: 0, partial: 0 }
+  for (const item of selected) {
+    const file = pdfWorkspace.value.files.find(candidate => candidate.key === item.key)
+    if (!file) continue
+    const cls = getPdfStatusClass(file)
+    if (cls === 'ok') tally.ok++
+    else if (cls === 'partial') tally.partial++
+    else if (cls === 'error') tally.error++
+  }
+  pdf.value.summary = tally
+
+  console.log(`[PDF] All done. ${pdf.value.processed}/${pdf.value.total} processed. Summary:`, tally)
+  if (pdf.value.total > 0 && pdf.value.processed === 0) {
+    pdfProcessWarning.value = `Preflight passed but 0 of ${pdf.value.total} file(s) were processed. Check console for details.`
+    console.warn('[PDF] Warning: preflight OK but no files were processed — possible silent failure.')
+  }
   await loadPdfWorkspace()
 }
 
@@ -2836,5 +2953,29 @@ onMounted(async () => {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .5px;
+}
+.preflight-errors {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.preflight-error-item {
+  color: #fca5a5;
+  margin: 2px 0;
+}
+.preflight-warnings {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.preflight-warning-item {
+  color: #fcd34d;
+  margin: 2px 0;
 }
 </style>

@@ -24,6 +24,7 @@ from bridge.pipeline import PipelineRunner
 from bridge.pdf_handler import (
     init_pdf_handler,
     handle_process_file, handle_status, handle_jobs,
+    handle_preflight,
 )
 
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.toml"
@@ -104,6 +105,8 @@ class AppContext:
             "pdf_unlocked_dir":         cfg["pdf"]["unlocked_dir"],
             "xls_output_dir":           cfg["pdf"]["xls_output_dir"],
             "bank_passwords_file":      cfg["pdf"]["bank_passwords_file"],
+            "bank_passwords_source":    cfg["pdf"].get("bank_passwords_source", "file"),
+            "provider_order":           cfg.get("classifier", {}).get("provider_order", []),
             "attachment_seen_db":       cfg["pdf"]["attachment_seen_db"],
             "attachment_lookback_days": cfg["pdf"]["attachment_lookback_days"],
             "verify_enabled":           cfg["pdf"].get("verify_enabled", True),
@@ -196,6 +199,11 @@ class Handler(BaseHTTPRequestHandler):
                     "timestamp": (
                         datetime.now(timezone.utc).isoformat()),
                 })
+                return
+
+            if path == "/pdf/preflight":
+                status, payload = handle_preflight()
+                self._json(status, payload)
                 return
 
             if path == "/mail/schema":

@@ -3292,14 +3292,37 @@ _PDF_FOLDERS: dict[str, _pl.Path] = {
 _PDF_REGISTRY_DB = _DATA_DIR / "processed_files.db"
 
 def _read_bridge_token() -> str:
-    """Read the bridge bearer token from the secrets mount (best-effort)."""
+    """Read the bridge bearer token from the secrets mount.
+
+    Returns the token string, or raises HTTPException(503) with a structured
+    error so callers never silently proxy without auth.
+    """
     for candidate in [
         _pl.Path("/app/secrets/bridge.token"),
         _pl.Path(os.environ.get("BRIDGE_TOKEN_FILE", "/app/secrets/bridge.token")),
     ]:
-        if candidate.exists():
-            return candidate.read_text().strip()
-    return ""
+        if candidate.is_dir():
+            raise HTTPException(
+                503,
+                detail={"error": "bridge_token_unreadable",
+                        "detail": f"{candidate} is a directory, not a file — "
+                                  f"re-run scripts/export-secrets-for-docker.sh"},
+            )
+        if candidate.is_file():
+            content = candidate.read_text().strip()
+            if content:
+                return content
+            raise HTTPException(
+                503,
+                detail={"error": "bridge_token_empty",
+                        "detail": f"{candidate} exists but is empty"},
+            )
+    raise HTTPException(
+        503,
+        detail={"error": "bridge_token_missing",
+                "detail": "No bridge.token file found — "
+                          "check BRIDGE_TOKEN_FILE env var and secrets mount"},
+    )
 
 
 def _sha256_file(path: _pl.Path) -> str:
@@ -3311,14 +3334,22 @@ def _sha256_file(path: _pl.Path) -> str:
 
 
 def _normalize_registry_status(status: str, error: str = "") -> str | None:
+    """Map raw registry/job statuses to frontend-safe vocabulary.
+
+    Returns one of: 'done', 'error', 'missing_source', 'partial', or None.
+    """
     normalized = str(status or "").strip().lower()
     error_text = str(error or "").lower()
-    if normalized == "error" and "no such file or directory" in error_text:
+    if normalized == "ok" or normalized == "done":
         return "done"
-    if normalized == "ok":
-        return "done"
+    if normalized == "partial":
+        return "partial"
     if normalized == "error":
+        if "no such file or directory" in error_text:
+            return "missing_source"
         return "error"
+    if normalized in ("pending", "running"):
+        return normalized
     return None
 
 def _bridge_headers(token: str) -> dict:
@@ -3333,8 +3364,16 @@ def _bridge_get(path: str, token: str) -> dict:
         f"{_BRIDGE_URL}{path}",
         headers={"Authorization": f"Bearer {token}"} if token else {},
     )
-    with _urllib_req.urlopen(req, timeout=15) as r:
-        return _json.loads(r.read())
+    try:
+        with _urllib_req.urlopen(req, timeout=15) as r:
+            return _json.loads(r.read())
+    except _urllib_err.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise HTTPException(e.code, detail=body)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, detail=f"Bridge unreachable: {e}")
 
 def _bridge_post_json(path: str, body: dict, token: str) -> dict:
     """Synchronous bridge POST (JSON) — run via asyncio.to_thread."""
@@ -3346,8 +3385,16 @@ def _bridge_post_json(path: str, body: dict, token: str) -> dict:
             **( {"Authorization": f"Bearer {token}"} if token else {} ),
         }, method="POST",
     )
-    with _urllib_req.urlopen(req, timeout=60) as r:
-        return _json.loads(r.read())
+    try:
+        with _urllib_req.urlopen(req, timeout=60) as r:
+            return _json.loads(r.read())
+    except _urllib_err.HTTPError as e:
+        resp_body = e.read().decode(errors="replace")
+        raise HTTPException(e.code, detail=resp_body)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, detail=f"Bridge unreachable: {e}")
 
 def _bridge_upload(path: str, filename: str, file_bytes: bytes, token: str) -> dict:
     """Synchronous multipart upload to bridge — run via asyncio.to_thread."""
@@ -3365,8 +3412,16 @@ def _bridge_upload(path: str, filename: str, file_bytes: bytes, token: str) -> d
             **( {"Authorization": f"Bearer {token}"} if token else {} ),
         }, method="POST",
     )
-    with _urllib_req.urlopen(req, timeout=60) as r:
-        return _json.loads(r.read())
+    try:
+        with _urllib_req.urlopen(req, timeout=60) as r:
+            return _json.loads(r.read())
+    except _urllib_err.HTTPError as e:
+        resp_body = e.read().decode(errors="replace")
+        raise HTTPException(e.code, detail=resp_body)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, detail=f"Bridge unreachable: {e}")
 
 
 @app.get("/api/pdf/local-files")
@@ -3419,11 +3474,15 @@ async def pdf_local_workspace(_auth=Depends(require_api_key)):
     files = await pdf_local_files(_auth)
 
     token = _read_bridge_token()
+    bridge_warning = ""
     try:
         jobs_res = await _asyncio.to_thread(_bridge_get, "/pdf/jobs?limit=200", token)
         jobs = jobs_res.get("jobs", [])
+    except HTTPException:
+        raise
     except Exception as exc:
         log.warning("Could not load bridge PDF job history: %s", exc)
+        bridge_warning = f"Bridge unreachable: {exc}"
         jobs = []
 
     registry_by_hash: dict[str, sqlite3.Row] = {}
@@ -3494,7 +3553,27 @@ async def pdf_local_workspace(_auth=Depends(require_api_key)):
             ),
         })
 
-    return {"files": merged}
+    result = {"files": merged}
+    if bridge_warning:
+        result["bridge_warning"] = bridge_warning
+    return result
+
+
+
+@app.get("/api/pdf/preflight")
+def pdf_preflight(_auth=Depends(require_api_key)):
+    """Proxy bridge /pdf/preflight so the PWA can validate before processing."""
+    token = _read_bridge_token()
+    try:
+        return _bridge_get("/pdf/preflight", token)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return {
+            "ok": False,
+            "errors": [f"Bridge unreachable: {exc}"],
+            "warnings": [],
+        }
 
 
 class _ProcessLocalReq(BaseModel):
@@ -3539,6 +3618,8 @@ async def pdf_process_local(req: _ProcessLocalReq, _auth=Depends(require_api_key
             {"folder": req.folder, "relative_path": relative_path},
             token,
         )
+    except HTTPException:
+        raise
     except _urllib_err.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise HTTPException(502, f"Bridge error {e.code}: {body}")
@@ -3558,6 +3639,8 @@ async def pdf_local_status(job_id: str, _auth=Depends(require_api_key)):
     token = _read_bridge_token()
     try:
         return await _asyncio.to_thread(_bridge_get, f"/pdf/status/{job_id}", token)
+    except HTTPException:
+        raise
     except _urllib_err.HTTPError as e:
         raise HTTPException(502, f"Bridge status error: {e.code} {e.reason}")
     except Exception as e:
@@ -3569,6 +3652,8 @@ async def pipeline_status():
     token = _read_bridge_token()
     try:
         return await _asyncio.to_thread(_bridge_get, "/pipeline/status", token)
+    except HTTPException:
+        raise
     except _urllib_err.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise HTTPException(502, f"Bridge status error {e.code}: {body}")
@@ -3581,6 +3666,8 @@ async def pipeline_run():
     token = _read_bridge_token()
     try:
         return await _asyncio.to_thread(_bridge_post_json, "/pipeline/run", {}, token)
+    except HTTPException:
+        raise
     except _urllib_err.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise HTTPException(502, f"Bridge run error {e.code}: {body}")

@@ -24,7 +24,7 @@ from .base import StatementResult
 from . import (
     maybank_cc, maybank_consol,
     bca_cc, bca_savings, bca_rdn,
-    permata_cc, permata_savings, permata_rdn,
+    permata_cc, permata_savings, permata_rdn, permata_usd_savings,
     cimb_niaga_cc, cimb_niaga_consol,
     ipot_portfolio, ipot_statement,
     bni_sekuritas_legacy,
@@ -54,6 +54,9 @@ def detect_and_parse(pdf_path: str, ollama_client=None,
 
     if permata_rdn.can_parse(page1_text):
         return permata_rdn.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
+
+    if permata_usd_savings.can_parse(page1_text):
+        return permata_usd_savings.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
 
     if permata_savings.can_parse(page1_text):
         return permata_savings.parse(pdf_path, owner_mappings=owner_mappings, ollama_client=ollama_client)
@@ -122,6 +125,8 @@ def detect_bank_and_type(pdf_path: str) -> tuple[str, str]:
         return "Permata", "cc"
     if permata_rdn.can_parse(page1_text):
         return "Permata", "rdn"
+    if permata_usd_savings.can_parse(page1_text):
+        return "Permata", "savings"
     if permata_savings.can_parse(page1_text):
         return "Permata", "savings"
     if bca_cc.can_parse(page1_text):

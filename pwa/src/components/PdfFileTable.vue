@@ -172,6 +172,7 @@ defineProps({
 .pdf-status-pending    { background: rgba(59,130,246,0.18);  color: #93c5fd; }
 .pdf-status-processing { background: rgba(96,165,250,0.24);  color: #dbeafe; }
 .pdf-status-ok         { background: rgba(34,197,94,0.18);   color: #86efac; }
+.pdf-status-partial    { background: rgba(245,158,11,0.18);  color: #fcd34d; }
 .pdf-status-skipped    { background: rgba(245,158,11,0.18);  color: #fcd34d; }
 .pdf-status-error      { background: rgba(239,68,68,0.18);   color: #fca5a5; }
 </style>

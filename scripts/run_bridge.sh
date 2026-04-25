@@ -13,7 +13,7 @@ set -euo pipefail
 
 APP_BUNDLE="/Applications/AgenticAI.app"
 LAUNCHER="${APP_BUNDLE}/Contents/MacOS/launch_bridge"
-FALLBACK_PYTHON="/opt/homebrew/bin/python3.14"
+FALLBACK_PYTHON="$(command -v python3.14 || command -v python3.13 || command -v python3)"
 PROJECT_ROOT="/Users/g4ndr1k/agentic-ai"
 
 # ── Mode: check only ───────────────────────────────────────────────────

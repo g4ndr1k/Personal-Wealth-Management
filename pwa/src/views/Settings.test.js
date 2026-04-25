@@ -57,11 +57,27 @@ vi.mock('../api/client.js', () => ({
     runPipeline: vi.fn(),
     pdfLocalStatus: vi.fn(),
     pdfLocalWorkspace: vi.fn(),
+    pdfLocalFiles: vi.fn().mockResolvedValue([]),
     processLocalPdf: vi.fn(),
+    pdfPreflight: vi.fn().mockResolvedValue({ ok: true, errors: [], warnings: [] }),
+    getMailRules: vi.fn().mockResolvedValue([]),
   },
 }))
 
 import Settings from './Settings.vue'
+
+// Stub RouterLink so Vue doesn't warn about the unresolved component
+const RouterLink = { template: '<a><slot /></a>' }
+
+// Helper: expand a collapsed section by its toggle button text
+async function expandSection(wrapper, sectionText) {
+  const toggle = wrapper.findAll('button.setting-card__toggle').find(
+    b => b.text().includes(sectionText)
+  )
+  if (toggle) await toggle.trigger('click')
+  await flushPromises()
+}
+
 
 describe('Settings category editor', () => {
   beforeEach(() => {
@@ -126,7 +142,7 @@ describe('Settings category editor', () => {
   })
 
   it('loads an existing category into the editor', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
 
     await wrapper.find('[data-testid="category-preset-select"]').setValue('Food')
@@ -138,7 +154,7 @@ describe('Settings category editor', () => {
   })
 
   it('saves a new category and refreshes store categories', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
 
     await wrapper.find('[data-testid="category-preset-select"]').setValue('__new__')
@@ -166,11 +182,17 @@ describe('Settings category editor', () => {
   })
 
   it('shows backup retention status for each tier', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
 
     expect(backupStatus).toHaveBeenCalledWith({ forceFresh: true })
     expect(wrapper.text()).toContain('Backup')
+    // Expand the collapsed backup section
+    const backupToggle = wrapper.findAll('button.setting-card__toggle').find(
+      b => b.text().includes('Backup')
+    )
+    if (backupToggle) await backupToggle.trigger('click')
+    await flushPromises()
     expect(wrapper.text()).toContain('Hourly')
     expect(wrapper.text()).toContain('12 / 24 kept')
     expect(wrapper.text()).toContain('Manual')
@@ -178,8 +200,9 @@ describe('Settings category editor', () => {
   })
 
   it('triggers a manual backup from settings', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
+    await expandSection(wrapper, 'Backup')
 
     await wrapper.find('[data-testid="manual-backup-button"]').trigger('click')
     await flushPromises()
@@ -190,8 +213,9 @@ describe('Settings category editor', () => {
   })
 
   it('shows household tools and refreshed about info', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
+    await expandSection(wrapper, 'Household')
 
     expect(householdSettings).toHaveBeenCalledWith({ forceFresh: true })
     expect(wrapper.text()).toContain('Household Expense')
@@ -200,8 +224,9 @@ describe('Settings category editor', () => {
   })
 
   it('updates a household transaction category and cash pool balance', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
+    await expandSection(wrapper, 'Household')
 
     await wrapper.find('[data-testid="household-transaction-category-7"]').setValue('meals')
     await wrapper.find('[data-testid="household-transaction-save-7"]').trigger('click')
@@ -209,16 +234,17 @@ describe('Settings category editor', () => {
 
     expect(updateHouseholdTransactionCategory).toHaveBeenCalledWith(7, { category_code: 'meals' })
 
-    await wrapper.find('[data-testid="household-cash-pool-adjustment-pool-1"]').setValue('50000')
-    await wrapper.find('[data-testid="household-cash-pool-save-pool-1"]').trigger('click')
+    await wrapper.find('[data-testid="household-cashpool-amount-pool-1"]').setValue('50000')
+    await wrapper.find('[data-testid="household-cashpool-save-pool-1"]').trigger('click')
     await flushPromises()
 
     expect(updateHouseholdCashPool).toHaveBeenCalledWith('pool-1', { adjustment_amount: 50000, notes: '' })
   })
 
   it('creates, updates, and deletes household categories from settings', async () => {
-    const wrapper = mount(Settings)
+    const wrapper = mount(Settings, { global: { stubs: { RouterLink } } })
     await flushPromises()
+    await expandSection(wrapper, 'Household')
 
     await wrapper.find('[data-testid="household-category-code-input"]').setValue('fruit')
     await wrapper.find('[data-testid="household-category-label-input"]').setValue('Buah')

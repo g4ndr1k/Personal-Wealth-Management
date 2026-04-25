@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.14
+#!/usr/bin/env python3
 """Export secrets from macOS Keychain to files for Docker container mounts.
 
 Keychain is the source of truth. This script writes files into secrets/

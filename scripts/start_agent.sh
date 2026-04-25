@@ -3,7 +3,7 @@
 # Waits for Docker Desktop to be ready before launching.
 
 COMPOSE_DIR="/Users/g4ndr1k/agentic-ai"
-DOCKER="/usr/local/bin/docker"
+DOCKER="$(command -v docker)"
 LOG_PREFIX="[start_agent]"
 MAX_WAIT=120   # seconds to wait for Docker Desktop
 INTERVAL=5

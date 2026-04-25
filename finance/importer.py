@@ -203,7 +203,7 @@ def direct_import(
         return _stats(0, 0, 0, 0, {}, 0.0, dry_run)
 
     header = [str(v).strip() if v else "" for v in all_rows[0]]
-    _warn_if_header_mismatch(header)
+    _check_header(header)
     data_rows = all_rows[1:]
     log.info("direct_import: read %d data rows.", len(data_rows))
 
@@ -609,17 +609,28 @@ def _stats(
     }
 
 
-def _warn_if_header_mismatch(actual: list[str]):
+def _check_header(actual: list[str]):
     mismatches = [
         (i, exp, act)
-        for i, (exp, act) in enumerate(zip(_EXPECTED_HEADERS, actual))
+        for i, (exp, act) in enumerate(
+            zip(_EXPECTED_HEADERS, actual[:len(_EXPECTED_HEADERS)])
+        )
         if exp != act
     ]
+    if len(actual) != len(_EXPECTED_HEADERS):
+        max_len = max(len(actual), len(_EXPECTED_HEADERS))
+        for i in range(min(len(actual), len(_EXPECTED_HEADERS)), max_len):
+            exp = _EXPECTED_HEADERS[i] if i < len(_EXPECTED_HEADERS) else ""
+            act = actual[i] if i < len(actual) else ""
+            mismatches.append((i, exp, act))
+
     if mismatches:
-        log.warning(
-            "XLSX header mismatch (column mapping may be wrong):\n%s",
-            "\n".join(f"  col {i}: expected '{e}', got '{a}'"
-                      for i, e, a in mismatches),
+        raise ValueError(
+            "XLSX header mismatch:\n"
+            + "\n".join(
+                f"  col {i}: expected {expected!r}, got {actual_value!r}"
+                for i, expected, actual_value in mismatches
+            )
         )
 
 

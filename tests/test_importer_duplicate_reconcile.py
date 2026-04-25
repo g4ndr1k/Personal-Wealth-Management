@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import openpyxl
+import pytest
 
 from finance.db import open_db
 from finance.importer import direct_import
@@ -179,3 +180,30 @@ def test_direct_import_does_not_merge_distinct_same_day_same_amount_transactions
         'THE COFFEE CLUB TANGERANG ID',
         'THE COFFEE CLUB TANGERANG KOT',
     ]
+
+
+def test_direct_import_fails_fast_on_xlsx_header_mismatch(tmp_path):
+    db_path = str(tmp_path / 'finance.db')
+    open_db(db_path).close()
+
+    xlsx_path = tmp_path / 'bad_headers.xlsx'
+    _write_xlsx(xlsx_path, 'TRSF E-BANKING DB / 0403/FTFVA/WS95031')
+
+    wb = openpyxl.load_workbook(xlsx_path)
+    ws = wb['ALL_TRANSACTIONS']
+    ws['C1'], ws['D1'] = ws['D1'].value, ws['C1'].value
+    wb.save(xlsx_path)
+
+    with pytest.raises(ValueError, match="XLSX header mismatch") as excinfo:
+        direct_import(
+            xlsx_path=str(xlsx_path),
+            db_path=db_path,
+            categorizer=DummyCategorizer(),
+            overwrite=False,
+            dry_run=False,
+            import_file_label='ALL_TRANSACTIONS.xlsx',
+        )
+
+    message = str(excinfo.value)
+    assert "col 2: expected 'Bank', got 'Statement Type'" in message
+    assert "col 3: expected 'Statement Type', got 'Bank'" in message

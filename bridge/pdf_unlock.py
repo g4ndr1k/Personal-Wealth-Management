@@ -75,6 +75,10 @@ def is_encrypted(pdf_path: str) -> bool:
     """Quick check whether a PDF is password-protected."""
     try:
         import pikepdf
+    except ImportError:
+        return False
+
+    try:
         with pikepdf.open(pdf_path) as _:
             return False
     except (pikepdf.PasswordError, pikepdf.EncryptionError):

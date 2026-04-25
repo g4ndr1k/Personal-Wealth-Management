@@ -1,7 +1,7 @@
 import { clientsClaim } from 'workbox-core'
 import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching'
 import { registerRoute } from 'workbox-routing'
-import { StaleWhileRevalidate, NetworkFirst } from 'workbox-strategies'
+import { StaleWhileRevalidate, NetworkFirst, NetworkOnly } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
 
@@ -67,7 +67,7 @@ registerRoute(
     !url.pathname.endsWith('/alias') &&
     !url.pathname.startsWith('/api/ai/') &&
     !url.pathname.startsWith('/api/audit/') &&
-    !url.pathname.startsWith('/api/pdf/local-workspace'),
+    !url.pathname.startsWith('/api/pdf/'),
   new StaleWhileRevalidate({
     cacheName: 'api-cache',
     plugins: [
@@ -75,6 +75,12 @@ registerRoute(
       new CacheableResponsePlugin({ statuses: [0, 200] }),
     ],
   })
+)
+
+// PDF API routes — always hit network (no stale cache for status/preflight).
+registerRoute(
+  ({ url }) => url.pathname.startsWith('/api/pdf/'),
+  new NetworkOnly()
 )
 
 registerRoute(

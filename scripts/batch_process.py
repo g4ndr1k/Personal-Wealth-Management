@@ -146,6 +146,10 @@ class Registry:
         con.execute("PRAGMA journal_mode=WAL")
         try:
             yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
         finally:
             con.close()
 
@@ -462,7 +466,7 @@ def scan_once(inbox: Path, registry: Registry, passwords: dict,
     processed = skipped = 0
 
     # ── 1. Handle ZIPs first ──────────────────────────────────────────────
-    for zf_path in sorted(inbox.glob("*.zip")):
+    for zf_path in sorted(inbox.rglob("*.zip")):
         if not is_stable(zf_path, stable_secs):
             log.debug(f"[WAIT] {zf_path.name} — not stable yet, deferring")
             continue
@@ -485,9 +489,10 @@ def scan_once(inbox: Path, registry: Registry, passwords: dict,
             registry.record(zip_sha, zf_path.name, str(zf_path),
                             status="error", error="No PDFs found inside ZIP")
 
-    # ── 2. Handle PDFs (inbox root + _extracted subdir) ───────────────────
-    pdf_sources = sorted(inbox.glob("*.pdf")) + sorted(
-        (inbox / "_extracted").glob("*.pdf") if (inbox / "_extracted").exists() else []
+    # ── 2. Handle PDFs recursively ────────────────────────────────────────
+    pdf_sources = sorted(
+        path for path in inbox.rglob("*.pdf")
+        if path.is_file()
     )
 
     for pdf_path in pdf_sources:

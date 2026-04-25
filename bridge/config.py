@@ -99,7 +99,11 @@ def validate_settings(settings: dict) -> None:
     if max_cmds is not None and max_cmds < 1:
         errors.append(f"max_commands_per_hour must be >= 1: {max_cmds}")
 
-    valid_providers = {"ollama"}
+    try:
+        from app.providers import PROVIDERS
+        valid_providers = set(PROVIDERS)
+    except ImportError:
+        valid_providers = {"ollama", "rule_based"}
     for p in settings["classifier"].get("provider_order", []):
         if p not in valid_providers:
             errors.append(f"Unknown provider: {p}")

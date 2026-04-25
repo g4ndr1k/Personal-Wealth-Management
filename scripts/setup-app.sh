@@ -91,7 +91,8 @@ echo -e "${YELLOW}════════════════════�
 echo ""
 echo -e "→ Checking current TCC status..."
 sleep 1
-if /opt/homebrew/bin/python3.14 -c "
+PY="$(command -v python3.14 || command -v python3.13 || command -v python3)"
+if [ -x "$PY" ] && "$PY" -c "
 import sys
 sys.path.insert(0, '$PROJECT_ROOT')
 from bridge.tcc_check import check_fda
