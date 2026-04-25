@@ -277,6 +277,8 @@ export const api = {
   runPipeline: () => postQueued('/pipeline/run'),
   patchCategory: (hash, body) => patchQueued(`/transaction/${hash}/category`, body),
 
+  financialStatement: (p = {}, options = {}) => get('/reports/financial-statement', p, options),
+
   wealthSummary: (p = {}, options = {}) => get('/wealth/summary', p, options),
   wealthHistory: (limit = 24, options = {}) => get('/wealth/history', { limit }, options),
   wealthExplanation: (p = {}, options = {}) => get('/wealth/explanation', p, options),

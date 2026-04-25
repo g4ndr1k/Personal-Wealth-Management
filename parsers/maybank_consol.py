@@ -85,6 +85,22 @@ def parse(pdf_path: str, ollama_client=None) -> StatementResult:
     # Build BondHolding objects now that exchange_rates are available
     bonds = _build_bond_holdings(raw_bonds, exchange_rates)
 
+    # ── Back-fill account numbers from detail pages ───────────────────────
+    # The summary tables (pages 1-2) don't contain account numbers.
+    # Extract them from "Nama Produk/Mata Uang" + "Nomor Rekening" in detail pages.
+    acct_num_map = _extract_account_numbers_from_detail(full_texts)
+    for acct in accounts:
+        if not acct.account_number:
+            key = (acct.product_name, acct.currency)
+            if key in acct_num_map:
+                acct.account_number = acct_num_map[key]
+            elif key in _KNOWN_ACCOUNT_NUMBERS:
+                acct.account_number = _KNOWN_ACCOUNT_NUMBERS[key]
+            elif acct.currency != "IDR":
+                # Disambiguate multi-currency products (e.g. Super Valas SGD vs USD)
+                # to prevent ON CONFLICT overwrites when both share the same product name.
+                acct.account_number = f"{acct.product_name} {acct.currency}"
+
     return StatementResult(
         bank="Maybank",
         statement_type="consolidated",
@@ -126,6 +142,34 @@ def _extract_period(text: str) -> tuple[str, str]:
     return "", ""
 
 
+# ── Known account numbers ──────────────────────────────────────────────────────
+# Fallback for accounts that don't appear in any detail page (e.g. no
+# transactions in the statement period).  Keyed by (product_name, currency).
+_KNOWN_ACCOUNT_NUMBERS: dict[tuple[str, str], str] = {
+    ("Maybank Tabungan Super Valas", "USD"): "2596001501",
+}
+
+
+# ── Account number extraction ─────────────────────────────────────────────────
+def _extract_account_numbers_from_detail(full_texts: list[str]) -> dict[tuple[str, str], str]:
+    """
+    Scan detail pages for 'Nama Produk/Mata Uang ... / CCC\\nNomor Rekening NNNN'.
+    Returns dict mapping (product_name, currency) → account_number.
+    """
+    mapping: dict[tuple[str, str], str] = {}
+    pattern = re.compile(
+        r"Nama Produk/Mata Uang\s+(.+?)/\s*([A-Z]{3})\s*\nNomor Rekening\s+(\d+)",
+        re.MULTILINE,
+    )
+    for text in full_texts:
+        for m in pattern.finditer(text):
+            product = m.group(1).strip()
+            currency = m.group(2).strip()
+            acct_num = m.group(3).strip()
+            mapping[(product, currency)] = acct_num
+    return mapping
+
+
 # ── Summary table helpers ─────────────────────────────────────────────────────
 def _parse_summary_table(table: list, errors: list) -> tuple[list[AccountSummary], list[dict]]:
     """
@@ -141,23 +185,11 @@ def _parse_summary_table(table: list, errors: list) -> tuple[list[AccountSummary
     header_joined = " ".join(header).lower()
 
     # Detect table type by header content
-    if "kategori aset" in header_joined or "saldo" in header_joined:
-        # Asset allocation summary
-        for row in table[1:]:
-            if not row or not row[0]:
-                continue
-            name = str(row[0] or "").replace("\n", " ").strip()
-            if not name or name.lower() in ("total", "kategori"):
-                continue
-            currency = str(row[1] or "").strip() if len(row) > 1 else "IDR"
-            balance_str = str(row[-1] or "").strip() if len(row) > 1 else ""
-            balance = parse_idr_amount(balance_str)
-            accounts.append(AccountSummary(
-                product_name=name,
-                account_number=None,
-                currency=currency,
-                closing_balance=balance or 0.0,
-            ))
+    if "kategori aset" in header_joined:
+        # Page 1 "Ringkasan Alokasi Aset" — category-level aggregates.
+        # These duplicate the page-2 product-level rows and are NOT individual
+        # accounts.  Skip entirely to avoid orphan rows in account_balances.
+        return [], []
 
     elif "nama produk" in header_joined and "jumlah rekening" in header_joined:
         # Tabungan portfolio

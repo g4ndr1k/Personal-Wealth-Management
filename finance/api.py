@@ -3263,6 +3263,405 @@ def query_wealth_explanation(req: WealthQuestionRequest):
             return _fallback_wealth_question_answer(req.question, context)
 
 
+# ── /api/reports/financial-statement ──────────────────────────────────────────
+# Composite read-only report for the Settings → Dashboard Range card.
+# Composes existing helpers (_get_monthly_summary_data) and existing snapshot
+# tables — no new financial logic, no writes, safe under FINANCE_READ_ONLY.
+
+import calendar as _calendar
+
+_NW_ASSET_COLUMNS = [
+    ("Savings",        "savings_idr"),
+    ("Checking",       "checking_idr"),
+    ("Money Market",   "money_market_idr"),
+    ("Physical Cash",  "physical_cash_idr"),
+    ("Bonds",          "bonds_idr"),
+    ("Stocks",         "stocks_idr"),
+    ("Mutual Funds",   "mutual_funds_idr"),
+    ("Retirement",     "retirement_idr"),
+    ("Crypto",         "crypto_idr"),
+    ("Real Estate",    "real_estate_idr"),
+    ("Vehicles",       "vehicles_idr"),
+    ("Gold",           "gold_idr"),
+    ("Other Assets",   "other_assets_idr"),
+]
+_NW_LIABILITY_COLUMNS = [
+    ("Mortgages",         "mortgages_idr"),
+    ("Personal Loans",    "personal_loans_idr"),
+    ("Credit Card Debt",  "credit_card_debt_idr"),
+    ("Taxes Owed",        "taxes_owed_idr"),
+    ("Other Liabilities", "other_liabilities_idr"),
+]
+
+
+def _parse_month_str(value: str, field: str) -> tuple[int, int]:
+    try:
+        dt = datetime.strptime(value, "%Y-%m")
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"{field} must be YYYY-MM, got {value!r}")
+    return dt.year, dt.month
+
+
+def _months_in_range(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    y, m = start
+    out: list[tuple[int, int]] = []
+    while (y, m) <= end:
+        out.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return out
+
+
+def _month_end_date(year: int, month: int) -> str:
+    last_day = _calendar.monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-{last_day:02d}"
+
+
+def _prev_month(year: int, month: int) -> tuple[int, int]:
+    if month == 1:
+        return year - 1, 12
+    return year, month - 1
+
+
+def _format_month_label(year: int, month: int) -> str:
+    return datetime(year, month, 1).strftime("%b %Y")
+
+
+def _net_worth_breakdown(snap_row) -> dict:
+    """Convert a net_worth_snapshots row into asset/liability breakdown lists."""
+    by_asset = []
+    for label, col in _NW_ASSET_COLUMNS:
+        v = float(snap_row[col] or 0.0)
+        if v != 0.0:
+            by_asset.append({"label": label, "idr": round(v, 2)})
+    by_liab = []
+    for label, col in _NW_LIABILITY_COLUMNS:
+        v = float(snap_row[col] or 0.0)
+        if v != 0.0:
+            by_liab.append({"label": label, "idr": round(v, 2)})
+    total_assets = float(snap_row["total_assets_idr"] or 0.0)
+    total_liab = float(snap_row["total_liabilities_idr"] or 0.0)
+    return {
+        "snapshot_date":         snap_row["snapshot_date"],
+        "total_assets_idr":      round(total_assets, 2),
+        "total_liabilities_idr": round(total_liab, 2),
+        "net_worth_idr":         round(float(snap_row["net_worth_idr"] or 0.0), 2),
+        "by_asset":              by_asset,
+        "by_liability":          by_liab,
+    }
+
+
+@app.get("/api/reports/financial-statement", dependencies=[Depends(require_api_key)])
+def get_financial_statement(
+    start_month: str = Query(..., description="YYYY-MM (>= 2026-01)"),
+    end_month:   str = Query(..., description="YYYY-MM"),
+    owner:       Optional[str] = Query(None, description="Optional owner filter for allocation"),
+):
+    """Composite personal-finance statement for the given month range.
+
+    Reads from existing tables/helpers only — never writes.  Missing data
+    surfaces as `warnings[]`, never silent zeros.
+    """
+    start = _parse_month_str(start_month, "start_month")
+    end   = _parse_month_str(end_month,   "end_month")
+    if start > end:
+        raise HTTPException(400, "start_month must be <= end_month")
+    if start < (2026, 1):
+        raise HTTPException(400, "start_month must be >= 2026-01")
+
+    today = datetime.now()
+    if end > (today.year, today.month):
+        raise HTTPException(400, "end_month cannot be in the future")
+
+    months = _months_in_range(start, end)
+    opening_y, opening_m = _prev_month(*start)
+    opening_date = _month_end_date(opening_y, opening_m) if (opening_y, opening_m) >= (2026, 1) else None
+    # If the user starts at 2026-01 there is no in-range opening snapshot — we
+    # still try to read 2025-12 so the cash-flow reconciliation has an anchor;
+    # if it's missing we will warn rather than zero.
+    if opening_date is None:
+        opening_date = _month_end_date(opening_y, opening_m)
+    closing_date = _month_end_date(*end)
+
+    range_label = (
+        f"{_format_month_label(*start)} – {_format_month_label(*end)}"
+        if start != end else _format_month_label(*start)
+    )
+
+    warnings: list[str] = []
+    owner_norm = (owner or "").strip()
+    owner_filter_active = owner_norm and owner_norm.lower() not in ("all", "both")
+
+    with _db() as conn:
+        # ── Net worth: opening + closing snapshot rows ──────────────────────
+        opening_row = conn.execute(
+            "SELECT * FROM net_worth_snapshots WHERE snapshot_date=?",
+            (opening_date,),
+        ).fetchone()
+        closing_row = conn.execute(
+            "SELECT * FROM net_worth_snapshots WHERE snapshot_date=?",
+            (closing_date,),
+        ).fetchone()
+
+        if opening_row is None:
+            warnings.append(
+                f"No net-worth snapshot found for opening date {opening_date}. "
+                "Opening balance and net-worth delta cannot be computed."
+            )
+        if closing_row is None:
+            warnings.append(
+                f"No net-worth snapshot found for closing date {closing_date}. "
+                "Closing balance and asset allocation are unavailable — "
+                "create a snapshot for that date in Wealth → Snapshot."
+            )
+
+        opening = _net_worth_breakdown(opening_row) if opening_row else None
+        closing = _net_worth_breakdown(closing_row) if closing_row else None
+        delta_idr = (
+            round(closing["net_worth_idr"] - opening["net_worth_idr"], 2)
+            if (opening and closing) else None
+        )
+
+        # ── Income / expense across range ───────────────────────────────────
+        total_income = 0.0
+        total_expense = 0.0   # negative
+        needs_review_total = 0
+        cat_agg: dict[str, dict] = {}
+        owner_agg: dict[str, dict] = {}
+        by_month: list[dict] = []
+
+        for (y, m) in months:
+            month_data = _get_monthly_summary_data(conn, y, m)
+            total_income  += month_data["total_income"]
+            total_expense += month_data["total_expense"]
+            needs_review_total += month_data["needs_review"]
+            by_month.append({
+                "period":         month_data["period"],
+                "total_income":   month_data["total_income"],
+                "total_expense":  month_data["total_expense"],
+                "net":            month_data["net"],
+                "needs_review":   month_data["needs_review"],
+            })
+            for c in month_data["by_category"]:
+                key = c["category"]
+                bucket = cat_agg.setdefault(key, {
+                    "category":   key,
+                    "icon":       c["icon"],
+                    "sort_order": c["sort_order"],
+                    "amount":     0.0,
+                    "count":      0,
+                })
+                bucket["amount"] += c["amount"]
+                bucket["count"]  += c["count"]
+            for o in month_data["by_owner"]:
+                key = o["owner"] or ""
+                bucket = owner_agg.setdefault(key, {
+                    "owner":             key,
+                    "income":            0.0,
+                    "expense":           0.0,
+                    "transaction_count": 0,
+                })
+                bucket["income"]            += o["income"]
+                bucket["expense"]           += o["expense"]
+                bucket["transaction_count"] += o["transaction_count"]
+
+        by_category = []
+        for c in cat_agg.values():
+            amt = c["amount"]
+            pct = (
+                round(abs(amt) / abs(total_expense) * 100, 1)
+                if total_expense and amt < 0 else 0.0
+            )
+            by_category.append({
+                "category":       c["category"],
+                "icon":           c["icon"],
+                "sort_order":     c["sort_order"],
+                "amount":         round(amt, 2),
+                "count":          c["count"],
+                "pct_of_expense": pct,
+            })
+        by_category.sort(key=lambda r: (r["amount"] >= 0, r["amount"]))  # expenses first, biggest expense at top
+
+        by_owner = [{
+            "owner":             v["owner"],
+            "income":            round(v["income"], 2),
+            "expense":           round(v["expense"], 2),
+            "net":               round(v["income"] + v["expense"], 2),
+            "transaction_count": v["transaction_count"],
+        } for v in owner_agg.values()]
+        by_owner.sort(key=lambda r: r["owner"])
+
+        if needs_review_total > 0:
+            warnings.append(
+                f"{needs_review_total} transaction(s) in the selected range are "
+                "uncategorised — expense breakdown may be incomplete."
+            )
+
+        # ── Allocation (closing date) ───────────────────────────────────────
+        owner_cond = ""
+        owner_params: list = []
+        if owner_filter_active:
+            owner_cond = " AND owner=?"
+            owner_params = [owner_norm]
+
+        by_institution: list[dict] = []
+        by_asset_class: list[dict] = []
+        by_account: list[dict] = []
+        if closing_row is not None:
+            inst_agg: dict[str, dict] = {}
+
+            bal_rows = conn.execute(
+                f"SELECT institution, account, owner, balance_idr FROM account_balances "
+                f"WHERE snapshot_date=?{owner_cond}",
+                [closing_date] + owner_params,
+            ).fetchall()
+            for r in bal_rows:
+                inst = (r["institution"] or "Unspecified").strip() or "Unspecified"
+                bucket = inst_agg.setdefault(inst, {"institution": inst, "assets_idr": 0.0, "liabilities_idr": 0.0})
+                bucket["assets_idr"] += float(r["balance_idr"] or 0.0)
+
+            hold_rows = conn.execute(
+                f"SELECT institution, account, asset_class, owner, market_value_idr FROM holdings "
+                f"WHERE snapshot_date=?{owner_cond}",
+                [closing_date] + owner_params,
+            ).fetchall()
+            for r in hold_rows:
+                inst = (r["institution"] or "Unspecified").strip() or "Unspecified"
+                bucket = inst_agg.setdefault(inst, {"institution": inst, "assets_idr": 0.0, "liabilities_idr": 0.0})
+                bucket["assets_idr"] += float(r["market_value_idr"] or 0.0)
+
+            liab_rows = conn.execute(
+                f"SELECT institution, account, owner, balance_idr FROM liabilities "
+                f"WHERE snapshot_date=?{owner_cond}",
+                [closing_date] + owner_params,
+            ).fetchall()
+            for r in liab_rows:
+                inst = (r["institution"] or "Unspecified").strip() or "Unspecified"
+                bucket = inst_agg.setdefault(inst, {"institution": inst, "assets_idr": 0.0, "liabilities_idr": 0.0})
+                bucket["liabilities_idr"] += float(r["balance_idr"] or 0.0)
+
+            by_institution = [{
+                "institution":     v["institution"],
+                "assets_idr":      round(v["assets_idr"], 2),
+                "liabilities_idr": round(v["liabilities_idr"], 2),
+                "net_idr":         round(v["assets_idr"] - v["liabilities_idr"], 2),
+            } for v in inst_agg.values()]
+            by_institution.sort(key=lambda r: r["net_idr"], reverse=True)
+
+            # ── By Account # ──────────────────────────────────────────────
+            acct_agg: dict[str, dict] = {}
+            for r in bal_rows:
+                inst = (r["institution"] or "Unspecified").strip() or "Unspecified"
+                acct = (r["account"] or "").strip()
+                if not acct:
+                    continue
+                key = f"{inst}|{acct}"
+                bucket = acct_agg.setdefault(key, {"institution": inst, "account": acct, "owner": (r["owner"] or "").strip(), "assets_idr": 0.0, "liabilities_idr": 0.0})
+                bucket["assets_idr"] += float(r["balance_idr"] or 0.0)
+            for r in hold_rows:
+                inst = (r["institution"] or "Unspecified").strip() or "Unspecified"
+                acct = (r["account"] or "").strip()
+                if not acct:
+                    continue
+                key = f"{inst}|{acct}"
+                bucket = acct_agg.setdefault(key, {"institution": inst, "account": acct, "owner": (r["owner"] or "").strip(), "assets_idr": 0.0, "liabilities_idr": 0.0})
+                bucket["assets_idr"] += float(r["market_value_idr"] or 0.0)
+            for r in liab_rows:
+                inst = (r["institution"] or "Unspecified").strip() or "Unspecified"
+                acct = (r["account"] or "").strip()
+                if not acct:
+                    continue
+                key = f"{inst}|{acct}"
+                bucket = acct_agg.setdefault(key, {"institution": inst, "account": acct, "owner": (r["owner"] or "").strip(), "assets_idr": 0.0, "liabilities_idr": 0.0})
+                bucket["liabilities_idr"] += float(r["balance_idr"] or 0.0)
+            by_account = [{
+                "institution":     v["institution"],
+                "account":         v["account"],
+                "owner":           v["owner"] or None,
+                "assets_idr":      round(v["assets_idr"], 2),
+                "liabilities_idr": round(v["liabilities_idr"], 2),
+                "net_idr":         round(v["assets_idr"] - v["liabilities_idr"], 2),
+            } for v in acct_agg.values()]
+            by_account.sort(key=lambda r: r["net_idr"], reverse=True)
+
+            # Asset-class breakdown is straight from snapshot columns — no owner filter
+            # is possible because snapshots are aggregated; warn if owner filter is active.
+            if owner_filter_active:
+                warnings.append(
+                    "Asset-class allocation is taken from the aggregated net-worth "
+                    "snapshot and is NOT filtered by owner."
+                )
+            total_assets_for_pct = closing["total_assets_idr"] or 0.0
+            for label, col in _NW_ASSET_COLUMNS:
+                v = float(closing_row[col] or 0.0)
+                if v == 0.0:
+                    continue
+                pct = round(v / total_assets_for_pct * 100, 1) if total_assets_for_pct else 0.0
+                by_asset_class.append({"label": label, "idr": round(v, 2), "pct": pct})
+            by_asset_class.sort(key=lambda r: r["idr"], reverse=True)
+
+        # ── Cash flow reconciliation ────────────────────────────────────────
+        opening_balance = opening["net_worth_idr"] if opening else None
+        closing_balance = closing["net_worth_idr"] if closing else None
+        inflows  = round(total_income, 2)
+        outflows = round(abs(total_expense), 2)
+        unexplained = None
+        if opening_balance is not None and closing_balance is not None:
+            unexplained = round(
+                closing_balance - opening_balance - (inflows - outflows),
+                2,
+            )
+            denom = max(abs(closing_balance), 1.0)
+            if abs(unexplained) / denom > 0.01:
+                warnings.append(
+                    "Net-worth movement does not match recorded cash flow "
+                    "(see unexplained_delta_idr) — likely market-value drift, "
+                    "FX changes, or transactions not yet imported."
+                )
+
+    return {
+        "range": {
+            "start_month": f"{start[0]:04d}-{start[1]:02d}",
+            "end_month":   f"{end[0]:04d}-{end[1]:02d}",
+            "label":       range_label,
+            "months":      [f"{y:04d}-{m:02d}" for (y, m) in months],
+        },
+        "owner":        owner_norm if owner_filter_active else None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "net_worth": {
+            "opening":   opening,
+            "closing":   closing,
+            "delta_idr": delta_idr,
+        },
+        "income_expense": {
+            "total_income_idr":    round(total_income, 2),
+            "total_expense_idr":   round(total_expense, 2),  # negative
+            "net_cash_flow_idr":   round(total_income + total_expense, 2),
+            "by_category":         by_category,
+            "by_owner":            by_owner,
+            "by_month":            by_month,
+            "needs_review_count":  needs_review_total,
+        },
+        "allocation": {
+            "by_asset_class":  by_asset_class,
+            "by_institution":  by_institution,
+            "by_account":      by_account,
+        },
+        "cash_flow": {
+            "opening_date":          opening_date if opening else None,
+            "closing_date":          closing_date if closing else None,
+            "opening_balance_idr":   round(opening_balance, 2) if opening_balance is not None else None,
+            "inflows_idr":           inflows,
+            "outflows_idr":          outflows,
+            "closing_balance_idr":   round(closing_balance, 2) if closing_balance is not None else None,
+            "unexplained_delta_idr": unexplained,
+        },
+        "warnings": warnings,
+    }
+
+
 # ── PDF Local Processing ───────────────────────────────────────────────────────
 # The finance-api container can see pdf_inbox / pdf_unlocked via the mounted
 # ./data:/app/data volume.  PDF parsing itself lives in the bridge (port 9100

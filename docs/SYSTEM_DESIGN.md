@@ -245,6 +245,16 @@ Finance API:
 | `PUT` | `/api/household/categories/{code}` | Update or rename household category. |
 | `DELETE` | `/api/household/categories/{code}` | Soft-disable household category. |
 | `PUT` | `/api/household/cash-pools/{pool_id}` | Adjust household cash pool balance/notes/status. |
+| `GET` | `/api/reports/financial-statement` | Composite personal financial statement (net worth, income/expense, allocation, cash flow) for a `start_month`/`end_month` range. Read-only; works under `FINANCE_READ_ONLY=true`. |
+
+### Financial Statement Report
+
+- **Endpoint**: `GET /api/reports/financial-statement?start_month=YYYY-MM&end_month=YYYY-MM&owner=<optional>`
+- **UI entry point**: PWA → Settings → *Dashboard Range* card → **Generate Financial Statements** button (opens `FinancialStatementModal.vue`).
+- **Source data**: composes existing helpers — `_get_monthly_summary_data` for per-month income/expense and `net_worth_snapshots`/`account_balances`/`holdings`/`liabilities` rows for opening + closing dates. The endpoint never writes; it requires no DB migration.
+- **Read-only behavior**: pure GET, no `require_writable` dep, so the NAS replica serves it identically.
+- **Warning policy**: any missing snapshot, uncategorised transactions, owner-filter limitation, or material mismatch between net-worth movement and recorded cash flow is appended to a `warnings[]` array. Missing data must never be returned as a silent zero.
+- **Print / PDF**: the modal uses `window.print()` plus a scoped `@media print` stylesheet — no PDF dependency.
 
 Household API:
 
