@@ -1,6 +1,6 @@
-# Agentic AI
+# Personal Wealth Management
 
-Self-hosted personal finance, bank statement processing, mail alerting, and wealth tracking system for a Mac Mini plus optional Synology NAS replica.
+Self-hosted personal finance, bank statement processing, mail alerting, wealth tracking, and annual tax return (CoreTax SPT) system for a Mac Mini plus optional Synology NAS replica.
 
 The system is local-first: the bridge runs on macOS for host-only capabilities, the finance API and PWA run in Docker, bank statement PDFs are parsed into `output/xls/ALL_TRANSACTIONS.xlsx`, and `data/finance.db` is the authoritative edited store.
 
@@ -12,7 +12,8 @@ The system is local-first: the bridge runs on macOS for host-only capabilities, 
 | PDF processing | Processes local bank PDFs from `data/pdf_inbox` / `data/pdf_unlocked` through bridge jobs. |
 | Finance import | Imports `ALL_TRANSACTIONS.xlsx` into SQLite with hash-based deduplication. |
 | Wealth tracking | Stores balances, holdings, liabilities, and net worth snapshots. |
-| PWA | Vue 3 dashboard for transactions, wealth, assets, review queue, audit, and settings. |
+| CoreTax SPT | Persistent tax-version ledger: import prior-year SPT XLSX, carry forward manual decisions, auto-reconcile refreshable rows from live wealth data, learn mappings across years, export to CoreTax XLSX template. |
+| PWA | Vue 3 dashboard for transactions, wealth, assets, CoreTax SPT wizard, review queue, audit, and settings. |
 | NAS services | Optional read-only finance API/PWA replica plus LAN-only Household Expense PWA. |
 
 ## Quick Start
@@ -43,10 +44,12 @@ For first-time setup, secrets, LaunchAgents, PDF workflows, and maintenance comm
 | `bridge/` | Host bridge: mail, iMessage, PDF processing, bridge API. |
 | `agent/` | Dockerized mail alert worker and classifier providers. |
 | `finance/` | FastAPI backend, importer, categorizer, SQLite schema, backups. |
+| `finance/coretax/` | CoreTax SPT ledger: import parser, carry-forward, reconciler, exporter. |
 | `pwa/` | Vue 3 PWA frontend. |
 | `household-expense/` | LAN-only household expense satellite app for NAS. |
 | `parsers/` | Bank-specific PDF parsers. |
 | `exporters/` | XLS writer for `ALL_TRANSACTIONS.xlsx`. |
+| `data/coretax/` | CoreTax XLSX templates and generated output files, gitignored. |
 | `data/` | Runtime databases and PDF inboxes, gitignored. |
 | `secrets/` | Docker-exported secret files, gitignored. |
 
@@ -60,13 +63,12 @@ For first-time setup, secrets, LaunchAgents, PDF workflows, and maintenance comm
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Human-readable recent change history. |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Lightweight design decisions and rationale. |
 
-Specialized homepage deployment notes still live under `docs/`.
-
 ## Status
 
 - Stage 1 mail alerting: active
 - Stage 2 finance import and PWA: active
 - Stage 3 wealth management: active
+- CoreTax SPT ledger and wizard: active
 - PDF preflight and per-file status lifecycle: active
 - NAS read-only replica: configured for deployments that enable NAS sync
 - Household Expense PWA: active as a LAN-only NAS satellite app

@@ -1,6 +1,6 @@
 # System Design
 
-Stable architecture blueprint for the Agentic AI personal finance and mail alert system.
+Stable architecture blueprint for the Personal Wealth Management system.
 
 Operational commands live in [OPERATIONS.md](OPERATIONS.md). Symptom-driven fixes live in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Change history lives in [CHANGELOG.md](CHANGELOG.md). Design rationale lives in [DECISIONS.md](DECISIONS.md).
 
