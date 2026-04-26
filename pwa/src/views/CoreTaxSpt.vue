@@ -68,21 +68,27 @@
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th>Row</th><th>Kode</th><th>Description</th><th>Prior (F)</th><th>Carry?</th>
+                    <th>Row</th><th>Code</th><th>Acq Year</th><th>Description</th><th class="th-prior">Prior ({{ store.taxYear }})</th><th>Carry?</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="row in store.staging" :key="row.id">
                     <td>{{ row.source_row_no }}</td>
                     <td>{{ row.parsed_kode_harta }}</td>
+                    <td>{{ row.parsed_acquisition_year }}</td>
                     <td class="cell-desc">{{ row.parsed_keterangan }}</td>
-                    <td class="cell-num">{{ fmtIdr(row.parsed_carry_amount_idr) }}</td>
+                    <td class="cell-num">{{ fmtNum(row.parsed_carry_amount_idr) }}</td>
                     <td>
                       <input type="checkbox"
                         :checked="row.user_override_carry_forward ?? row.rule_default_carry_forward"
                         @change="toggleCarryOverride(row)"
                       />
                     </td>
+                  </tr>
+                  <tr class="row-total">
+                    <td colspan="4"></td>
+                    <td class="cell-num">{{ fmtNum(priorTotal) }}</td>
+                    <td></td>
                   </tr>
                 </tbody>
               </table>
@@ -107,7 +113,7 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Kode</th><th>Description</th><th>Prior</th><th>Current</th><th>Market</th><th>Source</th><th></th>
+                  <th>Kode</th><th>Description</th><th>{{ store.taxYear }}</th><th>{{ store.taxYear + 1 }}</th><th>Market</th><th>Source</th><th></th>
                 </tr>
               </thead>
               <tbody>
@@ -371,7 +377,7 @@ const newRow = ref({
 const currentYear = new Date().getFullYear()
 const yearOptions = computed(() => {
   const years = []
-  for (let y = currentYear + 1; y >= currentYear - 5; y--) years.push(y)
+  for (let y = currentYear + 1; y >= 2025; y--) years.push(y)
   return years
 })
 
@@ -564,6 +570,15 @@ function fmtIdr(val) {
   return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val)
 }
 
+function fmtNum(val) {
+  if (val == null) return '—'
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(val)
+}
+
+const priorTotal = computed(() =>
+  store.staging.reduce((sum, r) => sum + (r.parsed_carry_amount_idr || 0), 0)
+)
+
 function fmtMonth(key) {
   if (!key) return ''
   const [y, m] = key.split('-')
@@ -719,6 +734,8 @@ onMounted(loadData)
 .cell-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cell-desc { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cell-src { font-size: 11px; color: var(--text-muted); }
+.th-prior { text-align: right; width: 140px; }
+.row-total td { font-weight: 700; border-top: 2px solid var(--border, rgba(255,255,255,0.12)); padding-top: 10px; }
 .row-locked { opacity: 0.7; }
 .lock-badge { font-size: 11px; }
 .editable { cursor: pointer; }

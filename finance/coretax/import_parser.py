@@ -129,13 +129,14 @@ def parse_prior_year_xlsx(
 
     # ── Detect tax years from headers ────────────────────────────────────
     prior_tax_year, detected_target = _detect_tax_years_from_headers(ws, header_row)
-    if prior_tax_year + 1 != target_tax_year or detected_target != target_tax_year:
+    if target_tax_year not in (prior_tax_year, detected_target):
         raise ImportParseError(
-            f"Template year mismatch: uploaded template is for fiscal year "
-            f"{prior_tax_year} (E header={prior_tax_year}, F header={detected_target}); "
-            f"target_tax_year={target_tax_year} would require uploading the "
-            f"{target_tax_year - 1} template instead."
+            f"Template year mismatch: uploaded template has columns for "
+            f"{prior_tax_year} (E) and {detected_target} (F); "
+            f"selected year {target_tax_year} is not in this template."
         )
+    # Determine which column is the carry-forward source for this year
+    use_e_as_carry = (target_tax_year == prior_tax_year)
 
     # ── Load asset codes for carry-forward rules ─────────────────────────
     asset_codes = {ac["kode"]: ac for ac in get_asset_codes(conn)}
@@ -155,18 +156,12 @@ def parse_prior_year_xlsx(
 
     # C column layout in the template:
     # The template uses column C for the sequential number (row numbering),
-    # column H for the description/keterangan. But the plan says C = keterangan
-    # for export col C. In the import template, let's check both C and H.
-    # Based on the existing exporter code:
-    #   B = Kode Harta
-    #   H = Keterangan (description)
-    #   C = sequential number or short description
-    # The plan says the import template has:
-    #   source_col_b_kode, source_col_c_keterangan, source_col_d_acq_year,
-    #   source_col_e_value, source_col_f_value, source_col_g_value, source_col_h_note
-    # Looking at the actual template structure from the existing code:
-    #   A = No, B = Kode Harta, C = keterangan (short), D = Tahun Perolehan
+    # column H for the description/keterangan (long text). C may contain a short
+    # label but H is the authoritative description for matching.
+    # Template structure:
+    #   A = No, B = Kode Harta, C = sequential number / short label, D = Tahun Perolehan
     #   E = prior year value, F = current year value, G = market value, H = Keterangan (long)
+    # parsed_keterangan reads H first, falls back to C.
 
     row_idx = first_data_row
     while row_idx <= 47:  # Template rows 6-47 = 42 data rows max
@@ -193,7 +188,7 @@ def parse_prior_year_xlsx(
 
         # Parsed values
         parsed_kode = source_col_b if source_col_b else None
-        parsed_keterangan = source_col_c or source_col_h or ""
+        parsed_keterangan = source_col_h or source_col_c or ""
         parsed_acq_year = None
         if source_col_d:
             try:
@@ -226,6 +221,9 @@ def parse_prior_year_xlsx(
         # Proposed stable key
         proposed_key = _heuristic_stable_key(parsed_kode or "", parsed_keterangan, parsed_acq_year)
 
+        parsed_carry = parsed_e if use_e_as_carry else parsed_f
+        parsed_prior = parsed_f if use_e_as_carry else parsed_e
+
         conn.execute(
             """INSERT INTO coretax_import_staging
                (staging_batch_id, target_tax_year, source_file_name, source_sheet_name,
@@ -242,7 +240,7 @@ def parse_prior_year_xlsx(
              source_col_d, source_col_e, source_col_f,
              source_col_g, source_col_h,
              parsed_kode, parsed_keterangan, parsed_acq_year,
-             parsed_e, parsed_f, parsed_g,
+             parsed_prior, parsed_carry, parsed_g,
              parsed_kind, proposed_key, rule_carry,
              parse_warning, now),
         )
