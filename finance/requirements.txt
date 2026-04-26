@@ -10,6 +10,7 @@ rapidfuzz>=3.6.0
 # Stage 2-B — FastAPI backend + uvicorn server
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
 
 # Already installed for Stage 1 — listed here for completeness
 # openpyxl>=3.1.0

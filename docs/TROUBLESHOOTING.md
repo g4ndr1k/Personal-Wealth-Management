@@ -299,6 +299,86 @@ Open the first row of `output/xls/ALL_TRANSACTIONS.xlsx` and compare it with the
 - Keep importer fail-fast header validation.
 - Treat `ALL_TRANSACTIONS.xlsx` as immutable parser output.
 
+## CoreTax Upload Rejected For Year Mismatch
+
+### Symptoms
+
+- CoreTax prior-year upload returns HTTP 400.
+- Error mentions `Template year mismatch`.
+- A file such as `CoreTax 2025.xlsx` is selected but the PWA tax-year selector is set to `2025`.
+
+### Likely Cause
+
+CoreTax imports the prior submitted workbook to seed the next tax year. The XLSX headers must line up with the selected target year. A workbook with `E=2025` and `F=2026` seeds `target_tax_year=2026`, not `2025`.
+
+### How To Diagnose
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import openpyxl
+
+path = Path('/Users/g4ndr1k/Library/CloudStorage/OneDrive-Personal/Finance/SPT/2025/CoreTax 2025.xlsx')
+wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
+ws = wb.worksheets[0]
+print('E4=', ws['E4'].value, 'F4=', ws['F4'].value)
+PY
+```
+
+### Fix
+
+- Set the PWA tax year to the F-header year.
+- Upload the prior submitted SPT workbook for that target year.
+- If preparing tax year `2026`, upload the workbook whose headers are `E=2025` and `F=2026`.
+
+### Prevention
+
+- Do not rename files as a substitute for checking the E/F headers.
+- Keep the parser's strict year-header validation enabled.
+
+## CoreTax Reconcile Did Not Update A Row
+
+### Symptoms
+
+- Reconcile finishes but a row remains unchanged.
+- Trace shows `locked_skipped`.
+- Unmatched PWM rows appear even though the account/holding exists in PWM.
+
+### Likely Cause
+
+- The target field is locked from a manual edit.
+- No learned mapping exists for the PWM row.
+- A learned mapping points to a `target_stable_key` that does not exist for the selected tax year.
+
+### How To Diagnose
+
+```bash
+sqlite3 data/finance.db "
+SELECT id, kode_harta, stable_key, current_amount_idr, amount_locked,
+       market_value_idr, market_value_locked, last_mapping_id
+FROM coretax_rows
+WHERE tax_year = 2026
+ORDER BY kode_harta, id;
+"
+
+sqlite3 data/finance.db "
+SELECT id, match_kind, match_value, target_stable_key, hits, last_used_tax_year
+FROM coretax_mappings
+ORDER BY id;
+"
+```
+
+### Fix
+
+- Unlock the field in the CoreTax SPT view if the auto-reconcile value should replace it.
+- Use Review & Manual Mapping or Create from Unmatched to create a learned mapping.
+- Delete and recreate stale mappings that point to a row from the wrong tax year.
+
+### Prevention
+
+- Treat locks as intentional. Do not bypass them in API changes.
+- Learned mappings should store and use `target_stable_key`.
+
 ## Household Expense Settings Unavailable
 
 ### Symptoms

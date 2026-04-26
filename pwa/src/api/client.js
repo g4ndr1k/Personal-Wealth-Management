@@ -298,10 +298,38 @@ export const api = {
   patchCategory: (hash, body) => patchQueued(`/transaction/${hash}/category`, body),
 
   financialStatement: (p = {}, options = {}) => get('/reports/financial-statement', p, options),
-  coretaxTemplates: (options = {}) => get('/coretax/templates', {}, { maxAgeMs: 0, ...options }),
-  coretaxPreview: (body) => post('/coretax/generate', { ...body, dry_run: true }),
-  coretaxGenerate: (body) => postRaw('/coretax/generate', { ...body, dry_run: false }),
-  coretaxAudit: (filename, options = {}) => get(`/coretax/audit/${encodeURIComponent(filename)}`, {}, { maxAgeMs: 0, ...options }),
+
+  // ── CoreTax persistent-ledger API ────────────────────────────────────────
+  coretaxSummary: (params) => get('/coretax/summary', params, { maxAgeMs: 0 }),
+  coretaxRows: (params) => get('/coretax/rows', params, { maxAgeMs: 0 }),
+  coretaxRowPatch: (rowId, body) => patch(`/coretax/rows/${rowId}`, body),
+  coretaxRowCreate: (body) => post('/coretax/rows', body),
+  coretaxRowDelete: (rowId) => del(`/coretax/rows/${rowId}`),
+  coretaxRowLock: (rowId, body) => post(`/coretax/rows/${rowId}/lock`, body),
+  coretaxRowUnlock: (rowId, body) => post(`/coretax/rows/${rowId}/unlock`, body),
+  coretaxImportPriorYear: (file, targetTaxYear) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('target_tax_year', String(targetTaxYear))
+    return postMultipart('/coretax/import/prior-year', fd)
+  },
+  coretaxStaging: (batchId) => get(`/coretax/import/staging/${batchId}`, {}, { maxAgeMs: 0 }),
+  coretaxStagingOverride: (batchId, rowId, carryForward) =>
+    patch(`/coretax/import/staging/${batchId}/rows/${rowId}`, { user_override_carry_forward: carryForward }),
+  coretaxStagingCommit: (batchId) => post(`/coretax/import/staging/${batchId}/commit`),
+  coretaxStagingDelete: (batchId) => del(`/coretax/import/staging/${batchId}`),
+  coretaxResetFromRules: (body) => post('/coretax/reset-from-rules', body),
+  coretaxAutoReconcile: (body) => post('/coretax/auto-reconcile', body),
+  coretaxReconcileRuns: (params) => get('/coretax/reconcile-runs', params, { maxAgeMs: 0 }),
+  coretaxUnmatched: (params) => get('/coretax/unmatched', params, { maxAgeMs: 0 }),
+  coretaxMappings: (options = {}) => get('/coretax/mappings', {}, { maxAgeMs: 0, ...options }),
+  coretaxMappingCreate: (body) => post('/coretax/mappings', body),
+  coretaxMappingDelete: (id) => del(`/coretax/mappings/${id}`),
+  coretaxExport: (body) => post('/coretax/export', body),
+  coretaxExports: (params) => get('/coretax/exports', params, { maxAgeMs: 0 }),
+  coretaxExportDownload: (fileId) => `${BASE}/coretax/export/${encodeURIComponent(fileId)}/download`,
+  coretaxExportAudit: (fileId, options = {}) =>
+    get(`/coretax/export/${encodeURIComponent(fileId)}/audit`, {}, { maxAgeMs: 0, ...options }),
 
   wealthSummary: (p = {}, options = {}) => get('/wealth/summary', p, options),
   wealthHistory: (limit = 24, options = {}) => get('/wealth/history', { limit }, options),

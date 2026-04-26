@@ -2,6 +2,19 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-04-26 — CoreTax Persistent Ledger
+
+- Replaced the one-shot `finance/coretax_export.py` generator with the persistent `finance/coretax/` package.
+- Added a tax-version ledger in SQLite: `coretax_rows`, `coretax_taxpayer`, `coretax_mappings`, `coretax_import_staging`, `coretax_asset_codes`, `coretax_reconcile_runs`, and `coretax_unmatched_pwm`.
+- CoreTax now starts from a prior-year SPT upload, stages raw XLSX rows for preview, commits carry-forward rows, reconciles refreshable rows from PWM, records learned mappings, and exports back to XLSX on demand.
+- Manual edits now auto-lock amount/market fields. Auto-reconcile skips locked fields and records skipped rows in the trace instead of silently overwriting reviewed tax values.
+- Learned mappings now store `target_stable_key`; successful reconcile use increments `hits`, updates `last_used_tax_year`, and stamps `last_mapping_id` on the row.
+- Cash reconcile writes only `current_amount_idr`; it never writes `market_value_idr`.
+- Added strict E/F year-header validation for uploaded prior-year templates. A workbook with `E=2025` and `F=2026` is only valid for `target_tax_year=2026`.
+- Replaced old `/api/coretax/templates`, `/api/coretax/generate`, and `/api/coretax/audit/{filename}` with the persistent-ledger API under `/api/coretax/*`.
+- Rewrote the PWA `/coretax` view into a 5-stage wizard: Import Previous SPT, Carry Forward Review, Reconcile from PWM, Review & Manual Mapping, and Export CoreTax XLSX.
+- Replaced stale `tests/test_coretax_export.py` coverage with `tests/test_coretax.py`, covering import, carry-forward, lock guards, learned mappings, export formula rules, template capacity, and CHECK constraints.
+
 ## 2026-04-25 — CoreTax SPT Generator
 
 - Added `finance/coretax_export.py` — maps PWM `account_balances` (savings) and `holdings` (investments) to an Indonesian DJP CoreTax XLSX template.

@@ -130,7 +130,6 @@ def test_carry_forward_fills_only_missing_stable_assets(tmp_path, monkeypatch):
     conn.close()
 
     monkeypatch.setattr(wealth_api, "_db_path", db_path)
-    monkeypatch.setattr(wealth_api, "_sync_holdings_to_sheets", lambda: None)
     monkeypatch.setattr(wealth_api, "_auto_snapshot", lambda snapshot_date: None)
 
     result = wealth_api.carry_forward_holdings(
@@ -151,7 +150,7 @@ def test_carry_forward_fills_only_missing_stable_assets(tmp_path, monkeypatch):
     assert result["carried"] == 1
     assert [(row["asset_name"], row["market_value_idr"], row["notes"]) for row in rows] == [
         ("Antam 100g", 151_000_000.0, "manually updated"),
-        ("Antam 50g", 75_000_000.0, ""),
+        ("Antam 50g", 75_000_000.0, " [carried forward]"),
     ]
 
 
@@ -201,7 +200,6 @@ def test_cascade_holding_update_scopes_to_specific_institution_and_account(tmp_p
     conn.close()
 
     monkeypatch.setattr(wealth_api, "_db_path", db_path)
-    monkeypatch.setattr(wealth_api, "_sync_holdings_to_sheets", lambda: None)
     monkeypatch.setattr(wealth_api, "_auto_snapshot", lambda snapshot_date: None)
 
     wealth_api._cascade_holding_update(

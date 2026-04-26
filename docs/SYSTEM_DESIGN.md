@@ -54,8 +54,9 @@ Bank PDFs
 | `finance/db.py` | SQLite schema, migrations, resolved transaction view. |
 | `finance/api.py` | FastAPI backend, PWA static mount, bridge proxy routes, wealth APIs. |
 | `pwa/src/api/client.js` | Frontend API client and cache behavior. |
-| `finance/coretax_export.py` | CoreTax XLSX filler: normalises column H, matches PWM rows, writes output + audit JSON. |
-| `pwa/src/views/CoreTaxSpt.vue` | CoreTax SPT view: reporting period, template picker, dry-run preview, XLSX download. |
+| `finance/coretax/` | Persistent CoreTax SPT ledger: prior-year import, carry-forward, reconcile, learned mappings, XLSX export. |
+| `pwa/src/views/CoreTaxSpt.vue` | CoreTax SPT wizard: import, carry-forward review, reconcile from PWM, manual mapping, export. |
+| `pwa/src/stores/coretax.js` | Pinia state for CoreTax rows, staging, mappings, reconcile runs, unmatched rows, and exports. |
 | `pwa/src/views/Settings.vue` | Import, backup, PDF workspace, preflight, and operations UI. |
 | `pwa/src/utils/pdfFormatters.js` | Shared frontend PDF status vocabulary and display helpers. |
 | `household-expense/api/` | Household Expense FastAPI app, auth, SQLite schema, and routers. |
@@ -208,7 +209,14 @@ Current production provider order is `["rule_based"]`. `rule_based` is a support
 | `liabilities` | Credit cards, loans, and other liabilities. |
 | `net_worth_snapshots` | Aggregated monthly net worth rows. |
 | `data/coretax/templates/` | User-placed CoreTax XLSX templates (e.g. `CoreTax 2025.xlsx`). |
-| `data/coretax/output/` | Filled CoreTax outputs: `CoreTax_YEAR_SNAP_vN.xlsx` + `.audit.json` sidecars. |
+| `data/coretax/output/` | Exported CoreTax XLSX files: `CoreTax_YEAR_vN.xlsx` + `.audit.json` sidecars. |
+| `coretax_rows` | Authoritative tax-version ledger, one row per asset/liability per SPT year. |
+| `coretax_taxpayer` | Per-tax-year taxpayer metadata imported from C1/C2/C3. |
+| `coretax_mappings` | Learned PWM-to-CoreTax mapping rules keyed by source signatures and target stable keys. |
+| `coretax_import_staging` | Prior-year XLSX preview rows with raw Excel coordinate audit fields. |
+| `coretax_asset_codes` | Kode Harta lookup and default carry-forward rules. |
+| `coretax_reconcile_runs` | Persisted reconcile run summaries and trace JSON. |
+| `coretax_unmatched_pwm` | PWM rows not mapped during a reconcile run. |
 | `data/pdf_jobs.db` | Bridge PDF job state. |
 | `data/processed_files.db` | Processed PDF registry keyed by SHA-256. |
 | `household-expense/data/household.db` | Separate household expense store on NAS deployment. |
@@ -250,18 +258,38 @@ Finance API:
 | `DELETE` | `/api/household/categories/{code}` | Soft-disable household category. |
 | `PUT` | `/api/household/cash-pools/{pool_id}` | Adjust household cash pool balance/notes/status. |
 | `GET` | `/api/reports/financial-statement` | Composite personal financial statement (net worth, income/expense, allocation, cash flow) for a `start_month`/`end_month` range. Read-only; works under `FINANCE_READ_ONLY=true`. |
-| `GET` | `/api/coretax/templates` | List XLSX templates available in `data/coretax/templates/`. |
-| `POST` | `/api/coretax/generate` | Fill CoreTax template from PWM data. Body: `{template, snapshot_date, dry_run}`. `dry_run=true` returns JSON audit trace only (no file written, works under `FINANCE_READ_ONLY=true`). `dry_run=false` returns filled XLSX as download and writes output + audit JSON sidecar. |
-| `GET` | `/api/coretax/audit/{filename}` | Return the audit JSON sidecar for a previously generated file. |
+| `POST` | `/api/coretax/import/prior-year` | Multipart prior-year SPT upload. Parses to staging and returns `{batch_id, row_count, warnings, prior_tax_year, rows}`. |
+| `GET/PATCH/POST/DELETE` | `/api/coretax/import/staging/*` | Preview, override carry-forward, commit, or discard staged import rows. |
+| `GET` | `/api/coretax/summary` | Totals, lock counts, and coverage for one tax year. |
+| `GET/POST/PATCH/DELETE` | `/api/coretax/rows*` | Ledger row list, manual add/edit/delete, and field lock/unlock. |
+| `POST` | `/api/coretax/reset-from-rules` | Re-apply carry-forward defaults to unlocked rows only. |
+| `POST` | `/api/coretax/auto-reconcile` | Reconcile from PWM `account_balances`, `holdings`, and `liabilities`; persists run trace and unmatched rows. |
+| `GET` | `/api/coretax/reconcile-runs` | List recent reconcile runs for a tax year. |
+| `GET` | `/api/coretax/unmatched` | Return unmatched PWM rows for a reconcile run, defaulting to the latest run. |
+| `GET/POST/DELETE` | `/api/coretax/mappings*` | List, upsert, or delete learned PWM-to-CoreTax mappings. |
+| `POST` | `/api/coretax/export` | Export the ledger to XLSX and audit JSON. Returns only `file_id`, `download_url`, and `audit_url` plus totals. |
+| `GET` | `/api/coretax/exports` | List prior exports for a tax year. |
+| `GET` | `/api/coretax/export/{file_id}/download` | Stream a previously exported XLSX file. |
+| `GET` | `/api/coretax/export/{file_id}/audit` | Return the audit JSON for an export. |
 
 ### Financial Statement Report
 
 - **Endpoint**: `GET /api/reports/financial-statement?start_month=YYYY-MM&end_month=YYYY-MM&owner=<optional>`
-- **UI entry point**: PWA → CoreTax SPT view → *Reporting Period* card → **Generate Financial Statements** button (opens `FinancialStatementModal.vue`). Previously in Settings; moved to the CoreTax SPT view so the same reporting period drives both the FS and the CoreTax export.
+- **UI entry point**: PWA -> CoreTax SPT view -> Reconcile from PWM tab. The same month range drives financial-statement reference data and the CoreTax reconcile stage.
 - **Source data**: composes existing helpers — `_get_monthly_summary_data` for per-month income/expense and `net_worth_snapshots`/`account_balances`/`holdings`/`liabilities` rows for opening + closing dates. The endpoint never writes; it requires no DB migration.
 - **Read-only behavior**: pure GET, no `require_writable` dep, so the NAS replica serves it identically.
 - **Warning policy**: any missing snapshot, uncategorised transactions, owner-filter limitation, or material mismatch between net-worth movement and recorded cash flow is appended to a `warnings[]` array. Missing data must never be returned as a silent zero.
 - **Print / PDF**: the modal uses `window.print()` plus a scoped `@media print` stylesheet — no PDF dependency.
+
+### CoreTax Persistent Ledger
+
+- **Core invariant**: reviewed tax values must not be silently overwritten. Manual edits auto-lock the touched field; reconcile can suggest or skip, but it only writes unlocked fields.
+- **Row identity**: every row has a non-null `stable_key`. PWM rows use source-derived keys where possible; manual/imported rows use `manual:{kode}:{slug}:{acquisition_year}:{uuid8}`.
+- **Carry-forward**: prior-year import creates the next tax year's ledger. Sticky codes such as `061`, `051`, `043`, `042`, and `038` copy prior current value into current value. Refreshable codes such as `012`, `034`, `036`, and `039` are left unset for reconcile.
+- **Template year validation**: the parser rejects mismatched E/F headers. A workbook with `E=2025` and `F=2026` is valid only when preparing `target_tax_year=2026`.
+- **Reconcile**: PWM cash writes current amount only. Holdings can write current amount and market value independently. Liabilities write current amount. Each field respects its own lock flag.
+- **Mappings**: learned mappings use prioritized source signatures such as account number, ISIN, asset signature, and liability signature. A successful mapping resolves to `target_stable_key`, increments `hits`, updates `last_used_tax_year`, and stamps `last_mapping_id` on the row.
+- **Export**: exporter loads a canonical XLSX template, writes rows 6-47 only, preserves rows 48+ formulas/styles, and raises before writing if more than 42 asset rows would exceed template capacity.
 
 Household API:
 

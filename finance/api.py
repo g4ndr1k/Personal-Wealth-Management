@@ -38,7 +38,7 @@ import urllib.request
 
 import hmac
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -53,7 +53,33 @@ from finance.config import (
     get_coretax_config,
 )
 from finance.db import open_db
-from finance.coretax_export import CoretaxTemplateError, generate_coretax_xlsx, result_to_dict, _write_audit_json, _next_output_path
+# CoreTax: new persistent-ledger modules replace the old one-shot exporter
+from finance.coretax.db import (
+    ensure_coretax_tables,
+    get_rows_for_year,
+    get_row_by_id,
+    insert_row,
+    update_row as coretax_update_row,
+    delete_row as coretax_delete_row,
+    get_summary_for_year,
+    get_staging_batch,
+    get_staging_row,
+    update_staging_row,
+    delete_staging_batch,
+    get_mappings,
+    upsert_mapping,
+    delete_mapping,
+    get_reconcile_runs,
+    get_latest_reconcile_run,
+    get_unmatched_for_run,
+    get_asset_codes,
+    upsert_taxpayer,
+    get_taxpayer,
+)
+from finance.coretax.import_parser import parse_prior_year_xlsx, ImportParseError
+from finance.coretax.carry_forward import commit_staging_batch, reset_from_rules
+from finance.coretax.reconcile import run_reconcile as coretax_run_reconcile
+from finance.coretax.exporter import export_coretax_xlsx, ExportError
 
 log = logging.getLogger(__name__)
 
@@ -1262,15 +1288,66 @@ class ImportRequest(BaseModel):
     overwrite: bool = False
 
 
-class CoretaxGenerateRequest(BaseModel):
-    template: str = Field(..., min_length=1, max_length=255)
-    snapshot_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
-    dry_run: bool = False
+# ── CoreTax request models (new persistent-ledger workflow) ───────────────────
 
-    @field_validator("snapshot_date")
-    @classmethod
-    def validate_snap(cls, v):
-        return _validate_snapshot_date(v)
+class CoretaxImportPriorYearRequest(BaseModel):
+    target_tax_year: int = Field(..., ge=2020, le=2099)
+
+class CoretaxStagingOverrideRequest(BaseModel):
+    user_override_carry_forward: int = Field(..., ge=0, le=1)
+
+class CoretaxRowCreateRequest(BaseModel):
+    tax_year: int = Field(..., ge=2020, le=2099)
+    kind: str = Field(..., pattern=r"^(asset|liability)$")
+    kode_harta: str = Field("", max_length=10)
+    keterangan: str = Field("")
+    owner: str = Field("")
+    institution: str = Field("")
+    acquisition_year: int | None = None
+    prior_amount_idr: float | None = None
+    current_amount_idr: float | None = None
+    market_value_idr: float | None = None
+
+class CoretaxRowUpdateRequest(BaseModel):
+    kode_harta: str | None = None
+    keterangan: str | None = None
+    owner: str | None = None
+    institution: str | None = None
+    acquisition_year: int | None = None
+    prior_amount_idr: float | None = None
+    current_amount_idr: float | None = None
+    market_value_idr: float | None = None
+    notes_internal: str | None = None
+
+class CoretaxLockRequest(BaseModel):
+    field: str = Field(..., pattern=r"^(amount|market_value)$")
+    reason: str | None = None
+
+class CoretaxUnlockRequest(BaseModel):
+    field: str = Field(..., pattern=r"^(amount|market_value)$")
+
+class CoretaxResetFromRulesRequest(BaseModel):
+    tax_year: int = Field(..., ge=2020, le=2099)
+    kind: str | None = None
+    kode_harta: str | None = None
+
+class CoretaxAutoReconcileRequest(BaseModel):
+    tax_year: int = Field(..., ge=2020, le=2099)
+    fs_range: dict = Field(..., description="{start_month, end_month} in YYYY-MM")
+    snapshot_date: str | None = None
+
+class CoretaxMappingRequest(BaseModel):
+    match_kind: str = Field(..., min_length=1)
+    match_value: str = Field(..., min_length=1)
+    target_kode_harta: str = Field(..., min_length=1)
+    target_kind: str = Field(..., pattern=r"^(asset|liability)$")
+    target_stable_key: str | None = None
+    target_keterangan_template: str | None = None
+    confidence: float = Field(1.0, ge=0.0, le=1.0)
+    created_from_tax_year: int | None = None
+
+class CoretaxExportRequest(BaseModel):
+    tax_year: int = Field(..., ge=2020, le=2099)
 
 
 class CategoryOverrideRequest(BaseModel):
@@ -3280,12 +3357,8 @@ def query_wealth_explanation(req: WealthQuestionRequest):
 
 
 # ── /api/coretax/* ────────────────────────────────────────────────────────────
-
-def _coretax_template_dir() -> Path:
-    path = Path(_coretax_cfg.template_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
+# Persistent tax-version ledger — replaces the old one-shot generator.
+# All write endpoints honor FINANCE_READ_ONLY.
 
 def _coretax_output_dir() -> Path:
     path = Path(_coretax_cfg.output_dir)
@@ -3293,7 +3366,13 @@ def _coretax_output_dir() -> Path:
     return path
 
 
-def _safe_filename(name: str, *, allowed_suffixes: tuple[str, ...]) -> str:
+def _coretax_template_dir() -> Path:
+    path = Path(_coretax_cfg.template_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_coretax_filename(name: str, *, allowed_suffixes: tuple[str, ...] = ()) -> str:
     cleaned = str(name or "").strip()
     if not cleaned or cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned or Path(cleaned).is_absolute():
         raise HTTPException(status_code=400, detail="invalid_filename")
@@ -3302,72 +3381,332 @@ def _safe_filename(name: str, *, allowed_suffixes: tuple[str, ...]) -> str:
     return cleaned
 
 
-def _resolve_coretax_template(name: str) -> Path:
-    filename = _safe_filename(name, allowed_suffixes=(".xlsx",))
-    for candidate in _coretax_template_dir().iterdir():
-        if candidate.is_file() and candidate.name == filename:
-            return candidate
-    raise HTTPException(status_code=404, detail="template_not_found")
+def _resolve_coretax_file(file_id: str, output_dir: Path, suffix: str) -> Path:
+    """Resolve a file_id to a path within output_dir. No path traversal."""
+    filename = _safe_coretax_filename(file_id, allowed_suffixes=(suffix,))
+    candidate = output_dir / filename
+    if candidate.is_file():
+        return candidate
+    raise HTTPException(status_code=404, detail="file_not_found")
 
 
-def _resolve_coretax_audit(name: str) -> Path:
-    cleaned = _safe_filename(name, allowed_suffixes=(".json", ".xlsx"))
-    filename = f"{Path(cleaned).stem}.audit.json" if cleaned.lower().endswith(".xlsx") else cleaned
-    for candidate in _coretax_output_dir().iterdir():
-        if candidate.is_file() and candidate.name == filename:
-            return candidate
-    raise HTTPException(status_code=404, detail="audit_not_found")
+# ── Import prior-year SPT ────────────────────────────────────────────────────
 
-
-@app.get("/api/coretax/templates", dependencies=[Depends(require_api_key)])
-def get_coretax_templates():
-    templates = []
-    for path in sorted(_coretax_template_dir().glob("*.xlsx"), key=lambda fp: fp.stat().st_mtime, reverse=True):
-        stat = path.stat()
-        templates.append({
-            "name": path.name,
-            "size_bytes": stat.st_size,
-            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-        })
-    return {"templates": templates}
-
-
-@app.post("/api/coretax/generate", dependencies=[Depends(require_api_key)])
-def post_coretax_generate(req: CoretaxGenerateRequest):
-    if not req.dry_run:
-        require_writable()
-
-    template_path = _resolve_coretax_template(req.template)
-
+@app.post("/api/coretax/import/prior-year", dependencies=[Depends(require_api_key)])
+async def import_prior_year(file: UploadFile, target_tax_year: int = Form(...)):
+    """Upload a prior-year SPT XLSX and parse it into staging."""
+    require_writable()
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="File must be .xlsx")
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
     try:
-        if req.dry_run:
-            result = generate_coretax_xlsx(template_path, None, req.snapshot_date, Path(_db_path), dry_run=True)
-            return result_to_dict(result)
-
-        output_path = _next_output_path(_coretax_output_dir(), re.search(r"(20\d{2})", template_path.stem).group(1) if re.search(r"(20\d{2})", template_path.stem) else "unknown", req.snapshot_date)
-        result = generate_coretax_xlsx(template_path, output_path, req.snapshot_date, Path(_db_path), dry_run=False)
-        audit_path = output_path.with_suffix(".audit.json")
-        _write_audit_json(result, audit_path)
-
-        from starlette.responses import FileResponse
-
-        response = FileResponse(
-            str(output_path),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=output_path.name,
-        )
-        response.headers["X-Coretax-Audit-File"] = audit_path.name
-        response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, X-Coretax-Audit-File"
-        return response
-    except CoretaxTemplateError as exc:
+        with _db() as conn:
+            result = parse_prior_year_xlsx(tmp_path, target_tax_year, conn)
+            result["rows"] = get_staging_batch(conn, result["batch_id"])
+            return result
+    except ImportParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
-@app.get("/api/coretax/audit/{filename}", dependencies=[Depends(require_api_key)])
-def get_coretax_audit(filename: str):
-    audit_path = _resolve_coretax_audit(filename)
+@app.get("/api/coretax/import/staging/{batch_id}", dependencies=[Depends(require_api_key)])
+def get_staging(batch_id: str):
+    with _db() as conn:
+        rows = get_staging_batch(conn, batch_id)
+        return {"batch_id": batch_id, "rows": rows}
+
+
+@app.patch("/api/coretax/import/staging/{batch_id}/rows/{row_id}", dependencies=[Depends(require_api_key)])
+def patch_staging_row(batch_id: str, row_id: int, req: CoretaxStagingOverrideRequest):
+    require_writable()
+    with _db() as conn:
+        srow = get_staging_row(conn, row_id)
+        if not srow or srow["staging_batch_id"] != batch_id:
+            raise HTTPException(status_code=404, detail="staging_row_not_found")
+        update_staging_row(conn, row_id, user_override_carry_forward=req.user_override_carry_forward)
+        return {"ok": True}
+
+
+@app.post("/api/coretax/import/staging/{batch_id}/commit", dependencies=[Depends(require_api_key)])
+def commit_staging(batch_id: str):
+    require_writable()
+    with _db() as conn:
+        staging = get_staging_batch(conn, batch_id)
+        if not staging:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        target_year = staging[0]["target_tax_year"]
+        result = commit_staging_batch(conn, batch_id, target_year)
+        return result
+
+
+@app.delete("/api/coretax/import/staging/{batch_id}", dependencies=[Depends(require_api_key)])
+def delete_staging(batch_id: str):
+    require_writable()
+    with _db() as conn:
+        count = delete_staging_batch(conn, batch_id)
+        return {"deleted": count}
+
+
+# ── Summary & rows ───────────────────────────────────────────────────────────
+
+@app.get("/api/coretax/summary", dependencies=[Depends(require_api_key)])
+def get_coretax_summary(tax_year: int = Query(..., ge=2020, le=2099)):
+    with _db() as conn:
+        return get_summary_for_year(conn, tax_year)
+
+
+@app.get("/api/coretax/rows", dependencies=[Depends(require_api_key)])
+def get_coretax_rows(tax_year: int = Query(..., ge=2020, le=2099), kind: Optional[str] = Query(None)):
+    with _db() as conn:
+        rows = get_rows_for_year(conn, tax_year, kind=kind)
+        return {"tax_year": tax_year, "rows": rows}
+
+
+@app.patch("/api/coretax/rows/{row_id}", dependencies=[Depends(require_api_key)])
+def patch_coretax_row(row_id: int, req: CoretaxRowUpdateRequest):
+    require_writable()
+    with _db() as conn:
+        existing = get_row_by_id(conn, row_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="row_not_found")
+        updates = {k: v for k, v in req.model_dump().items() if v is not None}
+        if not updates:
+            return existing
+        # Auto-lock touched amount fields
+        now = datetime.now(timezone.utc).isoformat()
+        if "current_amount_idr" in updates:
+            updates["amount_locked"] = 1
+            updates["locked_reason"] = "user edited current_amount"
+            updates["last_user_edited_at"] = now
+        if "market_value_idr" in updates:
+            updates["market_value_locked"] = 1
+            updates["locked_reason"] = (updates.get("locked_reason") or "") + "; user edited market_value"
+            updates["last_user_edited_at"] = now
+        coretax_update_row(conn, row_id, **updates)
+        return get_row_by_id(conn, row_id)
+
+
+@app.post("/api/coretax/rows", dependencies=[Depends(require_api_key)])
+def create_coretax_row(req: CoretaxRowCreateRequest):
+    require_writable()
+    from finance.coretax.db import make_stable_key_manual
+    stable_key = make_stable_key_manual(req.kode_harta, req.keterangan, req.acquisition_year)
+    with _db() as conn:
+        row_id = insert_row(
+            conn,
+            tax_year=req.tax_year,
+            kind=req.kind,
+            stable_key=stable_key,
+            kode_harta=req.kode_harta,
+            keterangan=req.keterangan,
+            owner=req.owner,
+            institution=req.institution,
+            acquisition_year=req.acquisition_year,
+            prior_amount_idr=req.prior_amount_idr,
+            current_amount_idr=req.current_amount_idr,
+            market_value_idr=req.market_value_idr,
+            current_amount_source="manual" if req.current_amount_idr is not None else "unset",
+            prior_amount_source="manual" if req.prior_amount_idr is not None else "unset",
+            market_value_source="manual" if req.market_value_idr is not None else "unset",
+        )
+        return {"id": row_id, "stable_key": stable_key}
+
+
+@app.delete("/api/coretax/rows/{row_id}", dependencies=[Depends(require_api_key)])
+def delete_coretax_row(row_id: int):
+    require_writable()
+    with _db() as conn:
+        if not coretax_delete_row(conn, row_id):
+            raise HTTPException(status_code=404, detail="row_not_found")
+        return {"ok": True}
+
+
+# ── Lock / unlock ────────────────────────────────────────────────────────────
+
+@app.post("/api/coretax/rows/{row_id}/lock", dependencies=[Depends(require_api_key)])
+def lock_coretax_row(row_id: int, req: CoretaxLockRequest):
+    require_writable()
+    with _db() as conn:
+        existing = get_row_by_id(conn, row_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="row_not_found")
+        if req.field == "amount":
+            coretax_update_row(conn, row_id, amount_locked=1, locked_reason=req.reason)
+        else:
+            coretax_update_row(conn, row_id, market_value_locked=1, locked_reason=req.reason)
+        return get_row_by_id(conn, row_id)
+
+
+@app.post("/api/coretax/rows/{row_id}/unlock", dependencies=[Depends(require_api_key)])
+def unlock_coretax_row(row_id: int, req: CoretaxUnlockRequest):
+    require_writable()
+    with _db() as conn:
+        existing = get_row_by_id(conn, row_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="row_not_found")
+        if req.field == "amount":
+            coretax_update_row(conn, row_id, amount_locked=0, locked_reason=None)
+        else:
+            coretax_update_row(conn, row_id, market_value_locked=0, locked_reason=None)
+        return get_row_by_id(conn, row_id)
+
+
+# ── Reset from rules ─────────────────────────────────────────────────────────
+
+@app.post("/api/coretax/reset-from-rules", dependencies=[Depends(require_api_key)])
+def reset_coretax_from_rules(req: CoretaxResetFromRulesRequest):
+    require_writable()
+    with _db() as conn:
+        return reset_from_rules(conn, req.tax_year, kind=req.kind, kode_harta=req.kode_harta)
+
+
+# ── Auto-reconcile ───────────────────────────────────────────────────────────
+
+@app.post("/api/coretax/auto-reconcile", dependencies=[Depends(require_api_key)])
+def auto_reconcile(req: CoretaxAutoReconcileRequest):
+    require_writable()
+    fs_range = req.fs_range
+    start_month = fs_range.get("start_month", "")
+    end_month = fs_range.get("end_month", "")
+    if not start_month or not end_month:
+        raise HTTPException(status_code=400, detail="fs_range must include start_month and end_month")
+    with _db() as conn:
+        return coretax_run_reconcile(conn, req.tax_year, start_month, end_month, req.snapshot_date)
+
+
+@app.get("/api/coretax/reconcile-runs", dependencies=[Depends(require_api_key)])
+def get_reconcile_runs_endpoint(tax_year: int = Query(..., ge=2020, le=2099)):
+    with _db() as conn:
+        runs = get_reconcile_runs(conn, tax_year)
+        # Parse JSON strings back
+        import json as _json
+        for run in runs:
+            if isinstance(run.get("summary_json"), str):
+                run["summary"] = _json.loads(run["summary_json"])
+            if isinstance(run.get("trace_json"), str):
+                run["trace"] = _json.loads(run["trace_json"])
+        return {"tax_year": tax_year, "runs": runs}
+
+
+@app.get("/api/coretax/unmatched", dependencies=[Depends(require_api_key)])
+def get_unmatched(tax_year: int = Query(..., ge=2020, le=2099), run_id: Optional[int] = Query(None)):
+    with _db() as conn:
+        if run_id is None:
+            latest = get_latest_reconcile_run(conn, tax_year)
+            if not latest:
+                return {"tax_year": tax_year, "unmatched": [], "run_id": None}
+            run_id = latest["id"]
+        unmatched = get_unmatched_for_run(conn, run_id)
+        return {"tax_year": tax_year, "run_id": run_id, "unmatched": unmatched}
+
+
+# ── Learned mappings ─────────────────────────────────────────────────────────
+
+@app.post("/api/coretax/mappings", dependencies=[Depends(require_api_key)])
+def create_mapping(req: CoretaxMappingRequest):
+    require_writable()
+    with _db() as conn:
+        mid = upsert_mapping(
+            conn, req.match_kind, req.match_value,
+            req.target_kode_harta, req.target_kind,
+            target_stable_key=req.target_stable_key,
+            target_keterangan_template=req.target_keterangan_template,
+            confidence=req.confidence,
+            created_from_tax_year=req.created_from_tax_year,
+        )
+        return {"id": mid}
+
+
+@app.get("/api/coretax/mappings", dependencies=[Depends(require_api_key)])
+def list_mappings():
+    with _db() as conn:
+        return {"mappings": get_mappings(conn)}
+
+
+@app.delete("/api/coretax/mappings/{mapping_id}", dependencies=[Depends(require_api_key)])
+def remove_mapping(mapping_id: int):
+    require_writable()
+    with _db() as conn:
+        if not delete_mapping(conn, mapping_id):
+            raise HTTPException(status_code=404, detail="mapping_not_found")
+        return {"ok": True}
+
+
+# ── Export ────────────────────────────────────────────────────────────────────
+
+@app.post("/api/coretax/export", dependencies=[Depends(require_api_key)])
+def export_coretax(req: CoretaxExportRequest):
+    require_writable()
+    with _db() as conn:
+        try:
+            result = export_coretax_xlsx(conn, req.tax_year, _coretax_template_dir(), _coretax_output_dir())
+            return {
+                "file_id": result.file_id,
+                "download_url": f"/api/coretax/export/{result.file_id}/download",
+                "audit_url": f"/api/coretax/export/{Path(result.file_id).stem}.audit.json/audit",
+                "summary": {
+                    "total_rows": result.total_rows,
+                    "total_prior": result.total_prior,
+                    "total_current": result.total_current,
+                    "total_market": result.total_market,
+                    "liability_total": result.liability_total,
+                },
+            }
+        except ExportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/coretax/exports", dependencies=[Depends(require_api_key)])
+def list_exports(tax_year: int = Query(..., ge=2020, le=2099)):
+    output_dir = _coretax_output_dir()
+    exports = []
+    for path in sorted(output_dir.glob(f"CoreTax_{tax_year}_v*.xlsx"), reverse=True):
+        audit_path = path.with_suffix(".audit.json")
+        stat = path.stat()
+        entry = {
+            "file_id": path.name,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            "size_bytes": stat.st_size,
+        }
+        if audit_path.exists():
+            try:
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                entry["total_prior"] = audit.get("total_prior")
+                entry["total_current"] = audit.get("total_current")
+            except Exception:
+                pass
+        exports.append(entry)
+    return {"tax_year": tax_year, "exports": exports}
+
+
+@app.get("/api/coretax/export/{file_id}/download", dependencies=[Depends(require_api_key)])
+def download_export(file_id: str):
+    path = _resolve_coretax_file(file_id, _coretax_output_dir(), ".xlsx")
+    from starlette.responses import FileResponse
+    return FileResponse(
+        str(path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
+    )
+
+
+@app.get("/api/coretax/export/{file_id}/audit", dependencies=[Depends(require_api_key)])
+def get_export_audit(file_id: str):
+    # Accept either .xlsx or .audit.json file_id
+    if file_id.lower().endswith(".xlsx"):
+        audit_name = f"{Path(file_id).stem}.audit.json"
+    elif file_id.lower().endswith(".json"):
+        audit_name = file_id
+    else:
+        audit_name = f"{Path(file_id).stem}.audit.json"
+    path = _resolve_coretax_file(audit_name, _coretax_output_dir(), ".json")
     try:
-        return json.loads(audit_path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="invalid_audit_json") from exc
 

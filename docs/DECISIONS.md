@@ -102,6 +102,29 @@ Keeping XLSX immutable makes rebuilds deterministic and lets user edits live in 
 - Manual edits should happen in the PWA/API, not in the XLSX file.
 - Exporter/importer column changes must be coordinated and tested.
 
+## Preserve Reviewed CoreTax Values In A Ledger
+
+### Decision
+
+CoreTax SPT uses a persistent tax-version ledger in SQLite instead of a one-shot XLSX generator.
+
+### Context
+
+The tax book intentionally diverges from the real PWM book. Acquisition-cost rows, manually adjusted rows, hidden/merged accounts, and prior-year tax decisions must survive future refreshes.
+
+### Rationale
+
+Re-running a generator from current PWM data can erase reviewed tax values. A ledger with stable row identities, explicit lock flags, staging, reconcile traces, and learned mappings preserves tax decisions while still letting refreshable rows update from PWM.
+
+### Consequences
+
+- `coretax_rows` is the authoritative tax-version book.
+- Manual edits auto-lock the touched amount or market-value field.
+- Reconcile must skip locked fields and record the skip.
+- Learned mappings resolve to `target_stable_key`, not only a code or description.
+- Prior-year imports must reject mismatched E/F tax-year headers.
+- XLSX export is a projection of the ledger, not the source of truth.
+
 ## Keep Operational Detail Out Of The Architecture Blueprint
 
 ### Decision

@@ -522,6 +522,12 @@ def open_db(db_path: str) -> sqlite3.Connection:
         )
         _set_schema_version(conn, 4)
         conn.commit()
+    # ── CoreTax persistent ledger tables (schema version 5) ──────────────
+    if ver < 5:
+        from finance.coretax.db import ensure_coretax_tables
+        ensure_coretax_tables(conn)
+        _set_schema_version(conn, 5)
+        conn.commit()
     # Prune sync_log entries older than 90 days
     conn.execute(
         "DELETE FROM sync_log WHERE synced_at < datetime('now', '-90 days')"

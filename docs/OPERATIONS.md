@@ -147,7 +147,7 @@ Important sections:
 | `[fastapi]` | Finance API host, port, CORS. |
 | `[ollama_finance]` | Finance categorization AI settings. |
 | `[household]` | Household satellite base URL and API key file. |
-| `[coretax]` | CoreTax template/output dirs, match mode, rounding, owner and institution aliases. |
+| `[coretax]` | CoreTax template/output dirs. Legacy match/rounding/alias keys are no longer used by the persistent ledger. |
 
 Validate TOML syntax:
 
@@ -231,37 +231,53 @@ Household maintenance:
 
 Use PWA → CoreTax SPT for the annual Indonesian DJP tax return (SPT) export.
 
-1. Drop the current year's template into `data/coretax/templates/` (e.g. `CoreTax 2025.xlsx`).
-2. Ensure PWM has `account_balances` and `holdings` rows for the relevant snapshot date (typically the last day of the tax year).
-3. Navigate to **CoreTax SPT** in the PWA.
-4. Set the **Reporting Period** (start and end month — end month determines the snapshot date).
-5. Pick the template from the dropdown.
-6. Click **Preview (dry run)** to review the confidence breakdown:
-   - Filled rows, unmatched rows, aggregated rows, currency warnings, and unused PWM accounts.
-7. Expand unmatched rows and resolve any mismatches (owner alias gaps, institution alias gaps, missing PWM data).
-8. Click **Generate XLSX** — the browser downloads `CoreTax_YEAR_SNAPSHOT_vN.xlsx` and the server writes the same file plus a `.audit.json` sidecar to `data/coretax/output/`.
-9. Click **Download audit log** to retrieve the sidecar for offline review.
+The current implementation is a persistent tax-version ledger. It is not a one-shot template filler. SQLite stores reviewed tax values, lock flags, learned mappings, import staging rows, and reconcile history.
 
-CLI equivalent (dry run):
+1. Confirm the canonical export template exists under `data/coretax/templates/`. Keep it chart/image-free because `openpyxl` does not roundtrip those reliably.
+2. Upload the prior-year submitted SPT XLSX in the **Import Previous SPT** tab. For example, a workbook with headers `E=2025` and `F=2026` must be uploaded with `target_tax_year=2026`.
+3. Review staged rows. The staging table preserves raw Excel cells for B/H descriptions and E/F/G values so the import can be audited before commit.
+4. Commit staging to create `coretax_rows` for the target tax year. Sticky codes carry forward; refreshable codes stay unset.
+5. Use **Carry Forward Review** to edit rows or lock/unlock fields. Any manual edit to `current_amount_idr` or `market_value_idr` auto-locks that field.
+6. Use **Reconcile from PWM** with the relevant month range. Reconcile reads `account_balances`, `holdings`, and `liabilities` for the snapshot date and only writes unlocked fields.
+7. Use **Review & Manual Mapping** for unmatched PWM rows. "Create from unmatched" creates a row and stores a learned mapping keyed by source signature and `target_stable_key`.
+8. Use **Export CoreTax XLSX**. The API writes `CoreTax_{tax_year}_vN.xlsx` plus `CoreTax_{tax_year}_vN.audit.json` under `data/coretax/output/` and returns only `file_id`, `download_url`, and `audit_url`.
+
+Carry-forward defaults:
+
+| Kode | Behavior |
+|---|---|
+| `012`, `034`, `036`, `039` | Refreshable from PWM; committed with `current_amount_idr = NULL`. |
+| `038`, `042`, `043`, `051`, `061` | Sticky/acquisition-cost rows; committed with `current_amount_idr = prior_amount_idr`. |
+
+Useful API probes:
 
 ```bash
-python3 -c "
-from pathlib import Path
-from finance.coretax_export import generate_coretax_xlsx
-r = generate_coretax_xlsx(
-    Path('data/coretax/templates/CoreTax 2025.xlsx'),
-    None,
-    '2025-12-31',
-    Path('data/finance.db'),
-    dry_run=True,
-)
-print(f'filled={r.filled_count} unmatched={r.unmatched_count} currency_warnings={r.currency_warning_count}')
-"
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" "http://127.0.0.1:8090/api/coretax/summary?tax_year=2026" | python3 -m json.tool
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" "http://127.0.0.1:8090/api/coretax/rows?tax_year=2026" | python3 -m json.tool
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" "http://127.0.0.1:8090/api/coretax/reconcile-runs?tax_year=2026" | python3 -m json.tool
 ```
 
-Adding or adjusting institution/owner mappings — edit `config/settings.toml` under `[coretax.institution_aliases]` and `[coretax.owner_aliases]`. Changes take effect on the next server start (no rebuild needed for config-only changes unless running in Docker).
+CLI smoke test using a local workbook and scratch DB:
 
-NAS replica: `dry_run=true` is always available. `dry_run=false` is blocked under `FINANCE_READ_ONLY=true` (returns 403).
+```bash
+python3 - <<'PY'
+import sqlite3
+from pathlib import Path
+from finance.coretax.db import ensure_coretax_tables
+from finance.coretax.import_parser import parse_prior_year_xlsx
+from finance.coretax.carry_forward import commit_staging_batch
+
+workbook = Path('/Users/g4ndr1k/Library/CloudStorage/OneDrive-Personal/Finance/SPT/2025/CoreTax 2025.xlsx')
+conn = sqlite3.connect(':memory:')
+conn.row_factory = sqlite3.Row
+ensure_coretax_tables(conn)
+result = parse_prior_year_xlsx(workbook, 2026, conn)
+print(result['row_count'], 'rows staged')
+print(commit_staging_batch(conn, result['batch_id'], 2026))
+PY
+```
+
+NAS replica: all CoreTax write endpoints are blocked under `FINANCE_READ_ONLY=true` and return 403. GET endpoints remain available for review/download of already-synced data.
 
 ## Existing Specialized Docs
 
