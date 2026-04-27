@@ -75,6 +75,22 @@ from finance.coretax.db import (
     get_asset_codes,
     upsert_taxpayer,
     get_taxpayer,
+    # Phase 1+2: new helpers
+    _utcnow,
+    assign_mapping,
+    compute_unmapped_pwm,
+    find_lifecycle_mappings,
+    find_rename_candidates,
+    find_stale_mappings,
+    get_rejected_pairs,
+    get_rejected_suggestions,
+    insert_rejected_suggestion,
+    delete_rejected_suggestion,
+    list_component_history,
+    list_mappings_grouped,
+    list_row_components,
+    replace_row_components_for_targets,
+    update_mapping_confidence,
 )
 from finance.coretax.import_parser import parse_prior_year_xlsx, ImportParseError
 from finance.coretax.carry_forward import commit_staging_batch, reset_from_rules
@@ -1348,6 +1364,49 @@ class CoretaxMappingRequest(BaseModel):
 
 class CoretaxExportRequest(BaseModel):
     tax_year: int = Field(..., ge=2020, le=2099)
+
+
+# ── Phase 2: New request models for mapping-first reconciliation ─────────────
+
+class CoretaxAssignMappingRequest(BaseModel):
+    match_kind: str = Field(..., min_length=1)
+    match_value: str = Field(..., min_length=1)
+    target_kode_harta: str = Field(..., min_length=1)
+    target_kind: str = Field(..., pattern=r"^(asset|liability)$")
+    target_stable_key: str = Field(..., min_length=1)
+    source: str = Field("manual", pattern=r"^(manual|suggested|auto_safe)$")
+    confidence_score: float = Field(1.0, ge=0.0, le=1.0)
+    fingerprint_raw: str | None = None
+    target_keterangan_template: str | None = None
+    created_from_tax_year: int | None = None
+
+
+class CoretaxMappingPatchRequest(BaseModel):
+    target_stable_key: str | None = None
+    target_kode_harta: str | None = None
+    target_kind: str | None = None
+    confidence_score: float | None = Field(None, ge=0.0, le=1.0)
+    source: str | None = None
+
+
+class CoretaxMappingConfirmRequest(BaseModel):
+    pass  # No body needed — just POST to confirm
+
+
+class CoretaxSuggestRequest(BaseModel):
+    items: list[dict] | None = None  # Optional subset; empty = all unmapped
+
+
+class CoretaxSuggestPreviewRequest(BaseModel):
+    suggestions: list[dict]  # List of accepted suggestions to preview
+
+
+class CoretaxSuggestRejectRequest(BaseModel):
+    match_kind: str = Field(..., min_length=1)
+    match_value: str = Field(..., min_length=1)
+    target_stable_key: str = Field(..., min_length=1)
+    rule: str = Field(..., min_length=1)
+    note: str | None = None
 
 
 class CategoryOverrideRequest(BaseModel):
@@ -3709,6 +3768,231 @@ def get_export_audit(file_id: str):
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="invalid_audit_json") from exc
+
+
+# ── Phase 2: Mapping-first reconciliation endpoints ─────────────────────────
+
+
+@app.get("/api/coretax/{year}/unmapped-pwm", dependencies=[Depends(require_api_key)])
+def get_unmapped_pwm(year: int, limit: int = Query(100, ge=1, le=1000),
+                     cursor: Optional[str] = Query(None),
+                     source_kind: Optional[str] = Query(None)):
+    """Compute unmapped PWM items fresh against current data + mappings."""
+    import base64 as _b64
+    with _db() as conn:
+        items = compute_unmapped_pwm(conn, year)
+    if source_kind:
+        items = [i for i in items if i["source_kind"] == source_kind]
+    total = len(items)
+    offset = 0
+    if cursor:
+        try:
+            offset = int(json.loads(_b64.b64decode(cursor)).get("offset", 0))
+        except Exception:
+            pass
+    page = items[offset:offset + limit]
+    next_cursor = None
+    if offset + limit < total:
+        next_cursor = _b64.b64encode(json.dumps({"offset": offset + limit}).encode()).decode()
+    return {"items": page, "next_cursor": next_cursor, "total_estimate": total}
+
+
+@app.get("/api/coretax/{year}/mappings/grouped", dependencies=[Depends(require_api_key)])
+def get_mappings_grouped(year: int, limit: int = Query(100, ge=1, le=1000),
+                         cursor: Optional[str] = Query(None)):
+    """Return mappings grouped by target_stable_key with pagination."""
+    with _db() as conn:
+        return list_mappings_grouped(conn, tax_year=year, limit=limit, cursor=cursor)
+
+
+@app.get("/api/coretax/{year}/mappings/stale", dependencies=[Depends(require_api_key)])
+def get_stale_mappings(year: int):
+    """Find mappings whose target row no longer exists for this tax year."""
+    with _db() as conn:
+        return {"items": find_stale_mappings(conn, year)}
+
+
+@app.get("/api/coretax/mappings/lifecycle", dependencies=[Depends(require_api_key)])
+def get_mappings_lifecycle(year: int = Query(..., ge=2020, le=2099),
+                           bucket: Optional[str] = Query(None)):
+    """Return mappings classified into lifecycle buckets."""
+    with _db() as conn:
+        buckets = find_lifecycle_mappings(conn, year)
+    if bucket:
+        bucket = bucket.upper()
+        if bucket not in buckets:
+            raise HTTPException(status_code=400, detail=f"Invalid bucket: {bucket}")
+        return {"bucket": bucket, "items": buckets[bucket]}
+    return {"buckets": {k: len(v) for k, v in buckets.items()}, "items": buckets}
+
+
+@app.get("/api/coretax/{year}/mappings/rename-candidates", dependencies=[Depends(require_api_key)])
+def get_rename_candidates(year: int):
+    """Find potential renames for stale signature-based mappings."""
+    with _db() as conn:
+        return {"items": find_rename_candidates(conn, year)}
+
+
+@app.post("/api/coretax/{year}/mappings/assign", dependencies=[Depends(require_api_key)])
+def assign_mapping_endpoint(year: int, req: CoretaxAssignMappingRequest):
+    """Create or update a mapping (single write path)."""
+    require_writable()
+    with _db() as conn:
+        mid = assign_mapping(
+            conn, req.match_kind, req.match_value,
+            req.target_kode_harta, req.target_kind, req.target_stable_key,
+            source=req.source,
+            confidence_score=req.confidence_score,
+            fingerprint_raw=req.fingerprint_raw,
+            target_keterangan_template=req.target_keterangan_template,
+            created_from_tax_year=req.created_from_tax_year or year,
+        )
+        return {"id": mid}
+
+
+@app.patch("/api/coretax/mappings/{mapping_id}", dependencies=[Depends(require_api_key)])
+def patch_mapping(mapping_id: int, req: CoretaxMappingPatchRequest):
+    """Update a mapping's target, confidence, or source."""
+    require_writable()
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not updates:
+        return {"ok": True, "unchanged": True}
+    with _db() as conn:
+        existing = conn.execute("SELECT id FROM coretax_mappings WHERE id = ?", (mapping_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="mapping_not_found")
+        # If confidence_score changed, recompute confidence_level
+        if "confidence_score" in updates:
+            from finance.coretax.confidence import derive_level
+            updates["confidence_level"] = derive_level(updates["confidence_score"])
+        update_mapping_confidence(conn, mapping_id, **updates)
+        row = conn.execute("SELECT * FROM coretax_mappings WHERE id = ?", (mapping_id,)).fetchone()
+        return dict(row)
+
+
+@app.delete("/api/coretax/mappings/{mapping_id}", dependencies=[Depends(require_api_key)])
+def remove_mapping(mapping_id: int):
+    require_writable()
+    with _db() as conn:
+        if not delete_mapping(conn, mapping_id):
+            raise HTTPException(status_code=404, detail="mapping_not_found")
+        return {"ok": True}
+
+
+@app.post("/api/coretax/mappings/{mapping_id}/confirm", dependencies=[Depends(require_api_key)])
+def confirm_mapping(mapping_id: int):
+    """Confirm a mapping — bumps times_confirmed and confidence."""
+    require_writable()
+    from finance.coretax.confidence import apply as apply_conf, Confirmed
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM coretax_mappings WHERE id = ?", (mapping_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="mapping_not_found")
+        updates = apply_conf(Confirmed(), dict(row))
+        update_mapping_confidence(conn, mapping_id, **updates)
+        updated = conn.execute("SELECT * FROM coretax_mappings WHERE id = ?", (mapping_id,)).fetchone()
+        return dict(updated)
+
+
+@app.get("/api/coretax/{year}/rows/{stable_key}/components", dependencies=[Depends(require_api_key)])
+def get_row_components(year: int, stable_key: str, run_id: Optional[int] = Query(None)):
+    """Get component breakdown for a target row."""
+    with _db() as conn:
+        return {"items": list_row_components(conn, stable_key, year, run_id=run_id)}
+
+
+@app.get("/api/coretax/components/history", dependencies=[Depends(require_api_key)])
+def get_component_history(match_kind: str = Query(...), match_value: str = Query(...),
+                          limit: int = Query(100, ge=1, le=1000)):
+    """Reverse trace: where has this PWM fingerprint been routed across runs/years."""
+    with _db() as conn:
+        return {"items": list_component_history(conn, match_kind, match_value, limit=limit)}
+
+
+@app.get("/api/coretax/{year}/reconcile/runs/{run_id}/diff", dependencies=[Depends(require_api_key)])
+def get_run_diff(year: int, run_id: int, vs: Optional[int] = Query(None)):
+    """Compare two reconcile runs — target-level deltas."""
+    import json as _json
+    with _db() as conn:
+        current = conn.execute("SELECT * FROM coretax_reconcile_runs WHERE id = ?", (run_id,)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="run_not_found")
+        # Find previous run if vs not specified
+        if vs is None:
+            prev = conn.execute(
+                "SELECT * FROM coretax_reconcile_runs WHERE tax_year = ? AND id < ? ORDER BY id DESC LIMIT 1",
+                (year, run_id),
+            ).fetchone()
+        else:
+            prev = conn.execute("SELECT * FROM coretax_reconcile_runs WHERE id = ?", (vs,)).fetchone()
+        if not prev:
+            return {"current_run_id": run_id, "previous_run_id": None, "deltas": []}
+        # Compare component sets
+        cur_components = conn.execute(
+            "SELECT target_stable_key, source_kind, match_kind, match_value, component_amount_idr, component_market_value_idr, pwm_label FROM coretax_row_components WHERE reconcile_run_id = ?",
+            (run_id,),
+        ).fetchall()
+        prev_components = conn.execute(
+            "SELECT target_stable_key, source_kind, match_kind, match_value, component_amount_idr, component_market_value_idr, pwm_label FROM coretax_row_components WHERE reconcile_run_id = ?",
+            (prev["id"],),
+        ).fetchall()
+        cur_set = {(r["target_stable_key"], r["match_kind"], r["match_value"]) for r in cur_components}
+        prev_set = {(r["target_stable_key"], r["match_kind"], r["match_value"]) for r in prev_components}
+        added = cur_set - prev_set
+        removed = prev_set - cur_set
+        return {
+            "current_run_id": run_id,
+            "previous_run_id": prev["id"],
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "added": [list(a) for a in added],
+            "removed": [list(r) for r in removed],
+        }
+
+
+# ── Phase 6: Suggestion endpoints ───────────────────────────────────────────
+
+
+@app.post("/api/coretax/{year}/mappings/suggest", dependencies=[Depends(require_api_key)])
+def suggest_mappings(year: int, req: CoretaxSuggestRequest):
+    """Return ranked suggestions for unmapped PWM items."""
+    from finance.coretax.suggest import suggest_mappings_for_unmapped
+    with _db() as conn:
+        if req.items:
+            unmapped = req.items
+        else:
+            unmapped = compute_unmapped_pwm(conn, year)
+        rejected = get_rejected_pairs(conn)
+        suggestions = suggest_mappings_for_unmapped(conn, year, unmapped, rejected)
+        return {"items": suggestions}
+
+
+@app.post("/api/coretax/{year}/mappings/suggest/preview", dependencies=[Depends(require_api_key)])
+def suggest_preview(year: int, req: CoretaxSuggestPreviewRequest):
+    """Preview what mappings would be created from accepted suggestions.
+    Returns the resulting mappings + diff WITHOUT persisting."""
+    preview_items = []
+    for s in req.suggestions:
+        preview_items.append({
+            "match_kind": s.get("match_kind"),
+            "match_value": s.get("match_value"),
+            "target_stable_key": s.get("target_stable_key"),
+            "confidence_score": s.get("confidence_score", 0.5),
+            "rule": s.get("rule"),
+            "pwm_label": s.get("pwm_label"),
+        })
+    return {"preview": preview_items, "count": len(preview_items)}
+
+
+@app.post("/api/coretax/{year}/mappings/suggest/reject", dependencies=[Depends(require_api_key)])
+def reject_suggestion(year: int, req: CoretaxSuggestRejectRequest):
+    """Record a rejected suggestion so it stops being proposed."""
+    with _db() as conn:
+        sid = insert_rejected_suggestion(
+            conn, req.match_kind, req.match_value,
+            req.target_stable_key, req.rule, req.note,
+        )
+        return {"id": sid}
 
 
 # ── /api/reports/financial-statement ──────────────────────────────────────────

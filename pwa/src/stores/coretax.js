@@ -236,6 +236,193 @@ export const useCoretaxStore = defineStore('coretax', () => {
     mappings.value = mappings.value.filter(m => m.id !== mappingId)
   }
 
+  // ── Phase 2: New mapping-first reconciliation actions ────────────────
+
+  const unmappedPwm = ref([])
+  const mappingsGrouped = ref([])
+  const staleMappings = ref([])
+  const lifecycleBuckets = ref({})
+  const renameCandidates = ref([])
+  const rowComponents = ref([])
+  const componentHistory = ref([])
+
+  async function fetchUnmappedPwm(sourceKind) {
+    try {
+      const params = { year: taxYear.value }
+      if (sourceKind) params.source_kind = sourceKind
+      const result = await api.coretaxUnmappedPwm(params)
+      unmappedPwm.value = result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+    }
+  }
+
+  async function fetchMappingsGrouped() {
+    try {
+      const result = await api.coretaxMappingsGrouped({ year: taxYear.value })
+      mappingsGrouped.value = result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+    }
+  }
+
+  async function fetchStaleMappings() {
+    try {
+      const result = await api.coretaxMappingsStale({ year: taxYear.value })
+      staleMappings.value = result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+    }
+  }
+
+  async function fetchLifecycleMappings(bucket) {
+    try {
+      const params = { year: taxYear.value }
+      if (bucket) params.bucket = bucket
+      const result = await api.coretaxMappingsLifecycle(params)
+      lifecycleBuckets.value = result.buckets || {}
+      // Flatten all bucket items into staleMappings for the lifecycle section
+      if (result.items) {
+        const all = []
+        for (const [bk, items] of Object.entries(result.items)) {
+          if (Array.isArray(items)) {
+            for (const item of items) {
+              item.lifecycle_bucket = bk
+              all.push(item)
+            }
+          }
+        }
+        staleMappings.value = all
+      }
+      return result
+    } catch (e) {
+      error.value = e?.message || String(e)
+    }
+  }
+
+  async function assignMappingDirect(data) {
+    require_writable()
+    try {
+      const result = await api.coretaxMappingAssign({ ...data, year: taxYear.value })
+      await fetchMappings()
+      await fetchUnmappedPwm()
+      return result
+    } catch (e) {
+      error.value = e?.message || String(e)
+      throw e
+    }
+  }
+
+  async function patchMapping(mappingId, updates) {
+    require_writable()
+    try {
+      const result = await api.coretaxMappingPatch(mappingId, updates)
+      await fetchMappings()
+      return result
+    } catch (e) {
+      error.value = e?.message || String(e)
+      throw e
+    }
+  }
+
+  async function confirmMapping(mappingId) {
+    require_writable()
+    try {
+      const result = await api.coretaxMappingConfirm(mappingId)
+      await fetchMappings()
+      return result
+    } catch (e) {
+      error.value = e?.message || String(e)
+      throw e
+    }
+  }
+
+  async function suggestMappings(items) {
+    try {
+      const result = await api.coretaxMappingSuggest({
+        year: taxYear.value,
+        items: items || null,
+      })
+      return result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+      return []
+    }
+  }
+
+  async function suggestPreview(suggestions) {
+    try {
+      return await api.coretaxMappingSuggestPreview({
+        year: taxYear.value,
+        suggestions,
+      })
+    } catch (e) {
+      error.value = e?.message || String(e)
+      return { preview: [], count: 0 }
+    }
+  }
+
+  async function suggestReject(data) {
+    try {
+      return await api.coretaxMappingSuggestReject({
+        year: taxYear.value,
+        ...data,
+      })
+    } catch (e) {
+      error.value = e?.message || String(e)
+    }
+  }
+
+  async function findRenames() {
+    try {
+      const result = await api.coretaxMappingRenameCandidates({ year: taxYear.value })
+      renameCandidates.value = result.items || []
+      return result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+      return []
+    }
+  }
+
+  async function fetchRowComponents(stableKey, runId) {
+    try {
+      const params = { year: taxYear.value, stable_key: stableKey }
+      if (runId) params.run_id = runId
+      const result = await api.coretaxRowComponents(params)
+      rowComponents.value = result.items || []
+      return result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+      return []
+    }
+  }
+
+  async function fetchComponentHistory(matchKind, matchValue) {
+    try {
+      const result = await api.coretaxComponentHistory({ match_kind: matchKind, match_value: matchValue })
+      componentHistory.value = result.items || []
+      return result.items || []
+    } catch (e) {
+      error.value = e?.message || String(e)
+      return []
+    }
+  }
+
+  async function fetchRunDiff(runId, vs) {
+    try {
+      const params = { year: taxYear.value, run_id: runId }
+      if (vs) params.vs = vs
+      return await api.coretaxRunDiff(params)
+    } catch (e) {
+      error.value = e?.message || String(e)
+      return null
+    }
+  }
+
+  function require_writable() {
+    // No-op in frontend — server enforces FINANCE_READ_ONLY
+  }
+
   async function runExport() {
     loading.value = true
     error.value = ''
@@ -265,6 +452,9 @@ export const useCoretaxStore = defineStore('coretax', () => {
     taxYear, summary, rows, mappings, staging, stagingBatchId,
     unmatched, reconcileRuns, lastReconcileTrace, exports,
     loading, error,
+    // Phase 2 state
+    unmappedPwm, mappingsGrouped, staleMappings, lifecycleBuckets,
+    renameCandidates, rowComponents, componentHistory,
     // Getters
     hasRows, assetRows, liabilityRows, coveragePct, filledRows, totalRows,
     // Actions
@@ -275,6 +465,11 @@ export const useCoretaxStore = defineStore('coretax', () => {
     lockRow, unlockRow, resetFromRules,
     runReconcile, fetchReconcileRuns, fetchUnmatched,
     createMapping, removeMapping,
+    // Phase 2 actions
+    fetchUnmappedPwm, fetchMappingsGrouped, fetchStaleMappings,
+    fetchLifecycleMappings, assignMappingDirect, patchMapping,
+    confirmMapping, suggestMappings, suggestPreview, suggestReject,
+    findRenames, fetchRowComponents, fetchComponentHistory, fetchRunDiff,
     runExport, fetchExports,
   }
 })

@@ -161,12 +161,119 @@
           </div>
         </div>
 
-        <!-- ═══ TAB 3: Reconcile from PWM ═══ -->
+        <!-- ═══ TAB 3: Mapping (before Reconcile) ═══ -->
+        <div class="setting-card" v-show="!isDesktop || activeTab === 'mapping'">
+          <div class="setting-title">
+            <span class="setting-title-icon" v-html="NAV_SVGS.CoreTax"></span> Mapping
+          </div>
+          <div class="setting-desc">Map PWM items to CoreTax rows. Mapping runs before Reconcile.</div>
+
+          <!-- Section 1: Unmapped PWM items (default expanded) -->
+          <details open style="margin-top:14px">
+            <summary class="section-summary">
+              Unmapped PWM Items
+              <span v-if="store.unmappedPwm.length" class="badge">{{ store.unmappedPwm.length }}</span>
+            </summary>
+            <div class="action-row" style="margin-top:8px">
+              <button class="btn btn-ghost btn-sm" @click="suggestAll" :disabled="store.loading">Suggest All</button>
+            </div>
+            <div v-if="store.unmappedPwm.length" class="table-wrap" style="margin-top:8px">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Source</th><th>PWM Item</th><th>Fingerprint</th><th></th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(um, idx) in store.unmappedPwm" :key="'ump-'+idx">
+                    <td class="cell-src">{{ um.source_kind }}</td>
+                    <td class="cell-desc">{{ um.pwm_label }}</td>
+                    <td class="cell-src" :title="um.fingerprint_raw">{{ um.match_kind }}:{{ um.match_value?.slice(0,12) }}…</td>
+                    <td>
+                      <button class="btn btn-ghost btn-sm" @click="mapToRow(um)">Map</button>
+                      <button class="btn btn-ghost btn-sm" @click="createRowFromUnmapped(um)">Create</button>
+                      <button class="btn btn-ghost btn-sm" @click="suggestOne(um)">Suggest</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="setting-desc" style="margin-top:8px">All PWM items are mapped.</div>
+          </details>
+
+          <!-- Section 2: Mapped items by CoreTax row (default collapsed) -->
+          <details style="margin-top:12px">
+            <summary class="section-summary">
+              Mapped Items by CoreTax Row
+              <span class="badge">{{ store.mappings.length }}</span>
+            </summary>
+            <div class="action-row" style="margin-top:8px">
+              <button class="btn btn-ghost btn-sm" @click="doFindRenames" :disabled="store.loading">Find Renames</button>
+            </div>
+            <div v-if="store.mappings.length" class="table-wrap" style="margin-top:8px">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Kind</th><th>Fingerprint</th><th>→ Target</th><th>Conf</th><th>Src</th><th>Years</th><th></th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="m in store.mappings" :key="m.id">
+                    <td class="cell-src">{{ m.match_kind }}</td>
+                    <td class="cell-desc" :title="m.fingerprint_raw">{{ m.match_value?.slice(0,12) }}…</td>
+                    <td>{{ m.target_kode_harta }} <span class="cell-src">{{ m.target_stable_key?.slice(0,20) }}…</span></td>
+                    <td>
+                      <span class="conf-dot" :class="'conf-'+(m.confidence_level||'HIGH').toLowerCase()" :title="m.confidence_score">{{ m.confidence_level || 'HIGH' }}</span>
+                    </td>
+                    <td class="cell-src">{{ m.source || 'manual' }}</td>
+                    <td>{{ m.years_used || 0 }}</td>
+                    <td>
+                      <button class="btn btn-ghost btn-sm" @click="confirmMappingAction(m)" title="Confirm">✓</button>
+                      <button class="btn-icon" @click="deleteMapping(m.id)" title="Delete">✕</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          <!-- Section 3: Stale & lifecycle (default collapsed, badge with count) -->
+          <details style="margin-top:12px">
+            <summary class="section-summary">
+              Stale &amp; Lifecycle
+              <span class="badge badge-warn">{{ staleCount }}</span>
+            </summary>
+            <div class="lifecycle-pills" style="margin-top:8px">
+              <button v-for="b in lifecycleBucketNames" :key="b"
+                class="pill" :class="{ 'is-active': activeBucket === b }"
+                @click="activeBucket = activeBucket === b ? null : b">
+                {{ b }} <span class="pill-count">{{ (store.lifecycleBuckets[b] || 0) }}</span>
+              </button>
+            </div>
+            <div v-if="lifecycleItems.length" class="table-wrap" style="margin-top:8px">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Kind</th><th>Fingerprint</th><th>→ Target</th><th>Bucket</th><th></th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="m in lifecycleItems" :key="'lc-'+m.id">
+                    <td class="cell-src">{{ m.match_kind }}</td>
+                    <td class="cell-desc" :title="m.fingerprint_raw">{{ m.match_value?.slice(0,12) }}…</td>
+                    <td>{{ m.target_kode_harta }}</td>
+                    <td><span class="badge badge-warn">{{ m.lifecycle_bucket }}</span></td>
+                    <td>
+                      <button class="btn btn-ghost btn-sm" @click="deleteMapping(m.id)">Delete</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="setting-desc" style="margin-top:8px">No stale mappings.</div>
+          </details>
+        </div>
+
+        <!-- ═══ TAB 4: Reconcile from PWM (simplified) ═══ -->
         <div class="setting-card" v-show="!isDesktop || activeTab === 'reconcile'">
           <div class="setting-title">
             <span class="setting-title-icon" v-html="NAV_SVGS.Audit"></span> Reconcile from PWM
           </div>
-          <div class="setting-desc">Auto-fill rows from PWM account balances and holdings.</div>
+          <div class="setting-desc">Apply mapped rules to auto-fill rows from PWM data.</div>
           <div class="setting-row setting-row-range reconcile-range-row" style="margin-top:12px">
             <div class="range-field">
               <label class="range-label">FS Start</label>
@@ -185,6 +292,12 @@
             <button class="btn" @click="runReconcile" :disabled="!fsStart || !fsEnd || store.loading">
               {{ store.loading ? 'Reconciling…' : 'Run Reconcile' }}
             </button>
+            <button v-if="store.reconcileRuns.length >= 2" class="btn btn-ghost" @click="compareRuns">Compare to Previous</button>
+          </div>
+
+          <!-- LOW-confidence warning banner -->
+          <div v-if="lowConfidenceCount > 0" class="alert alert-warn" style="margin-top:10px">
+            {{ lowConfidenceCount }} matches used low-confidence rules — review in Mapping tab.
           </div>
 
           <!-- Reconcile results -->
@@ -192,20 +305,51 @@
             <div class="preview-summary">
               <div class="preview-summary__line ok">✔ {{ reconcileResult.summary?.filled || 0 }} filled</div>
               <div class="preview-summary__line warn">⚠ {{ reconcileResult.summary?.locked_skipped || 0 }} locked (skipped)</div>
-              <div class="preview-summary__line warn">⚠ {{ reconcileResult.summary?.unmatched || 0 }} unmatched PWM rows</div>
+              <div class="preview-summary__line warn">⚠ {{ reconcileResult.summary?.unmatched || 0 }} unmatched</div>
+              <div v-if="reconcileResult.summary?.legacy_heuristics_enabled" class="preview-summary__line warn">
+                Legacy heuristics enabled ({{ reconcileResult.summary?.legacy_matches || 0 }} matches)
+              </div>
             </div>
           </div>
 
-          <!-- Unmatched PWM rows -->
-          <div v-if="store.unmatched.length" style="margin-top:14px">
+          <!-- Matched rows with confidence badges and breakdown -->
+          <div v-if="matchedTraces.length" style="margin-top:14px">
+            <details open class="preview-summary__line ok">
+              <summary>Matched Rows ({{ matchedTraces.length }})</summary>
+              <div class="table-wrap" style="margin-top:8px">
+                <table class="data-table">
+                  <thead>
+                    <tr><th>Code</th><th>Description</th><th>PWM Source</th><th>PWM Value</th><th>Tier</th><th>Conf</th><th>Status</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(t, idx) in matchedTraces" :key="'mt-'+idx">
+                      <td>{{ t.kode_harta }}</td>
+                      <td class="cell-desc">{{ t.keterangan }}</td>
+                      <td>{{ t.pwm_source }}</td>
+                      <td class="cell-num">{{ fmtNum(t.pwm_value) }}</td>
+                      <td class="cell-src">{{ t.tier || '—' }}</td>
+                      <td>
+                        <span class="conf-dot" :class="'conf-'+(t.confidence_level||'high').toLowerCase()">{{ t.confidence_level || '—' }}</span>
+                      </td>
+                      <td class="cell-src">
+                        {{ t.status === 'filled' ? '✔' : '🔒' }} {{ t.status }}
+                        <span v-if="t.warnings.length"> ({{ t.warnings.join(', ') }})</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+
+          <!-- Run diff results -->
+          <div v-if="runDiffResult" style="margin-top:14px">
             <details open class="preview-summary__line warn">
-              <summary>Unmatched PWM Rows ({{ store.unmatched.length }})</summary>
-              <ul class="unmatched-list">
-                <li v-for="(um, idx) in store.unmatched" :key="'um-'+idx">
-                  {{ um.source_kind }} — {{ um.payload?.institution || um.payload?.asset_name || '' }}
-                  <span v-if="um.payload?.account"> / {{ um.payload.account }}</span>
-                </li>
-              </ul>
+              <summary>Diff vs Run #{{ runDiffResult.previous_run_id }}</summary>
+              <div v-if="runDiffResult.added_count || runDiffResult.removed_count" style="margin-top:8px">
+                <div class="setting-desc">+{{ runDiffResult.added_count }} added, -{{ runDiffResult.removed_count }} removed</div>
+              </div>
+              <div v-else class="setting-desc" style="margin-top:8px">No differences.</div>
             </details>
           </div>
 
@@ -216,47 +360,11 @@
               <li v-for="run in store.reconcileRuns" :key="run.id">
                 #{{ run.id }} — {{ run.created_at?.slice(0,19) }} —
                 filled {{ run.summary?.filled }}, unmatched {{ run.summary?.unmatched }}
+                <span v-if="run.summary?.tier1_matches"> · T1:{{ run.summary.tier1_matches }}</span>
+                <span v-if="run.summary?.tier2_matches"> · T2:{{ run.summary.tier2_matches }}</span>
               </li>
             </ul>
           </details>
-        </div>
-
-        <!-- ═══ TAB 4: Manual Mapping ═══ -->
-        <div class="setting-card" v-show="!isDesktop || activeTab === 'mapping'">
-          <div class="setting-title">
-            <span class="setting-title-icon" v-html="NAV_SVGS.CoreTax"></span> Review & Manual Mapping
-          </div>
-          <div class="setting-desc">Map unmatched PWM rows to CoreTax rows, or add rows manually.</div>
-
-          <!-- Learned mappings -->
-          <details v-if="store.mappings.length" style="margin-top:12px">
-            <summary class="setting-desc" style="cursor:pointer">Learned Mappings ({{ store.mappings.length }})</summary>
-            <div class="table-wrap" style="margin-top:8px">
-              <table class="data-table">
-                <thead><tr><th>Kind</th><th>Value</th><th>→ Kode</th><th>Hits</th><th></th></tr></thead>
-                <tbody>
-                  <tr v-for="m in store.mappings" :key="m.id">
-                    <td>{{ m.match_kind }}</td>
-                    <td class="cell-desc">{{ m.match_value }}</td>
-                    <td>{{ m.target_kode_harta }}</td>
-                    <td>{{ m.hits }}</td>
-                    <td><button class="btn-icon" @click="deleteMapping(m.id)">✕</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-
-          <!-- Create from unmatched -->
-          <div v-if="store.unmatched.length" style="margin-top:12px">
-            <div class="setting-title" style="font-size:14px">Create from Unmatched</div>
-            <div class="unmatched-cards">
-              <div v-for="(um, idx) in store.unmatched" :key="'create-'+idx" class="unmatched-card">
-                <span>{{ um.source_kind }}: {{ um.payload?.institution || um.payload?.asset_name || '' }}</span>
-                <button class="btn btn-ghost btn-sm" @click="createFromUnmatched(um)">Create Row</button>
-              </div>
-            </div>
-          </div>
         </div>
 
         <!-- ═══ TAB 5: Export ═══ -->
@@ -349,8 +457,8 @@ const TAB_KEY = 'coretax_active_tab'
 const tabs = [
   { id: 'import', label: 'Import', icon: NAV_SVGS.Audit },
   { id: 'review', label: 'Review', icon: NAV_SVGS.Dashboard },
-  { id: 'reconcile', label: 'Reconcile', icon: NAV_SVGS.Audit },
   { id: 'mapping', label: 'Mapping', icon: NAV_SVGS.CoreTax },
+  { id: 'reconcile', label: 'Reconcile', icon: NAV_SVGS.Audit },
   { id: 'export', label: 'Export', icon: NAV_SVGS.CoreTax },
 ]
 
@@ -368,6 +476,9 @@ const exportResult = ref(null)
 const showAddRow = ref(false)
 const fsStart = ref('')
 const fsEnd = ref('')
+const runDiffResult = ref(null)
+const activeBucket = ref(null)
+const lifecycleBucketNames = ['STALE', 'WEAK', 'UNUSED', 'ORPHANED']
 
 const newRow = ref({
   kind: 'asset', kode_harta: '', keterangan: '', owner: '',
@@ -400,6 +511,8 @@ async function loadData() {
     store.fetchRows(),
     store.fetchMappings(),
     store.fetchExports(),
+    store.fetchUnmappedPwm(),
+    store.fetchLifecycleMappings(),
   ])
   // Default FS range to full tax year
   if (!fsStart.value) fsStart.value = `${store.taxYear - 1}-01`
@@ -475,6 +588,138 @@ async function runReconcile() {
   } catch (e) {
     reconcileResult.value = { error: e?.message || String(e) }
   }
+}
+
+// ── Mapping panel actions ────────────────────────────────────────────────
+
+async function mapToRow(um) {
+  // Open a prompt to select target stable_key
+  const targetKey = prompt('Enter target stable_key (paste from Review tab):', '')
+  if (!targetKey) return
+  try {
+    await store.assignMappingDirect({
+      match_kind: um.match_kind,
+      match_value: um.match_value,
+      target_kode_harta: um.payload?.kode_harta || '',
+      target_kind: um.source_kind === 'liability' ? 'liability' : 'asset',
+      target_stable_key: targetKey,
+      source: 'manual',
+      confidence_score: 1.0,
+      fingerprint_raw: um.fingerprint_raw,
+    })
+  } catch (e) {
+    console.warn('Failed to assign mapping:', e)
+  }
+}
+
+async function createRowFromUnmatched(um) {
+  const payload = um.payload || {}
+  const kind = um.source_kind === 'liability' ? 'liability' : 'asset'
+  const kodeHarta = inferKodeHarta({ source_kind: um.source_kind, payload })
+  const newRow = await store.createRow({
+    kind,
+    kode_harta: kodeHarta,
+    keterangan: payload.institution || payload.asset_name || payload.liability_name || '',
+    owner: payload.owner || '',
+    institution: payload.institution || '',
+    current_amount_idr: amountFromUnmatched(payload),
+  })
+  // Auto-create mapping
+  if (newRow && newRow.stable_key) {
+    try {
+      await store.assignMappingDirect({
+        match_kind: um.match_kind,
+        match_value: um.match_value,
+        target_kode_harta: kodeHarta,
+        target_kind: kind,
+        target_stable_key: newRow.stable_key,
+        source: 'manual',
+        confidence_score: 1.0,
+        fingerprint_raw: um.fingerprint_raw,
+      })
+    } catch (e) {
+      console.warn('Failed to create mapping:', e)
+    }
+  }
+  await store.fetchUnmappedPwm()
+}
+
+async function suggestOne(um) {
+  const suggestions = await store.suggestMappings([um])
+  if (suggestions.length === 0) {
+    alert('No suggestions found for this item.')
+    return
+  }
+  const best = suggestions[0]
+  const accept = confirm(`Suggestion: ${best.rule} (score ${best.confidence_score})\n→ ${best.target_stable_key}\n\nAccept?`)
+  if (accept) {
+    await store.assignMappingDirect({
+      match_kind: um.match_kind,
+      match_value: um.match_value,
+      target_kode_harta: best.target_kode_harta || '',
+      target_kind: um.source_kind === 'liability' ? 'liability' : 'asset',
+      target_stable_key: best.target_stable_key,
+      source: 'suggested',
+      confidence_score: best.confidence_score,
+      fingerprint_raw: um.fingerprint_raw,
+    })
+    await store.fetchUnmappedPwm()
+  }
+}
+
+async function suggestAll() {
+  const suggestions = await store.suggestMappings()
+  if (suggestions.length === 0) {
+    alert('No suggestions found.')
+    return
+  }
+  // Filter to high-confidence (>= 0.9)
+  const highConf = suggestions.filter(s => s.confidence_score >= 0.9)
+  if (highConf.length === 0) {
+    alert(`Found ${suggestions.length} suggestions, but none with confidence >= 0.9.`)
+    return
+  }
+  const accept = confirm(`Accept ${highConf.length} high-confidence suggestions (>= 0.9)?\n\n${highConf.map(s => `${s.rule}: ${s.target_stable_key}`).join('\n')}`)
+  if (accept) {
+    for (const s of highConf) {
+      try {
+        await store.assignMappingDirect({
+          match_kind: s.match_kind,
+          match_value: s.match_value,
+          target_kode_harta: s.target_kode_harta || '',
+          target_kind: s.source_kind === 'liability' ? 'liability' : 'asset',
+          target_stable_key: s.target_stable_key,
+          source: 'suggested',
+          confidence_score: s.confidence_score,
+          fingerprint_raw: s.fingerprint_raw,
+        })
+      } catch (e) {
+        console.warn('Failed to accept suggestion:', e)
+      }
+    }
+    await store.fetchUnmappedPwm()
+  }
+}
+
+async function confirmMappingAction(m) {
+  await store.confirmMapping(m.id)
+}
+
+async function doFindRenames() {
+  const candidates = await store.findRenames()
+  if (candidates.length === 0) {
+    alert('No rename candidates found.')
+    return
+  }
+  alert(`Found ${candidates.length} rename candidates. Review in the table.`)
+}
+
+async function compareRuns() {
+  const runs = store.reconcileRuns
+  if (runs.length < 2) return
+  const currentRunId = runs[0].id
+  const prevRunId = runs[1].id
+  runDiffResult.value = await store.fetchRunDiff(currentRunId, prevRunId)
 }
 
 async function deleteMapping(id) {
@@ -578,6 +823,24 @@ function fmtNum(val) {
 const priorTotal = computed(() =>
   store.staging.reduce((sum, r) => sum + (r.parsed_carry_amount_idr || 0), 0)
 )
+
+const matchedTraces = computed(() =>
+  (store.lastReconcileTrace || []).filter(t => t.status === 'filled' || t.status === 'locked_skipped')
+)
+
+const lowConfidenceCount = computed(() =>
+  (store.lastReconcileTrace || []).filter(t => t.confidence_level === 'LOW').length
+)
+
+const staleCount = computed(() => {
+  const b = store.lifecycleBuckets
+  return (b.STALE || 0) + (b.WEAK || 0) + (b.UNUSED || 0) + (b.ORPHANED || 0)
+})
+
+const lifecycleItems = computed(() => {
+  if (!activeBucket.value) return []
+  return store.staleMappings.filter(m => m.lifecycle_bucket === activeBucket.value)
+})
 
 function fmtMonth(key) {
   if (!key) return ''
@@ -749,6 +1012,36 @@ onMounted(loadData)
 .unmatched-list, .run-history { margin: 8px 0 0 18px; color: var(--text-muted); font-size: 13px; }
 .unmatched-cards { display: grid; gap: 8px; margin-top: 8px; }
 .unmatched-card { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,0.03); font-size: 13px; }
+
+/* ── Mapping-first reconciliation UI ─────────────────────────────────── */
+.section-summary {
+  cursor: pointer; font-weight: 700; font-size: 14px; color: var(--text);
+  display: flex; align-items: center; gap: 8px;
+}
+.badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: rgba(136,189,242,0.2); color: rgba(136,189,242,0.9);
+  font-size: 11px; font-weight: 700;
+}
+.badge-warn { background: rgba(255,193,7,0.2); color: #ffc107; }
+.conf-dot {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 8px;
+  font-size: 11px; font-weight: 700;
+}
+.conf-high { background: rgba(92,199,129,0.15); color: #c8ffd8; }
+.conf-medium { background: rgba(255,193,7,0.15); color: #fff3cd; }
+.conf-low { background: rgba(255,99,99,0.15); color: #ffd2d2; }
+.lifecycle-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: all 0.12s;
+}
+.pill:hover { background: rgba(136,189,242,0.1); }
+.pill.is-active { background: rgba(136,189,242,0.2); color: #fff; border-color: rgba(136,189,242,0.4); }
+.pill-count { font-size: 10px; opacity: 0.7; }
 
 .link { color: rgba(136,189,242,0.9); text-decoration: none; }
 .link:hover { text-decoration: underline; }
