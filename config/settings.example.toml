@@ -35,7 +35,7 @@ allowed_sender_domains = [
 
 [ollama]
 host = "http://host.docker.internal:11434"
-model_primary = "gemma4:e2b"
+model_primary = "gemma3:4b"
 timeout_seconds = 60
 
 [agent]
@@ -58,12 +58,12 @@ bank_passwords_file = "/path/to/agentic-ai/secrets/banks.toml"
 jobs_db = "/path/to/agentic-ai/data/pdf_jobs.db"
 attachment_seen_db = "/path/to/agentic-ai/data/seen_attachments.db"
 attachment_lookback_days = 60
-parser_llm_model = "gemma4:e2b"
+parser_llm_model = "gemma3:4b"
 verify_enabled = true
 verify_mode = "warn"
 verify_ollama_host = "http://localhost:11434"
 verify_timeout_seconds = 120
-verify_model = "gemma4:e2b"
+verify_model = "gemma3:4b"
 
 [pipeline]
 enabled = false
@@ -106,5 +106,5 @@ cors_origins = ["http://localhost:5173"]
 
 [ollama_finance]
 host            = "http://localhost:11434"
-model           = "gemma4:e2b"
+model           = "gemma3:4b"
 timeout_seconds = 60

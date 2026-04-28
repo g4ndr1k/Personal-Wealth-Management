@@ -231,7 +231,7 @@ def _parse_cash_transactions(
 def _ollama_parse_holdings(
     text: str, ollama_client, errors: list
 ) -> list[InvestmentHolding]:
-    """Ask Ollama gemma4:e4b to extract holdings when regex fails."""
+    """Ask Ollama gemma3:4b to extract holdings when regex fails."""
     start = text.find("PORTFOLIO STATEMENT")
     snippet = text[start: start + 3000] if start != -1 else text[:3000]
 

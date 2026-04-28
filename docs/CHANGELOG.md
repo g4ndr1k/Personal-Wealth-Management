@@ -2,6 +2,14 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-04-28 — Default AI Model Upgrade (Gemma 3)
+
+- Upgraded the default local LLM from `gemma4:e4b` / `qwen2.5:7b` to `gemma3:4b`.
+- Updated `config/settings.toml` and `config/settings.example.toml` with the new model.
+- Updated hardcoded fallback models in `finance/categorizer.py`, `finance/config.py`, and `bridge/pdf_handler.py`.
+- Updated all financial statement parsers that use Ollama fallback (BNI, Stockbit, IPOT) to use `gemma3:4b`.
+- Updated `finance/ollama_utils.py` to confirm `gemma3` JSON mode support.
+
 ## 2026-04-28 — Generic Matching Engine Foundation
 
 - Added `finance/matching/` as shared infrastructure for auditable mappings, confidence metadata, rejected suggestions, invariant logs, category shadow diffs, and per-domain storage tables.

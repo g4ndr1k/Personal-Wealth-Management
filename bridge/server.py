@@ -113,7 +113,7 @@ class AppContext:
             "verify_mode":              cfg["pdf"].get("verify_mode", "warn"),
             "verify_ollama_host":       cfg["pdf"].get("verify_ollama_host", "http://localhost:11434"),
             "verify_timeout_seconds":   cfg["pdf"].get("verify_timeout_seconds", 120),
-            "verify_model":             cfg["pdf"].get("verify_model", cfg["pdf"].get("parser_llm_model", "gemma4:e4b")),
+            "verify_model":             cfg["pdf"].get("verify_model", cfg["pdf"].get("parser_llm_model", "gemma3:4b")),
             "owner_mappings":           dict(cfg["owners"]) if "owners" in cfg else {},
             "finance_sqlite_db":        cfg.get("finance", {}).get("sqlite_db", ""),
         }

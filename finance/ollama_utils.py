@@ -29,7 +29,7 @@ def ollama_generate(
     (bad JSON, unexpected status) are raised immediately.
 
     Set ``format_json=True`` to pass ``"format": "json"`` in the payload,
-    which forces Ollama to return valid JSON (supported by gemma4 and most
+    which forces Ollama to return valid JSON (supported by gemma3 and most
     modern models).
 
     Returns the parsed JSON response dict.

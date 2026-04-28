@@ -287,7 +287,7 @@ def _parse_transactions(
 def _ollama_parse_transactions(
     text: str, ollama_client, account_number: str, owner: str, errors: list
 ) -> list[Transaction]:
-    """Ask Ollama gemma4:e4b to extract transactions when regex fails."""
+    """Ask Ollama gemma3:4b to extract transactions when regex fails."""
     # Find the transaction table area
     start = text.find("No. TrxDate")
     snippet = text[start: start + 3000] if start != -1 else text[:3000]

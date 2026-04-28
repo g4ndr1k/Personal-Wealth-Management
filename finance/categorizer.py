@@ -124,7 +124,7 @@ class Categorizer:
         aliases: list[dict],
         categories: list[str],
         ollama_host: str = "http://localhost:11434",
-        ollama_model: str = "gemma4:e4b",
+        ollama_model: str = "gemma3:4b",
         ollama_timeout: int = 60,
     ):
         self.categories = categories or DEFAULT_CATEGORIES[:]
