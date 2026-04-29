@@ -89,7 +89,8 @@ safe_default = "draft_only"
 
 [mail.imap]
 accounts = [
-  {name = "gmail", host = "imap.gmail.com", port = 993, email = "YOUR_EMAIL@gmail.com", folders = ["INBOX"], lookback_days = 15, auth_source = "keychain", keychain_service = "agentic-ai-mail-imap"},
+  {email = "g4ndr1k@gmail.com", provider = "gmail", id = "gmail_g4ndr1k", name = "g4ndr1k", host = "imap.gmail.com", port = 993, ssl = true, auth_type = "app_password", folders = ["INBOX"], lookback_days = 14, max_message_mb = 25, max_attachment_mb = 20, enabled = true, auth_source = "keychain", keychain_service = "agentic-ai-mail-imap"},
+  {email = "dianpratiwi@gmail.com", provider = "gmail", id = "gmail_dianpratiwi", name = "Dian Pratiwi", host = "imap.gmail.com", port = 993, ssl = true, auth_type = "app_password", folders = ["INBOX"], lookback_days = 14, max_message_mb = 25, max_attachment_mb = 20, enabled = true, auth_source = "keychain", keychain_service = "agentic-ai-mail-imap"},
 ]
 max_message_mb = 25
 max_attachment_mb = 20

@@ -38,7 +38,7 @@ const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
 // ── Constants ─────────────────────────────────────────────────────────────────
-const AGENT_URL = "http://127.0.0.1:8080";
+const AGENT_URL = "http://127.0.0.1:8090";
 const DEV_URL = "http://localhost:5174";
 const PLIST_ID = "com.mailagent.dashboard";
 const PLIST_PATH = path.join(os.homedir(), "Library/LaunchAgents", `${PLIST_ID}.plist`);
@@ -107,7 +107,7 @@ function createWindow() {
         vibrancy: "under-window",
         visualEffectState: "active",
         backgroundColor: "#1a1b1e",
-        show: false,
+        show: true,
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
@@ -122,7 +122,7 @@ function createWindow() {
     else {
         w.loadFile(path.join(__dirname, "../dist/index.html"));
     }
-    w.once("ready-to-show", () => w.show());
+    w.focus();
     w.on("close", (e) => {
         // Hide to tray instead of closing
         e.preventDefault();
@@ -226,8 +226,8 @@ electron_1.ipcMain.handle("agent:run", async () => {
 electron_1.ipcMain.handle("agent:get-url", () => AGENT_URL);
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 electron_1.app.whenReady().then(() => {
-    // macOS: stay in tray only, no Dock icon
-    if (process.platform === "darwin") {
+    // macOS: stay in tray only, no Dock icon in production
+    if (process.platform === "darwin" && !isDev) {
         electron_1.app.dock?.hide();
     }
     installLaunchdPlist();

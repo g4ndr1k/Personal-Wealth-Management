@@ -4,7 +4,9 @@
 *.env.local
 !.env.example
 secrets/
+secrets/imap.toml
 pwa/.env.local
+scripts/export-finance-key.sh
 
 # Live settings with absolute paths and real IDs — use settings.example.toml as template
 config/settings.toml

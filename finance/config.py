@@ -68,7 +68,12 @@ def get_fastapi_config(cfg: dict) -> FastAPIConfig:
     return FastAPIConfig(
         host=s.get("host", "127.0.0.1"),
         port=s.get("port", 8090),
-        cors_origins=s.get("cors_origins", ["http://localhost:5173"]),
+        cors_origins=s.get("cors_origins", [
+            "http://localhost:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:5174",
+        ]),
     )
 
 

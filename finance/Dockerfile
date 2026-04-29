@@ -17,12 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends rsync openssh-c
 
 # Install dependencies first (cached layer)
 COPY finance/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir \
-        rapidfuzz>=3.6.0 \
-        openpyxl>=3.1.0 \
-        "fastapi>=0.110.0" \
-        "uvicorn[standard]>=0.27.0" \
-        "python-multipart>=0.0.6"
+RUN pip install --no-cache-dir -r /tmp/requirements.txt "openpyxl>=3.1.0"
 
 # Copy finance package
 COPY finance/ /app/finance/

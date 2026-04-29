@@ -1,263 +1,124 @@
-# ULTIMATE MAIL AGENT — Implementation Plan
-
-Mac-Resident AI Mail Agent + Synology Backend
-
----
-
-## 1. Architecture
-
-Mac = Brain  
-Synology = Storage + Dashboard  
-
-Flow:
-
-Email (Gmail / Outlook / iCloud)
-→ Mac Mini (mailagent)
-→ Local LLM (Ollama / MLX - Gemma)
-→ Actions:
-  - classify email
-  - generate draft
-  - extract PDF
-  - decrypt + rename
-  - send notification
-→ Synology NAS
-  - SQLite DB
-  - PDF storage
-  - dashboard
-
----
-
-## 2. Components
-
-### Mac Mini
-- Python agent (mailagent)
-- Ollama / MLX
-- IMAP email fetch
-- pikepdf (PDF decrypt)
-- AppleScript (iMessage)
-- Writes to NAS SQLite
-
-### Synology NAS
-- Mounted at /Volumes/Synology
-- SQLite database
-- PDF archive
-- Dashboard (React / API)
-
----
-
-## 3. Folder Structure
-
-Mac:
-~/agentic-ai/
-  mailagent/
-    main.py
-    config.yaml
-    pdf/
-    llm/
-    notifications/
-    state/
-
-NAS:
-/Volumes/Synology/mailagent/
-  db.sqlite
-  logs/
-  pdf/
-    invoices/
-    statements/
+# Ultimate Mail Agent
 
----
+Implementation status for the Mac-resident mail agent. This document supersedes the earlier greenfield plan that proposed a separate `mailagent/` tree; the implementation now extends the existing `agent/`, `bridge/`, and `mail-dashboard/` modules.
 
-## 4. Database (SQLite)
+## Current Shape
 
-email_decisions:
-- id
-- message_id
-- subject
-- sender
-- classification
-- action
-- created_at
-
-pdf_jobs:
-- id
-- message_id
-- original_filename
-- new_filename
-- status
-- path
-- created_at
+```text
+IMAP account or bridge fallback
+  -> Docker mail-agent (`agent/`)
+  -> local classifier providers
+  -> bridge iMessage / PDF unlock on the Mac host
+  -> agent SQLite state in `data/agent.db`
+  -> optional NAS PDF archive at `/mnt/mailagent`
+  -> Electron menu-bar dashboard (`mail-dashboard/`)
+```
 
-notifications:
-- id
-- message_id
-- type
-- status
-- created_at
+The agent runs in Docker. The bridge runs on the Mac host because it owns host-only capabilities such as iMessage, macOS-local files, and PDF unlock support.
 
-checkpoints:
-- id
-- last_success_timestamp
+## Implemented Modules
 
-errors:
-- id
-- stage
-- error
-- created_at
+| Module | Role |
+|---|---|
+| `agent/app/orchestrator.py` | Selects IMAP intake when real accounts are configured, falls back to bridge mail source otherwise, enforces safety mode, and advances IMAP checkpoints after durable processing. |
+| `agent/app/imap_source.py` | IMAP polling, UID/UIDVALIDITY tracking, bounded lookback, size guards, idempotency keys, and PDF attachment extraction metadata. |
+| `agent/app/pdf_router.py` | PDF unlock via bridge multipart bytes, filename validation, deterministic fallback names, NAS sentinel validation, collision handling, and attachment status updates. |
+| `agent/app/net_guard.py` | Outbound, bridge health, IMAP, and NAS advisory probes before scan cycles. |
+| `agent/app/api_mail.py` | Dashboard account/query router for summary, recent messages, account CRUD, reload, and manual run. |
+| `bridge/server.py` | Authenticated `/pdf/unlock` bytes-in/bytes-out endpoint and structured `/health`. |
+| `mail-dashboard/` | Electron + React + Tailwind menu-bar dashboard. |
+| `scripts/mailagent_preflight.py` | Read-only inventory report for Docker, FastAPI, bridge, SQLite, config, filesystem, and secrets. |
+| `scripts/mailagent_status.py` | CLI smoke test for `/api/mail/*`. |
 
----
+## Safety Modes
 
-## 5. Main Loop
+Runtime mode is configured under `[agent].mode`.
 
-while True:
-  check network
-  fetch emails after checkpoint
-  process emails
-  update checkpoint ONLY if success
-  sleep
+| Mode | Fetch + classify | iMessage | PDF route | Email mutation |
+|---|---:|---:|---:|---:|
+| `observe` | yes | no | no | no |
+| `draft_only` | yes | yes | yes | no |
+| `live` | yes | yes | yes | yes |
 
----
+Invalid or missing mode resolves to `draft_only`, or `observe` when `[agent].safe_default = "observe"`. Actions blocked by mode are logged as `mode_blocked` events.
 
-## 6. Critical Rules
+## IMAP Intake
 
-1. No silent failure
-2. Never update checkpoint unless FULL success
-3. Idempotent processing (use message_id)
+IMAP is enabled only when `[mail.imap].accounts` contains real account entries. Placeholder addresses such as `YOUR_EMAIL@gmail.com` are ignored so the bridge mail path can remain active until credentials are ready.
 
----
+State is tracked per `(account, folder)` using `last_uid` and `uidvalidity`. A UIDVALIDITY reset writes an event and performs a bounded lookback scan. Checkpoints are advanced by the orchestrator after message persistence, not inside the fetcher.
 
-## 7. LLM Output Format
+Phase 4A deterministic mail-rule state also belongs in `data/agent.db`.
+This includes `mail_rules`, `mail_rule_conditions`, `mail_rule_actions`,
+`mail_processing_events`, and `mail_needs_reply`. Future AI queue and
+classification state (`mail_ai_queue`, `mail_ai_classifications`, categories,
+and trigger rules) also stays in `agent.db`. `data/finance.db` remains reserved
+for PWM/finance data.
 
-{
-  "category": "invoice | personal | spam",
-  "action": "notify | archive | ignore",
-  "pdf_required": true,
-  "filename": "YYYY-MM-DD_vendor_type.pdf"
-}
+Message identity:
 
----
+```text
+message_key = sha256(account + folder + normalized Message-ID)
+fallback_message_key = sha256(account + folder + uidvalidity + uid)
+attachment_key = sha256(message_key + sha256(pdf_bytes))
+```
 
-## 8. PDF Pipeline
+## PDF Attachment Routing
 
-1. Extract attachment
-2. Decrypt:
+The agent never passes container-local paths to the bridge. It posts PDF bytes to bridge `/pdf/unlock` as `multipart/form-data`; the bridge returns unlocked bytes and metadata headers.
 
-import pikepdf
-pdf = pikepdf.open("file.pdf", password="password")
-pdf.save("clean.pdf")
+Routing requires:
 
-3. Rename:
-YYYY-MM-DD_VENDOR_TYPE.pdf
+- `/Volumes/Synology/mailagent` mounted on the host
+- Docker bind mount `/Volumes/Synology/mailagent:/mnt/mailagent`
+- sentinel file `/mnt/mailagent/.mailagent_mount`
+- `[mail_agent.pdf].mount_sentinel_uuid` matching the sentinel payload
 
-4. Move:
-/Volumes/Synology/mailagent/pdf/invoices/
+If the sentinel or write probe fails, attachments stay `pending` and are not written into ephemeral container storage.
 
----
+## Dashboard
 
-## 9. iMessage Notification
+The dashboard is a native Electron menu-bar app, not a website. It reads and mutates mail settings through the finance API mount:
 
-osascript -e 'tell application "Messages" to send "New invoice received" to buddy "+628xxxx"'
+| Method | Path |
+|---|---|
+| `GET` | `http://127.0.0.1:8090/api/mail/summary` |
+| `GET` | `http://127.0.0.1:8090/api/mail/recent?limit=20` |
+| `GET` | `http://127.0.0.1:8090/api/mail/accounts` |
+| `POST` | `http://127.0.0.1:8090/api/mail/accounts/test` |
+| `POST` | `http://127.0.0.1:8090/api/mail/accounts` |
+| `PATCH` | `http://127.0.0.1:8090/api/mail/accounts/{account_id}` |
+| `PATCH` | `http://127.0.0.1:8090/api/mail/accounts/{account_id}/enabled` |
+| `DELETE` | `http://127.0.0.1:8090/api/mail/accounts/{account_id}` |
+| `POST` | `http://127.0.0.1:8090/api/mail/accounts/{account_id}/reactivate` |
+| `POST` | `http://127.0.0.1:8090/api/mail/config/reload` |
+| `POST` | `http://127.0.0.1:8090/api/mail/run` |
 
----
+The dashboard spawns no Python processes. Quitting it does not stop mail processing.
 
-## 10. launchd (Auto Run)
+Implementation notes:
 
-File:
-~/Library/LaunchAgents/com.mailagent.plist
+- Gmail App Passwords are normalized to remove pasted whitespace before IMAP login or save.
+- Keychain lookup uses service `agentic-ai-mail-imap` and account equal to the Gmail address.
+- Docker mail-agent runtime uses `secrets/imap.toml` mounted as `/app/secrets/imap.toml` for IMAP App Passwords. The file must be mode `600`, use `[[accounts]]` entries with `email` and `app_password`, and is gitignored.
+- Placeholder rows such as `YOUR_EMAIL@gmail.com` are ignored by the runtime and filtered out of the dashboard account list.
 
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.mailagent</string>
+## Verification
 
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>/Users/g4ndr1k/agentic-ai/mailagent/main.py</string>
-  </array>
+```bash
+python3 scripts/mailagent_preflight.py
+python3 scripts/mailagent_status.py --no-run
 
-  <key>RunAtLoad</key>
-  <true/>
+cd mail-dashboard
+npm install
+npm run build
+```
 
-  <key>KeepAlive</key>
-  <true/>
+After Python changes:
 
-  <key>StandardOutPath</key>
-  <string>/tmp/mailagent.log</string>
+```bash
+docker compose up --build -d
+docker compose logs -f mail-agent
+```
 
-  <key>StandardErrorPath</key>
-  <string>/tmp/mailagent.err</string>
-</dict>
-</plist>
-
-Load:
-
-launchctl load ~/Library/LaunchAgents/com.mailagent.plist
-
----
-
-## 11. Network Guard
-
-import socket
-
-def network_ok():
-  try:
-    socket.create_connection(("1.1.1.1", 53), timeout=3)
-    return True
-  except:
-    return False
-
----
-
-## 12. Failure Strategy
-
-IMAP fail → retry  
-LLM fail → retry once  
-PDF fail → log  
-NAS fail → retry + block checkpoint  
-Notification fail → retry async  
-
----
-
-## 13. Dashboard (NAS)
-
-- React + Tailwind
-- API (FastAPI / Node)
-- Reads SQLite
-
-Features:
-- email logs
-- PDF tracking
-- error monitor
-
----
-
-## 14. Execution Phases
-
-Phase 1:
-- IMAP + checkpoint + SQLite
-
-Phase 2:
-- LLM classification
-
-Phase 3:
-- PDF pipeline
-
-Phase 4:
-- iMessage
-
-Phase 5:
-- Dashboard
-
-Phase 6:
-- WhatsApp (optional)
-
----
-
-## FINAL
-
-Mac = compute + automation  
-NAS = storage + visibility  
-
+If Docker reports a mount error for `/host_mnt/Volumes/Synology/mailagent`, mount the Synology share and allow Docker Desktop to share `/Volumes`, then recreate `mail-agent`.

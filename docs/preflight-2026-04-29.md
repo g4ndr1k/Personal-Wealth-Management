@@ -183,8 +183,21 @@
   - `imap_folder_state`
   - `pdf_attachments`
   - `agent_events`
+  - `mail_rules`
+  - `mail_rule_conditions`
+  - `mail_rule_actions`
+  - `mail_processing_events`
+  - `mail_needs_reply`
+  - `mail_ai_queue`
+  - `mail_ai_classifications`
+  - `mail_ai_categories`
+  - `mail_ai_trigger_rules`
 
 **Live agent DB:** `/Users/g4ndr1k/agentic-ai/data/agent.db`
+
+Phase 4A mail rules, rule actions, rule audit events, needs-reply rows, and
+future AI queue/classification tables are mail-agent runtime state in
+`data/agent.db`. They are intentionally not stored in `data/finance.db`.
 
   **`processed_messages`** columns:
   - `bridge_id` TEXT PK

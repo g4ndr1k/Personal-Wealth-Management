@@ -5,6 +5,13 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 
 
+def apply_sqlite_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply the mail-agent SQLite connection contract."""
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+
+
 class AgentState:
     def __init__(self, db_path: str = "/app/data/agent.db"):
         self.db_path = Path(db_path)
@@ -14,7 +21,7 @@ class AgentState:
     @contextmanager
     def _connect(self):
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA busy_timeout = 5000")
+        apply_sqlite_pragmas(conn)
         try:
             yield conn
         finally:
@@ -138,6 +145,152 @@ class AgentState:
             );
             CREATE INDEX IF NOT EXISTS idx_agent_events_type
                 ON agent_events(event_type);
+
+            -- ── Phase 4A deterministic mail rules ───────────────────
+            CREATE TABLE IF NOT EXISTS mail_rules (
+                rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT,
+                name TEXT NOT NULL,
+                priority INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                match_type TEXT NOT NULL DEFAULT 'ALL',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(match_type IN ('ALL','ANY')),
+                CHECK(enabled IN (0,1))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_mail_rules_account_priority
+                ON mail_rules(COALESCE(account_id,'__global__'), priority);
+
+            CREATE TABLE IF NOT EXISTS mail_rule_conditions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                field TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                value TEXT,
+                value_json TEXT,
+                case_sensitive INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(rule_id)
+                    REFERENCES mail_rules(rule_id) ON DELETE CASCADE,
+                UNIQUE(rule_id, field, operator, value)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_conditions_rule
+                ON mail_rule_conditions(rule_id);
+
+            CREATE TABLE IF NOT EXISTS mail_rule_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                target TEXT,
+                value_json TEXT,
+                stop_processing INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(rule_id)
+                    REFERENCES mail_rules(rule_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_actions_rule
+                ON mail_rule_actions(rule_id);
+
+            CREATE TABLE IF NOT EXISTS mail_needs_reply (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL,
+                account_id TEXT,
+                bridge_id TEXT,
+                sender_email TEXT,
+                subject TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(message_id, account_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mail_ai_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT,
+                message_id TEXT NOT NULL,
+                folder TEXT,
+                imap_uid INTEGER,
+                uidvalidity INTEGER,
+                body_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                manual_nonce TEXT,
+                CHECK(status IN (
+                    'pending','running','completed','failed','skipped')),
+                CHECK(attempts >= 0)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_ai_queue_unique
+                ON mail_ai_queue(
+                    account_id, folder, uidvalidity, imap_uid,
+                    body_hash, COALESCE(manual_nonce,''));
+
+            CREATE TABLE IF NOT EXISTS mail_ai_classifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                urgency_score INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                summary TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(queue_id)
+                    REFERENCES mail_ai_queue(id) ON DELETE CASCADE,
+                CHECK(urgency_score BETWEEN 0 AND 10),
+                CHECK(confidence BETWEEN 0 AND 1)
+            );
+
+            CREATE TABLE IF NOT EXISTS mail_ai_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(enabled IN (0,1))
+            );
+
+            CREATE TABLE IF NOT EXISTS mail_ai_trigger_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id INTEGER,
+                action_type TEXT NOT NULL,
+                threshold INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                value_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(category_id)
+                    REFERENCES mail_ai_categories(id) ON DELETE CASCADE,
+                CHECK(threshold BETWEEN 0 AND 10),
+                CHECK(enabled IN (0,1))
+            );
+
+            CREATE TABLE IF NOT EXISTS mail_processing_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL,
+                account_id TEXT,
+                bridge_id TEXT,
+                rule_id INTEGER,
+                action_type TEXT,
+                event_type TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                details_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(rule_id)
+                    REFERENCES mail_rules(rule_id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_processing_events_message
+                ON mail_processing_events(message_id);
+            CREATE INDEX IF NOT EXISTS idx_mail_processing_events_created
+                ON mail_processing_events(created_at);
             """)
             conn.commit()
 

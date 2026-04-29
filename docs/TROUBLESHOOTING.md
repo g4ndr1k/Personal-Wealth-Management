@@ -75,6 +75,152 @@ If `secrets/bridge.token` is a directory, remove the stale directory and re-expo
 - Use `scripts/setup-app.sh` / LaunchAgent setup for stable startup.
 - Keep bridge token validation strict: missing, empty, or directory token paths must fail with clear `503`.
 
+## Mail Agent Container Will Not Start After Rebuild
+
+### Symptoms
+
+- `docker compose up --build -d` builds images but `mail-agent` fails to start.
+- `docker compose ps` shows `finance-api` only.
+- Docker reports an error like:
+
+```text
+error while creating mount source path '/host_mnt/Volumes/Synology/mailagent':
+mkdir /host_mnt/Volumes/Synology: permission denied
+```
+
+### Likely Cause
+
+- `/Volumes/Synology/mailagent` is not mounted on the Mac.
+- Docker Desktop is not allowed to share `/Volumes`.
+- The Synology share was renamed, disconnected, or mounted under a different path.
+
+### How To Diagnose
+
+```bash
+ls -la /Volumes
+ls -la /Volumes/Synology/mailagent
+docker compose ps
+docker compose logs --tail=80 mail-agent
+```
+
+### Fix
+
+- Mount the Synology share so `/Volumes/Synology/mailagent` exists.
+- In Docker Desktop, allow file sharing for `/Volumes` or the specific Synology mount path.
+- Recreate only the mail-agent once the mount is visible:
+
+```bash
+docker compose up --build -d mail-agent
+python3 scripts/mailagent_status.py --no-run
+```
+
+### Prevention
+
+- Keep `/Volumes/Synology/mailagent/.mailagent_mount` present with the UUID configured in `[mail_agent.pdf].mount_sentinel_uuid`.
+- Check the mail-agent mount before deployments that touch Python agent code.
+
+## Mail Dashboard Shows Connection Error
+
+### Symptoms
+
+- Electron dashboard opens, but shows a connection error.
+- `Run Now` does nothing visible.
+- `python3 scripts/mailagent_status.py --no-run` returns connection refused.
+
+### Likely Cause
+
+- `finance-api` did not mount `/api/mail/*`, so the request fell through to the PWA HTML route.
+- `finance-api` is missing mail-account dependencies such as `tomlkit` or `keyring`.
+- `mail-agent` is not running or port `8080` is not bound for the worker-side trigger/health path.
+- The NAS bind mount prevented the container from starting.
+- API key mismatch when `FINANCE_API_KEY` is configured.
+
+### How To Diagnose
+
+```bash
+docker compose ps
+docker compose logs --tail=120 finance-api
+docker compose logs --tail=120 mail-agent
+python3 scripts/mailagent_status.py --no-run
+```
+
+### Fix
+
+- Rebuild `finance-api` if the logs show `Failed to mount /api/mail router`.
+- Start the mail-agent container after fixing any mount error.
+- Export the same API key used by the container before launching the dashboard dev app:
+
+```bash
+export VITE_FINANCE_API_KEY="$FINANCE_API_KEY"
+cd mail-dashboard
+npm run dev
+```
+
+### Prevention
+
+- Treat the dashboard as a viewer/control surface only; processing reliability belongs to Docker `mail-agent` plus the host bridge.
+- Keep the finance image installing `finance/requirements.txt`, not a hand-maintained dependency subset.
+
+## Gmail Account Tests Fail With ASCII Or Whitespace Errors
+
+### Symptoms
+
+- Test Connection fails with an error like:
+
+```text
+IMAP Connection failed: 'ascii' codec can't encode character '\xa0'
+```
+
+### Likely Cause
+
+- The pasted Gmail App Password contains spaces or non-breaking spaces from Google’s formatted display.
+
+### Fix
+
+- Paste the App Password normally; current code strips whitespace automatically.
+- If the running container/app is stale, rebuild `finance-api` and restart the dashboard so the normalization patch is active.
+
+## Account Saves But Does Not Appear In IMAP Accounts
+
+### Symptoms
+
+- Save succeeds, but the table stays empty.
+- `config/settings.toml` contains malformed `[mail.imap].accounts` entries.
+
+### Likely Cause
+
+- An older build wrote the account as an invalid TOML fragment instead of an inline table.
+
+### How To Diagnose
+
+```bash
+python3 -c "import tomllib; tomllib.load(open('config/settings.toml','rb')); print('OK')"
+```
+
+### Fix
+
+- Repair `[mail.imap].accounts` so each entry is a valid inline table.
+- Rebuild/restart `finance-api` after fixing the writer code.
+
+## Saving Mail Settings Fails With `settings.tmp -> settings.toml` Busy
+
+### Symptoms
+
+- Save fails with an error like:
+
+```text
+[Errno 16] Device or resource busy: '/app/config/settings.tmp' -> '/app/config/settings.toml'
+```
+
+### Likely Cause
+
+- `config/settings.toml` is bind-mounted into Docker, and atomic rename on that single-file mount is rejected by the container filesystem.
+
+### Fix
+
+- Use the current build, which falls back to an in-place fsynced write when atomic rename is blocked.
+- Rebuild `finance-api` and retry the save.
+
 ## NAS Deploy Or Sync Fails
 
 ### Symptoms

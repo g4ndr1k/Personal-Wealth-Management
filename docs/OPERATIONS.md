@@ -36,6 +36,61 @@ docker compose logs -f finance-api
 
 Always rebuild the Docker image after Python changes. A container restart alone does not pick up changed source files baked into the image.
 
+The finance image now also hosts the native mail-dashboard account-management routes under `/api/mail/*`. If dashboard mail settings fail after a Python change, rebuild `finance-api`, not just `mail-agent`.
+
+### Mail Agent
+
+The mail agent runs as the `mail-agent` Docker service and exposes a local API on `127.0.0.1:8080`.
+
+```bash
+docker compose logs -f mail-agent
+python3 scripts/mailagent_status.py --no-run
+python3 scripts/mailagent_status.py
+```
+
+`POST /api/mail/run` queues a scan cycle; it does not run mail processing inside the dashboard process.
+
+IMAP intake is enabled only when `[mail.imap].accounts` in `config/settings.toml` contains real accounts. Placeholder accounts such as `YOUR_EMAIL@gmail.com` are ignored so the bridge mail source remains the fallback until credentials are configured.
+
+For Gmail, host-native tools prefer macOS Keychain using service `agentic-ai-mail-imap` and account equal to the email address. Docker mail-agent runtime reads the file fallback at `/app/secrets/imap.toml`, mounted from local `secrets/imap.toml`. Outlook remains OAuth-only; do not configure Basic Auth.
+
+### Mail Dashboard
+
+```bash
+cd mail-dashboard
+npm install
+npm run build
+npm run dev
+```
+
+The dashboard is an Electron menu-bar app. Summary, recent, and account-management calls go through `http://127.0.0.1:8090/api/mail/*`, with the finance API mounting `agent.app.api_mail`. The Python agent keeps processing even when the dashboard is closed.
+
+Supported mail settings actions:
+
+- `GET /api/mail/accounts`
+- `POST /api/mail/accounts/test`
+- `POST /api/mail/accounts`
+- `PATCH /api/mail/accounts/{account_id}`
+- `PATCH /api/mail/accounts/{account_id}/enabled`
+- `DELETE /api/mail/accounts/{account_id}`
+- `POST /api/mail/accounts/{account_id}/reactivate`
+- `POST /api/mail/config/reload`
+
+Gmail notes:
+
+- Paste the App Password exactly as Google shows it; the UI and backend now strip spaces and non-breaking spaces automatically.
+- Keychain storage uses service `agentic-ai-mail-imap` and account equal to the Gmail address.
+- Docker runtime credential source is local `secrets/imap.toml`, mounted read-only as `/app/secrets/imap.toml`.
+- Expected Docker TOML shape:
+  ```toml
+  [[accounts]]
+  email = "user@gmail.com"
+  app_password = "xxxx xxxx xxxx xxxx"
+  ```
+- File permissions: `chmod 600 secrets/imap.toml`.
+- Git safety: `secrets/` and `secrets/imap.toml` are gitignored. Never commit this file.
+- Placeholder accounts such as `YOUR_EMAIL@gmail.com` must not be left in the live list; they are ignored by the runtime and filtered out of the dashboard API.
+
 ### PWA
 
 ```bash
@@ -108,6 +163,29 @@ Status meanings:
 | `error` | Processing failed. Inspect details and bridge logs. |
 | `missing_source` | Registry row points to a PDF that no longer exists. |
 
+## IMAP PDF Attachment Routing
+
+IMAP PDF attachments are handled by the Docker mail agent, not the Electron renderer. The agent posts PDF bytes to bridge `/pdf/unlock`, validates or falls back to a safe filename, then routes files under `/mnt/mailagent/pdf/<category>/`.
+
+The Docker bind mount must map the host NAS path:
+
+```yaml
+mail-agent:
+  volumes:
+    - /Volumes/Synology/mailagent:/mnt/mailagent
+```
+
+Before writing any PDF, `agent/app/pdf_router.py` checks `/mnt/mailagent/.mailagent_mount` against the configured `[mail_agent.pdf].mount_sentinel_uuid` and performs a write/delete probe. If the sentinel is missing or Docker cannot mount `/Volumes/Synology/mailagent`, attachment jobs stay pending and the mail-agent container may fail to start until the NAS mount is restored or Docker Desktop is allowed to share `/Volumes`.
+
+Current mount recovery checklist:
+
+```bash
+ls -la /Volumes/Synology/mailagent
+docker compose ps
+docker compose up --build -d mail-agent
+python3 scripts/mailagent_status.py --no-run
+```
+
 ## Preflight Validation
 
 The PWA calls `GET /api/pdf/preflight`, which proxies bridge `GET /pdf/preflight`, before queueing work.
@@ -153,6 +231,15 @@ Validate TOML syntax:
 
 ```bash
 python3 -c "import tomllib; tomllib.load(open('config/settings.toml','rb')); print('OK')"
+```
+
+For IMAP accounts under `[mail.imap]`, keep `accounts` as an array of inline tables, for example:
+
+```toml
+[mail.imap]
+accounts = [
+  {email = "user@gmail.com", provider = "gmail", id = "gmail_user", name = "User", host = "imap.gmail.com", port = 993, ssl = true, auth_type = "app_password", folders = ["INBOX"], lookback_days = 14, max_message_mb = 25, max_attachment_mb = 20, enabled = true, auth_source = "keychain", keychain_service = "agentic-ai-mail-imap"},
+]
 ```
 
 Validate provider configuration:
@@ -212,7 +299,8 @@ Expected secret files:
 | File | Purpose |
 |---|---|
 | `secrets/bridge.token` | Bridge bearer token. |
-| `secrets/gmail.toml` | Gmail app passwords if file fallback is used. |
+| `secrets/imap.toml` | Docker runtime Gmail IMAP app passwords. Mounted into mail-agent as `/app/secrets/imap.toml`. |
+| `secrets/gmail.toml` | Legacy Gmail app passwords if older bridge fallback is used. |
 | `secrets/banks.toml` | Bank PDF passwords if file fallback is used. |
 | `secrets/nas_sync_key` | NAS SSH private key. |
 | `secrets/nas_sudo_password` | Synology sudo password used by NAS deploy scripts. |

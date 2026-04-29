@@ -143,7 +143,19 @@ app = FastAPI(
     lifespan=app_lifespan,
 )
 
+try:
+    from agent.app.api_mail import router as mail_router
+    app.include_router(mail_router, prefix="/api/mail", tags=["mail"])
+except Exception:
+    mail_router = None
+    log.exception("Failed to mount /api/mail router")
+
 _cors_origins = _fastapi_cfg.cors_origins
+# Force allow dashboard dev ports if not present
+for origin in ["http://localhost:5174", "http://127.0.0.1:5174"]:
+    if origin not in _cors_origins:
+        _cors_origins.append(origin)
+
 if "*" in _cors_origins:
     raise RuntimeError(
         "CORS wildcard origin ('*') is not allowed when allow_credentials=True. "
@@ -171,7 +183,8 @@ async def add_security_headers(request: Request, call_next):
     if request.url.path.startswith("/app") or request.url.path == "/":
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+            "connect-src 'self' http://127.0.0.1:8090 http://localhost:5174 ws://localhost:5174; "
+            "img-src 'self' data:; frame-ancestors 'none'"
         )
     return response
 

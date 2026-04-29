@@ -2,6 +2,29 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-04-29 — Mail Account Settings Hardening
+
+- Moved the native `mail-dashboard` account-management flow onto the finance API mount at `127.0.0.1:8090/api/mail/*`, with `agent.app.api_mail` imported and mounted by `finance/api.py`.
+- Fixed mail router import failures by using package-relative imports in `agent/app/api_mail.py` and logging finance-side mount failures explicitly.
+- Updated the `finance-api` Docker image to install the full `finance/requirements.txt` set so `tomlkit`, `keyring`, and related mail-account dependencies are present at runtime.
+- Added defensive dashboard response parsing so HTML fallback responses now surface as actionable API errors instead of `Unexpected token '<'`.
+- Added Gmail app-password whitespace normalization in the dashboard and backend so pasted passwords with spaces or non-breaking spaces test correctly.
+- Fixed `config/settings.toml` account persistence to write valid inline TOML entries under `[mail.imap].accounts`.
+- Added fallback handling for bind-mounted `settings.toml` writes when atomic rename is blocked by Docker `EBUSY`.
+- Placeholder IMAP rows such as `YOUR_EMAIL@gmail.com` are now filtered from `/api/mail/accounts` and no longer appear in the native dashboard.
+
+## 2026-04-29 — Mail Agent IMAP, PDF Routing, And Native Dashboard Wiring
+
+- Wired the Docker mail agent to use agent-side IMAP intake when real `[mail.imap].accounts` are configured, while preserving the bridge mail source as fallback.
+- Added IMAP UID/UIDVALIDITY state, bounded re-scan handling, size guards, and durable message/attachment idempotency keys.
+- Added attachment routing through `agent/app/pdf_router.py`: bridge multipart `/pdf/unlock`, strict filename validation, deterministic fallback names, NAS sentinel checks, collision handling, and explicit `pending_review` / `failed_retryable` states.
+- Added server-side safety modes: `observe`, `draft_only`, and `live`; blocked actions are recorded as `mode_blocked`.
+- Added local mail-agent dashboard APIs under `127.0.0.1:8080/api/mail/*` and a smoke harness in `scripts/mailagent_status.py`.
+- Added the Electron + React `mail-dashboard/` menu-bar app and fixed its production build.
+- Hardened bridge health checking so the agent consults authenticated `/health` and requires `overall=ok` instead of relying on `/healthz`.
+- Updated `scripts/mailagent_preflight.py` to report Docker compose restart policies, healthchecks, volumes, API collisions, SQLite schemas, config keys, and NAS mount state more accurately.
+- Deployment note: the rebuilt `finance-api` image started healthy; `mail-agent` requires `/Volumes/Synology/mailagent` to be mounted and shared with Docker before it can start.
+
 ## 2026-04-28 — Default AI Model Upgrade (Gemma 3)
 
 - Upgraded the default local LLM from `gemma4:e4b` / `qwen2.5:7b` to `gemma3:4b`.

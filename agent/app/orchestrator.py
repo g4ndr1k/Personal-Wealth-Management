@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app.net_guard import network_ok
+from app.rules import evaluate_message
 
 logger = logging.getLogger("agent.orchestrator")
 
@@ -49,6 +50,39 @@ class Orchestrator:
                 self.settings.get("mail_agent", {}).get("pdf", {}),
             )
 
+    def reload_config(self, new_settings: dict):
+        """Update instance settings and re-initialise intake if needed."""
+        self.settings = new_settings
+        self.mode = self._resolve_mode()
+        
+        imap_cfg = self.settings.get("mail", {}).get("imap", {})
+        accounts = [
+            acct for acct in imap_cfg.get("accounts", [])
+            if not str(acct.get("email", "")).startswith("YOUR_EMAIL")
+            and not acct.get("deleted_at")
+            and acct.get("enabled", True)
+        ]
+        
+        was_using_imap = self.use_imap
+        self.use_imap = bool(accounts)
+        
+        if self.use_imap:
+            from app.imap_source import IMAPIntake
+            from app.pdf_router import PdfRouter
+            imap_settings = copy.deepcopy(self.settings)
+            imap_settings.setdefault("mail", {}).setdefault("imap", {})[
+                "accounts"] = accounts
+            self.imap_intake = IMAPIntake(imap_settings, self.state)
+            self.pdf_router = PdfRouter(
+                self.state,
+                self.settings.get("mail_agent", {}).get("pdf", {}),
+            )
+        else:
+            self.imap_intake = None
+            self.pdf_router = None
+            
+        logger.info("Configuration reloaded (IMAP %s)", "enabled" if self.use_imap else "disabled")
+
     def scan_mail_once(self) -> bool:
         """Scan pending mail and process.
 
@@ -64,6 +98,7 @@ class Orchestrator:
 
         # Pre-flight: verify network before any I/O
         ok, reasons = network_ok()
+        self.bridge_ok = any(r.startswith("bridge:ok") for r in reasons)
         if not ok:
             logger.warning(
                 "scan_mail_once aborted — network probe failed: %s",
@@ -205,17 +240,33 @@ class Orchestrator:
             return False
 
         if not items:
+            logger.info(
+                "phase4a_scan_summary messages_seen=0 "
+                "messages_dedup_skipped=0 messages_evaluator_ran=0 "
+                "rules_matched=0 events_written=0 needs_reply_written=0")
             self.stats.update(
                 last_scan=datetime.now(timezone.utc).isoformat())
             return True
 
         logger.info("Processing %d IMAP email(s)", len(items))
+        phase4a_counts = {
+            "messages_seen": 0,
+            "messages_dedup_skipped": 0,
+            "messages_evaluator_ran": 0,
+            "rules_matched": 0,
+            "events_written": 0,
+            "needs_reply_written": 0,
+        }
 
         for item in items[:MAX_PER_CYCLE]:
+            phase4a_counts["messages_seen"] += 1
             mkey = item.get("message_key")
             fkey = item.get("fallback_message_key")
             if ((mkey and self.state.message_key_processed(mkey))
                     or (fkey and self.state.fallback_message_key_processed(fkey))):
+                phase4a_counts["messages_dedup_skipped"] += 1
+                self._log_phase4a_evaluation(
+                    item, skipped_by_dedup=True)
                 self._checkpoint_imap_message(item)
                 self.stats.incr("emails_deduped")
                 continue
@@ -228,6 +279,24 @@ class Orchestrator:
                     item.get("skipped_reason", "skipped"))
                 self._checkpoint_imap_message(item)
                 continue
+
+            try:
+                rule_eval = evaluate_message(self.state, item)
+            except Exception:
+                logger.exception(
+                    "Mail rule evaluation failed: %s",
+                    item.get("bridge_id"))
+                self.stats.incr("classification_failures")
+                return False
+            matched_rule_count = self._matched_rule_count(rule_eval)
+            phase4a_counts["messages_evaluator_ran"] += 1
+            phase4a_counts["rules_matched"] += matched_rule_count
+            phase4a_counts["events_written"] += rule_eval.events_written
+            phase4a_counts["needs_reply_written"] += (
+                rule_eval.needs_reply_written)
+            self._log_phase4a_evaluation(
+                item, rule_eval, skipped_by_dedup=False,
+                matched_rule_count=matched_rule_count)
 
             try:
                 result = self.classifier.classify(item)
@@ -285,9 +354,66 @@ class Orchestrator:
                 result.provider, alert_sent, result.summary)
             self._checkpoint_imap_message(item)
 
+        logger.info(
+            "phase4a_scan_summary messages_seen=%d "
+            "messages_dedup_skipped=%d messages_evaluator_ran=%d "
+            "rules_matched=%d events_written=%d needs_reply_written=%d",
+            phase4a_counts["messages_seen"],
+            phase4a_counts["messages_dedup_skipped"],
+            phase4a_counts["messages_evaluator_ran"],
+            phase4a_counts["rules_matched"],
+            phase4a_counts["events_written"],
+            phase4a_counts["needs_reply_written"],
+        )
+
         self.stats.update(
             last_scan=datetime.now(timezone.utc).isoformat())
         return True
+
+    def _log_phase4a_evaluation(
+            self, item: dict, rule_eval=None,
+            skipped_by_dedup: bool | None = None,
+            matched_rule_count: int | None = None) -> None:
+        if rule_eval is None:
+            matched_rule_count = 0 if matched_rule_count is None else matched_rule_count
+            planned_action_count = 0
+            continue_to_classifier = False
+            route_to_pdf_pipeline = False
+        else:
+            if matched_rule_count is None:
+                matched_rule_count = self._matched_rule_count(rule_eval)
+            planned_action_count = len(rule_eval.planned_actions)
+            continue_to_classifier = rule_eval.continue_to_classifier
+            route_to_pdf_pipeline = rule_eval.route_to_pdf_pipeline
+
+        logger.info(
+            "phase4a_evaluator message_key=%s message_id=%s "
+            "account_id=%s account_name=%s subject=%s sender_email=%s "
+            "dedup_status=%s matched_rule_count=%d "
+            "planned_action_count=%d continue_to_classifier=%s "
+            "route_to_pdf_pipeline=%s skipped_by_dedup=%s",
+            item.get("message_key") or item.get("fallback_message_key"),
+            item.get("message_id"),
+            item.get("imap_account"),
+            item.get("imap_account") or item.get("account_name"),
+            self._truncate_log_value(item.get("subject"), 120),
+            item.get("sender_email"),
+            "skipped" if skipped_by_dedup else "not_skipped",
+            matched_rule_count,
+            planned_action_count,
+            continue_to_classifier,
+            route_to_pdf_pipeline,
+            skipped_by_dedup,
+        )
+
+    def _matched_rule_count(self, rule_eval) -> int:
+        return sum(
+            1 for r in rule_eval.matched_conditions
+            if r.get("matched"))
+
+    def _truncate_log_value(self, value, limit: int) -> str:
+        text = str(value or "").replace("\n", " ").replace("\r", " ")
+        return text[:limit]
 
     def _process_imap_attachments(self, item: dict) -> None:
         if self.pdf_router is None:
@@ -347,6 +473,8 @@ class Orchestrator:
         return "draft_only"
 
     def _action_allowed(self, action: str) -> bool:
+        if action == "imessage" and not self.bridge_ok:
+            return False
         required = {
             "imessage": "draft_only",
             "pdf_route": "draft_only",

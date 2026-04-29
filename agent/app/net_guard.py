@@ -2,6 +2,8 @@
 net_guard.py — pre-flight network reachability checks for the mail agent.
 
 Call network_ok() before attempting any network I/O in a scan cycle.
+Only outbound and IMAP failures are fatal for mail scans. Bridge and NAS
+probes are advisory so IMAP processing and deterministic rules can proceed.
 Each probe records a structured event in the returned reasons list so
 callers can log or surface them without duplicating logic.
 """
@@ -59,7 +61,7 @@ def network_ok(bridge_url: str | None = None,
     Returns
     -------
     (ok, reasons)
-        *ok* is True only when all required probes pass.
+        *ok* is True when fatal probes pass.
         *reasons* is a list of human-readable strings describing each
         result — always populated, not just on failure.
     """
@@ -89,15 +91,16 @@ def network_ok(bridge_url: str | None = None,
                     reasons.append(f"bridge:ok — {health_url} overall=ok")
                 else:
                     reasons.append(
-                        f"bridge:fail — {health_url} returned HTTP {resp.status} overall={overall}"
+                        f"bridge:degraded — {health_url} returned HTTP {resp.status} overall={overall}; bridge actions disabled"
                     )
-                    all_ok = False
         except urllib.error.HTTPError as e:
-            reasons.append(f"bridge:fail — {health_url} HTTP error {e.code}: {e.reason}")
-            all_ok = False
+            reasons.append(
+                f"bridge:degraded — {health_url} HTTP error {e.code}: {e.reason}; bridge actions disabled"
+            )
         except Exception as e:
-            reasons.append(f"bridge:fail — {health_url} unreachable: {type(e).__name__}: {e}")
-            all_ok = False
+            reasons.append(
+                f"bridge:degraded — {health_url} unreachable: {type(e).__name__}: {e}; bridge actions disabled"
+            )
     else:
         reasons.append("bridge:skip — BRIDGE_URL not set")
 
@@ -118,13 +121,17 @@ def network_ok(bridge_url: str | None = None,
     else:
         # NAS absence is advisory: IMAP still proceeds, PDF jobs queued
         reasons.append(
-            f"nas:absent — {_NAS_MOUNT} not mounted; PDF jobs will queue as pending"
+            f"nas:degraded — {_NAS_MOUNT} not mounted; PDF jobs will queue as pending"
         )
         # NOTE: intentionally does NOT flip all_ok
 
     # ── Structured log ────────────────────────────────────────────────────────
-    level = logging.DEBUG if all_ok else logging.WARNING
     for r in reasons:
+        level = (
+            logging.WARNING
+            if ":degraded" in r or ":fail" in r
+            else logging.DEBUG
+        )
         logger.log(level, "net_guard: %s", r)
 
     return all_ok, reasons

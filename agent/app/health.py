@@ -8,6 +8,7 @@ POST /trigger[?force=1]     Queue an immediate scan cycle
 GET  /api/mail/summary      KPIs + classification + action counts  [auth]
 GET  /api/mail/recent       Last N processed messages              [auth]
 GET  /api/mail/accounts     Per-IMAP-account health                [auth]
+GET  /api/mail/credentials  Per-account credential presence        [auth]
 POST /api/mail/run          Alias for /trigger                     [auth]
 
 [auth] = requires X-Api-Key header matching FINANCE_API_KEY env var.
@@ -83,6 +84,10 @@ def _send_json(handler: "BaseHTTPRequestHandler",
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(payload)))
+    # Permissive CORS for local dashboard access
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header("Access-Control-Allow-Headers", "X-Api-Key, Content-Type")
     handler.end_headers()
     handler.wfile.write(payload)
 
@@ -104,6 +109,13 @@ def start_health_server(
     """
 
     class Handler(BaseHTTPRequestHandler):
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "X-Api-Key, Content-Type")
+            self.end_headers()
+
         # ── GET ────────────────────────────────────────────────────────────
         def do_GET(self):
             parsed = urlparse(self.path)
@@ -150,6 +162,18 @@ def start_health_server(
                     _send_json(self, 200, data)
                 except Exception as exc:
                     logger.error("api_mail.get_accounts error: %s", exc)
+                    _send_json(self, 500, {"error": str(exc)})
+
+            elif path == "/api/mail/credentials":
+                if not _check_auth(self):
+                    return
+                try:
+                    from app.config import load_settings
+                    from app.imap_source import credential_debug_statuses
+                    data = credential_debug_statuses(load_settings())
+                    _send_json(self, 200, data)
+                except Exception as exc:
+                    logger.error("credential debug error: %s", exc)
                     _send_json(self, 500, {"error": str(exc)})
 
             else:

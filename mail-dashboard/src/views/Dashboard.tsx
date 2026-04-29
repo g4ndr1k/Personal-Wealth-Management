@@ -60,14 +60,14 @@ export default function Dashboard() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">
-            Email Intelligence Hub
-          </h1>
-          <p className="text-gray-500 text-sm mt-1">
+          <p className="text-gray-500 text-sm">
             Active sources: {activeSources || 'None configured'}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div 
+          className="flex items-center gap-3"
+          style={{ WebkitAppRegion: 'no-drag' } as any}
+        >
           <span
             className={`px-3 py-1 rounded-full text-xs font-medium ${modeColor}`}
           >

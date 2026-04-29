@@ -427,4 +427,111 @@ onMounted(refresh)
 .btn--danger:hover { background: #fca5a5; }
 
 .th-num { text-align: right; }
+
+/* ── Two-column desktop shell ──────────────────────────────────────────── */
+.settings-page--desktop {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  align-items: start;
+  min-height: 100%;
+}
+
+.settings-content { min-width: 0; }
+
+/* ── Left nav — pixel-match DesktopSidebar.vue ─────────────────────────── */
+.settings-sub-nav {
+  width: 240px;
+  position: sticky;
+  top: 0;
+  padding: 16px 10px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid rgba(136,189,242,0.16);
+  min-height: calc(100vh - 48px);
+  margin-right: 24px;
+}
+
+.settings-sub-nav__title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  padding: 4px 12px 12px;
+}
+
+.settings-sub-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.70);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  width: 100%;
+}
+.settings-sub-nav__item:hover {
+  background: rgba(136,189,242,0.12);
+  color: #fff;
+}
+.settings-sub-nav__item.is-active {
+  background: linear-gradient(180deg, rgba(136,189,242,0.22), rgba(106,137,167,0.15));
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(189,221,252,0.22);
+}
+
+.settings-sub-nav__icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--primary-deep);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.75;
+  transition: opacity 0.12s;
+}
+.settings-sub-nav__icon :deep(svg) { width: 16px; height: 16px; }
+.settings-sub-nav__item:hover .settings-sub-nav__icon,
+.settings-sub-nav__item.is-active .settings-sub-nav__icon {
+  opacity: 1;
+  color: var(--primary);
+}
+
+/* Shared icon sizes for header */
+.settings-head-icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  vertical-align: middle;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-head-icon :deep(svg) { width: 16px; height: 16px; }
+
+.setting-title-icon {
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  opacity: 0.9;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+.setting-title-icon :deep(svg) { width: 14px; height: 14px; }
+
+.settings-page--desktop .settings-grid {
+  grid-template-columns: 1fr !important;
+}
 </style>

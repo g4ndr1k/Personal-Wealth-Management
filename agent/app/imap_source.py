@@ -33,12 +33,31 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("agent.imap_source")
 
 # ── Auth helper ──────────────────────────────────────────────────────────────
 
 _SUBPROCESS_ENV = {**os.environ, "MallocStackLogging": "0"}
+DEFAULT_IMAP_SECRETS_FILE = os.environ.get(
+    "IMAP_SECRETS_FILE", "/app/secrets/imap.toml")
+
+
+def _normalize_app_password(password: str | None) -> str:
+    return "".join(str(password or "").split())
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomllib  # type: ignore
+        except ImportError:
+            import tomli as tomllib  # type: ignore
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
 
 def _keychain_get(service: str, account: str) -> str | None:
@@ -80,36 +99,91 @@ def _load_app_password(acct_cfg: dict) -> str | None:
             "keychain_service", "agentic-ai-mail-imap")
         pwd = _keychain_get(service, email_addr)
         if pwd:
-            return pwd
+            return _normalize_app_password(pwd)
         log.warning(
             "Keychain miss for %s (service=%s), falling back to file",
             email_addr, service)
 
-    # File fallback: read from keychain_file or a secrets TOML
-    secrets_file = acct_cfg.get("secrets_file", "")
-    if secrets_file:
-        path = Path(secrets_file).expanduser()
-        if path.exists():
-            try:
-                if sys.version_info >= (3, 11):
-                    import tomllib
-                else:
-                    try:
-                        import tomllib  # type: ignore
-                    except ImportError:
-                        import tomli as tomllib  # type: ignore
-                with open(path, "rb") as f:
-                    data = tomllib.load(f)
-                # Support format: {accounts: [{email:..., app_password:...}]}
-                for entry in data.get("accounts", []):
-                    if entry.get("email", "").strip() == email_addr:
-                        return entry.get("app_password", "").replace(" ", "")
-                # Support flat: {app_password: "..."}
-                if "app_password" in data:
-                    return data["app_password"].replace(" ", "")
-            except Exception as e:
-                log.error("Failed to read secrets file %s: %s", secrets_file, e)
+    # File fallback: Docker runtime source is /app/secrets/imap.toml by default.
+    secrets_file = acct_cfg.get("secrets_file") or DEFAULT_IMAP_SECRETS_FILE
+    path = Path(secrets_file).expanduser()
+    if path.exists():
+        try:
+            data = _read_toml(path)
+            # Support format: {accounts: [{email:..., app_password:...}]}
+            for entry in data.get("accounts", []):
+                if entry.get("email", "").strip() == email_addr:
+                    return _normalize_app_password(entry.get("app_password"))
+            # Support flat: {app_password: "..."}
+            if "app_password" in data:
+                return _normalize_app_password(data["app_password"])
+        except Exception as e:
+            log.error("Failed to read secrets file %s: %s", secrets_file, e)
     return None
+
+
+def credential_debug_status(acct_cfg: dict) -> dict[str, Any]:
+    """Return credential source and presence metadata without secret values."""
+    source = acct_cfg.get("auth_source", "file")
+    email_addr = acct_cfg.get("email", "")
+    service = acct_cfg.get("keychain_service", "agentic-ai-mail-imap")
+    secrets_file = acct_cfg.get("secrets_file") or DEFAULT_IMAP_SECRETS_FILE
+    file_path = Path(secrets_file).expanduser()
+
+    keychain_present = None
+    if source == "keychain":
+        keychain_present = bool(_keychain_get(service, email_addr))
+
+    file_present = False
+    file_exists = file_path.exists()
+    if file_exists:
+        try:
+            data = _read_toml(file_path)
+            for entry in data.get("accounts", []):
+                if entry.get("email", "").strip() == email_addr:
+                    file_present = bool(
+                        _normalize_app_password(entry.get("app_password")))
+                    break
+            if not file_present and "app_password" in data:
+                file_present = bool(
+                    _normalize_app_password(data.get("app_password")))
+        except Exception:
+            file_present = False
+
+    resolved = (
+        bool(keychain_present)
+        if source == "keychain" and keychain_present
+        else file_present
+    )
+    if source == "keychain" and keychain_present:
+        configured_source = "keychain"
+    elif file_exists:
+        configured_source = "file"
+    else:
+        configured_source = "missing"
+    return {
+        "account_id": acct_cfg.get("id") or acct_cfg.get("name") or email_addr,
+        "name": acct_cfg.get("name"),
+        "email": email_addr,
+        "auth_source": source,
+        "configured_source": configured_source,
+        "keychain_present": keychain_present,
+        "file_present": file_present,
+        "file_exists": file_exists,
+        "secrets_file": str(file_path),
+        "credential_present": bool(resolved),
+    }
+
+
+def credential_debug_statuses(settings: dict) -> list[dict[str, Any]]:
+    imap_cfg = settings.get("mail", {}).get("imap", {})
+    return [
+        credential_debug_status(acct)
+        for acct in imap_cfg.get("accounts", [])
+        if not str(acct.get("email", "")).startswith("YOUR_EMAIL")
+        and not acct.get("deleted_at")
+        and acct.get("enabled", True)
+    ]
 
 
 # ── Idempotency key helpers ──────────────────────────────────────────────────
@@ -261,6 +335,16 @@ class IMAPPoller:
         self.max_attachment_mb = float(
             imap_cfg.get("max_attachment_mb", 20))
         self._password: str | None = None
+        status = credential_debug_status(acct_cfg)
+        log.info(
+            "IMAP credential source for %s: configured_source=%s "
+            "auth_source=%s file_exists=%s credential_present=%s",
+            self.email,
+            status["configured_source"],
+            status["auth_source"],
+            status["file_exists"],
+            status["credential_present"],
+        )
 
     def _get_password(self) -> str:
         if self._password is None:

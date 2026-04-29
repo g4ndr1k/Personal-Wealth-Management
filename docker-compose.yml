@@ -19,9 +19,11 @@ services:
       CORETAX_OUTPUT_DIR:       /app/data/coretax/output
       HOUSEHOLD_API_KEY_FILE:   /run/secrets/household_api.key
       NAS_SYNC_TARGET:          ${NAS_SYNC_TARGET:-}
+      AGENT_INTERNAL_URL:       http://mail-agent:8080
     volumes:
-      - ./config/settings.toml:/app/config/settings.toml:ro
+      - ./config/settings.toml:/app/config/settings.toml:rw
       - ./data:/app/data
+      - ./agent:/app/agent
       - ./output/xls:/app/output/xls:ro
       - ./secrets/bridge.token:/run/secrets/bridge.token:ro
       - ./household-expense/secrets/household_api.key:/run/secrets/household_api.key:ro
@@ -56,10 +58,11 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./config/settings.toml:/app/config/settings.toml:ro
+      - ./config/settings.toml:/app/config/settings.toml:rw
       - ./data:/app/data
+      - ./secrets:/app/secrets:ro
       - ./secrets/bridge.token:/run/secrets/bridge.token:ro  # file, not directory
-      - /Volumes/Synology/mailagent:/mnt/mailagent
+      # - /Volumes/Synology/mailagent:/mnt/mailagent
     extra_hosts:
       - "host.docker.internal:host-gateway"
     mem_limit: 2g

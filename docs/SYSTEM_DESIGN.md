@@ -13,13 +13,17 @@ Mac host
   bridge/                 host Python service on :9100
     mail/iMessage access
     PDF processing jobs
+    in-memory PDF unlock for agent attachments
     bridge API
 
 Docker on Mac
-  agent/                  mail alert worker
+  agent/                  mail alert worker + local mail API on :8080
   finance/ + pwa/dist     FastAPI + built Vue PWA on :8090
+  mail-dashboard/          Electron app; local API client
 
 Optional NAS
+  /Volumes/Synology/mailagent
+                          PDF archive mounted into mail-agent as /mnt/mailagent
   finance API replica     read-only copy of data/finance.db
   household-expense/      LAN-only household expense satellite app
 ```
@@ -46,6 +50,10 @@ Bank PDFs
 | `bridge/pdf_handler.py` | PDF job queue, local PDF processing, preflight, status lifecycle, registry updates. |
 | `bridge/pdf_unlock.py` | Password-protected PDF unlock helpers. |
 | `agent/app/classifier.py` | Mail classifier orchestration using registered providers. |
+| `agent/app/imap_source.py` | Agent-side IMAP intake with UID/UIDVALIDITY state, size guards, and attachment extraction metadata. |
+| `agent/app/net_guard.py` | Mail-agent preflight guard for outbound network, bridge health, IMAP reachability, and NAS advisory status. |
+| `agent/app/pdf_router.py` | IMAP PDF attachment unlock, filename validation, NAS mount sentinel validation, collision handling, and routing. |
+| `agent/app/api_mail.py` | Mail dashboard account/query router mounted by `finance/api.py` under `/api/mail/*`. |
 | `agent/app/providers/` | Provider implementations and `PROVIDERS` registry. |
 | `parsers/router.py` | Bank and statement type detection, parser dispatch. |
 | `parsers/*.py` | Bank-specific PDF extraction logic. |
@@ -63,10 +71,35 @@ Bank PDFs
 | `household-expense/api/` | Household Expense FastAPI app, auth, SQLite schema, and routers. |
 | `household-expense/pwa/` | Assistant-facing Vue PWA for household cash expense entry. |
 | `household-expense/deploy_household.sh` | Build, rsync, Docker rebuild, and health check for NAS deployment. |
+| `mail-dashboard/` | Electron + React menu-bar dashboard for the mail agent. |
+
+## Mail Agent Responsibilities
+
+The mail agent runs in Docker and serves its own local health API on `127.0.0.1:8080`. The native dashboard account/query API is mounted by the finance service on `127.0.0.1:8090/api/mail/*`. When `[mail.imap].accounts` contains real account entries, the mail agent polls IMAP directly through `agent/app/imap_source.py`; placeholder accounts such as `YOUR_EMAIL@gmail.com` are ignored and the legacy bridge mail source remains the fallback.
+
+The IMAP path separates message and attachment lifecycles:
+
+```text
+Message:    fetched -> classified -> recorded -> IMAP checkpoint
+Attachment: pending -> unlocked -> renamed -> routed
+                         -> pending_review / failed_retryable / failed
+```
+
+The IMAP checkpoint is advanced by the orchestrator only after the message result is persisted and attachment rows have been created or processed. Downstream PDF failures do not force the mailbox to re-fetch the same email.
+
+Runtime mode is server-side:
+
+| Mode | Fetch/classify | iMessage | PDF route | Email mutation |
+|---|---:|---:|---:|---:|
+| `observe` | yes | no | no | no |
+| `draft_only` | yes | yes | yes | no |
+| `live` | yes | yes | yes | yes |
+
+Invalid or missing mode falls back to `draft_only`, or `observe` if configured as the safe default. Blocked actions are recorded as `mode_blocked` events.
 
 ## Bridge, API, And PWA Responsibilities
 
-The bridge owns host-only capabilities: iMessage, macOS-local files, PDF parsing jobs, and bridge health. It exposes `/pdf/*` endpoints for preflight, queueing, status, and recent jobs.
+The bridge owns host-only capabilities: iMessage, macOS-local files, PDF parsing jobs, in-memory PDF unlock for agent attachments, and bridge health. It exposes `/pdf/*` endpoints for preflight, queueing, status, recent jobs, and `/pdf/unlock` for multipart bytes-in/bytes-out unlock requests.
 
 The finance API owns application data and user-facing HTTP routes. It proxies PDF routes from `/api/pdf/*` to bridge `/pdf/*`, preserving meaningful bridge failures instead of converting them into generic success.
 
@@ -199,7 +232,8 @@ Current production provider order is `["rule_based"]`. `rule_based` is a support
 | Path/Table | Role |
 |---|---|
 | `output/xls/ALL_TRANSACTIONS.xlsx` | Immutable parser output used to rebuild SQLite. |
-| `data/finance.db` | Authoritative edited finance store. |
+| `data/finance.db` | Authoritative edited finance/PWM store. |
+| `data/agent.db` | Mail-agent runtime state, including Phase 4A mail rules, rule actions, rule audit events, needs-reply rows, and future AI queue/classification tables. |
 | `transactions` | Raw imported transaction rows keyed by hash. |
 | `category_overrides` | User edits that survive re-import. |
 | `transactions_resolved` | View merging base rows with overrides. |
@@ -241,6 +275,24 @@ Bridge:
 | `POST` | `/pdf/process-file` | Queue local PDF from configured folder. |
 | `GET` | `/pdf/status/<job_id>` | Fetch PDF job status/result. |
 | `GET` | `/pdf/jobs` | List recent PDF jobs. |
+| `POST` | `/pdf/unlock` | Authenticated multipart PDF unlock. Returns unlocked bytes with `X-Was-Encrypted`, `X-Password-Used-Index`, and `X-Page-Count` headers. |
+
+Mail agent API:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Internal stats snapshot. |
+| `GET` | `/api/mail/summary` | Dashboard KPIs, source split, classification counts, action counts, mode. Requires `X-Api-Key` when configured. |
+| `GET` | `/api/mail/recent?limit=20` | Recent processed messages. |
+| `GET` | `/api/mail/accounts` | Config-backed IMAP account list merged with runtime health, excluding placeholder accounts. |
+| `POST` | `/api/mail/accounts/test` | Gmail IMAP login test; strips pasted whitespace from App Passwords before auth. |
+| `POST` | `/api/mail/accounts` | Create account, persist settings, and store credential. |
+| `PATCH` | `/api/mail/accounts/{account_id}` | Update account metadata; re-tests new passwords before save. |
+| `PATCH` | `/api/mail/accounts/{account_id}/enabled` | Soft-enable or disable polling. |
+| `DELETE` | `/api/mail/accounts/{account_id}` | Soft-delete account; optional secret purge. |
+| `POST` | `/api/mail/accounts/{account_id}/reactivate` | Re-enable a soft-deleted account. |
+| `POST` | `/api/mail/config/reload` | Mark agent config reload pending. |
+| `POST` | `/api/mail/run` | Queue an out-of-band scan cycle. |
 
 Finance API:
 

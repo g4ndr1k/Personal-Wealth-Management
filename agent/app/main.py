@@ -126,6 +126,13 @@ def main():
     while not shutdown_event.is_set():
         now = time.time()
         try:
+            # --- Config reload check ---
+            if state.get_bool_flag("config_reload_pending"):
+                logger.info("Picking up configuration changes...")
+                new_settings = load_settings()
+                orch.reload_config(new_settings)
+                state.set_bool_flag("config_reload_pending", False)
+
             # --- Bridge reconnect with backoff ---
             if not orch.bridge_ok:
                 now_r = time.time()

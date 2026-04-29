@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Dashboard from './views/Dashboard';
+import Settings from './views/Settings';
 import { ApiProvider } from './api/mail';
 
 type Tab = 'dashboard' | 'emails' | 'drafts' | 'settings';
@@ -17,8 +18,18 @@ export default function App() {
   return (
     <ApiProvider>
       <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
+        {/* Draggable Title Bar */}
+        <div 
+          className="h-12 bg-gray-950 flex items-center pl-20 pr-6 border-b border-gray-900/50"
+          style={{ WebkitAppRegion: 'drag' } as any}
+        >
+          <span className="text-[10px] uppercase tracking-[0.3em] font-bold text-gray-500">
+            Email Intelligence Hub
+          </span>
+        </div>
+
         {/* Main content */}
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto p-6 pt-2">
           {activeTab === 'dashboard' && <Dashboard />}
           {activeTab === 'emails' && (
             <PlaceholderTab title="Emails" />
@@ -26,13 +37,14 @@ export default function App() {
           {activeTab === 'drafts' && (
             <PlaceholderTab title="Drafts" />
           )}
-          {activeTab === 'settings' && (
-            <PlaceholderTab title="Settings" />
-          )}
+          {activeTab === 'settings' && <Settings />}
         </div>
 
         {/* Tab bar */}
-        <div className="border-t border-gray-800 px-6 py-3 flex gap-6 bg-gray-950">
+        <div 
+          className="border-t border-gray-800 px-6 py-3 flex gap-6 bg-gray-950"
+          style={{ WebkitAppRegion: 'no-drag' } as any}
+        >
           {tabs.map((tab) => (
             <button
               key={tab.id}
