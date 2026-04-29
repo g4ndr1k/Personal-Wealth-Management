@@ -46,7 +46,7 @@ allowed_sender_domains = [
 
 [ollama]
 host = "http://host.docker.internal:11434"
-model_primary = "qwen2.5:7b-instruct-q4_K_M"
+model_primary = "gemma3:4b"
 timeout_seconds = 60
 
 [agent]
@@ -63,6 +63,14 @@ alert_on_categories = [
   "financial_other"
 ]
 
+# ── Safety mode ladder (backend-enforced) ───────────────────────────────
+# observe    = fetch+classify only, no alerts, no PDF route, no mutation
+# draft_only = fetch+classify+alert+PDF route, no send/label/move (DEFAULT)
+# live       = all actions allowed (requires explicit setting)
+# Invalid/missing → draft_only (never live)
+mode = "draft_only"
+safe_default = "draft_only"
+
 # --- Future features (not implemented in v1) ---
 #[routing]
 #default_recipients = ["emanuel.adrianto@icloud.com"]
@@ -72,7 +80,32 @@ alert_on_categories = [
 #[future]
 #secondary_recipients_enabled = false
 #pdf_processing_enabled = false
-#web_ui_enabled = false# ─────────────────────────────────────────────────────────────────────────────
+#web_ui_enabled = false
+
+# ── IMAP intake (Phase A.5) ────────────────────────────────────────────
+# Replaces Mail.app SQLite reader on the mail-agent path.
+# Gmail App Password stored in Keychain (service: agentic-ai-mail-imap).
+# Outlook deferred until OAuth2 device-code flow is implemented.
+
+[mail.imap]
+accounts = [
+  {name = "gmail", host = "imap.gmail.com", port = 993, email = "YOUR_EMAIL@gmail.com", folders = ["INBOX"], lookback_days = 15, auth_source = "keychain", keychain_service = "agentic-ai-mail-imap"},
+]
+max_message_mb = 25
+max_attachment_mb = 20
+
+# ── PDF ingest-decrypt-route pipeline (Phase B) ────────────────────────
+[mail_agent.pdf]
+nas_root = "/mnt/mailagent"                    # inside container
+host_nas_root = "/Volumes/Synology/mailagent"  # on host
+categories = ["invoices", "statements", "receipts", "other"]
+filename_regex = "^\\d{4}-\\d{2}-\\d{2}_[A-Za-z0-9][A-Za-z0-9_-]{1,40}_[a-z][a-z0-9_-]{1,30}\\.pdf$"
+mount_sentinel_uuid = ""  # set by scripts/setup_nas_sentinel.py
+sentinel_path = ".mailagent_mount"
+ollama_host = "http://host.docker.internal:11434"
+ollama_model = "gemma3:4b"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ADD THIS SECTION to your existing config/settings.toml
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -101,14 +134,14 @@ attachment_seen_db = "/Users/g4ndr1k/agentic-ai/data/seen_attachments.db"
 attachment_lookback_days = 60
 
 # Ollama model for Layer 3 LLM fallback parsing (same as mail agent)
-parser_llm_model = "qwen2.5:7b-instruct-q4_K_M"
+parser_llm_model = "gemma3:4b"
 
 # Parsed-PDF verification pass (warn-only by default)
 verify_enabled = true
 verify_mode = "warn"
 verify_ollama_host = "http://localhost:11434"
 verify_timeout_seconds = 120
-verify_model = "qwen2.5:7b-instruct-q4_K_M"
+verify_model = "gemma3:4b"
 
 [pipeline]
 enabled = true
@@ -153,7 +186,7 @@ cors_origins = ["http://localhost:5173", "https://adrianto.synology.me:8443"]
 # Use localhost when running on the Mac host directly.
 # Docker overrides this via OLLAMA_FINANCE_HOST env var (host.docker.internal).
 host            = "http://localhost:11434"
-model           = "qwen2.5:7b-instruct-q4_K_M"
+model           = "gemma3:4b"
 timeout_seconds = 60
 
 [household]

@@ -63,9 +63,16 @@ IMPORTANT INSTRUCTIONS:
 - Return ONLY a single valid JSON object with no additional text, explanation, or markdown.
 
 JSON format:
-{{"category": "...", "urgency": "...", "summary": "...", "requires_action": true}}
+{{"category": "...", "urgency": "...", "summary": "...", "requires_action": true, "priority": 0, "action": "alert", "confidence": 0.0, "reason": "..."}}
 
 Allowed categories:
+- urgent: urgent email requiring immediate attention
+- important: important but not immediately urgent
+- reply_needed: requires a reply or manual follow-up
+- personal: personal non-financial email
+- newsletter: newsletter or promotional digest
+- automated: automated notification with no action needed
+- spam: unwanted or suspicious bulk email
 - transaction_alert: purchase confirmations, bank transfers, withdrawals, deposits, payment receipts
 - bill_statement: monthly bills, credit card statements, utility bills, subscription charges
 - bank_clarification: bank verification requests, document requests, account update requests
@@ -74,7 +81,8 @@ Allowed categories:
 - financial_other: other money-related emails not fitting above categories
 - not_financial: newsletters, promotions, social media, personal, non-financial content
 
-Allowed urgency: low, medium, high
+Allowed urgency: low, medium, high, urgent
+Allowed action: alert, draft, label, ignore, pdf_route
 
 Urgency rules:
 - security_alert, fraud = high
@@ -107,6 +115,10 @@ Subject: {subject}
         urgency = payload.get("urgency", "medium")
         summary = str(payload.get("summary", ""))[:250]
         requires_action = bool(payload.get("requires_action", False))
+        priority = int(payload.get("priority", 0) or 0)
+        action = payload.get("action", "alert" if requires_action else "ignore")
+        confidence = float(payload.get("confidence", 1.0) or 0.0)
+        reason = str(payload.get("reason", ""))[:200]
 
         if category not in ALLOWED_CATEGORIES:
             category = "financial_other"
@@ -114,6 +126,9 @@ Subject: {subject}
             urgency = "medium"
         if not summary:
             summary = "No summary provided"
+        priority = max(0, min(priority, 10))
+        if action not in {"alert", "draft", "label", "ignore", "pdf_route"}:
+            action = "alert" if requires_action else "ignore"
 
         return Classification(
             category=category,
@@ -121,6 +136,10 @@ Subject: {subject}
             summary=summary,
             requires_action=requires_action,
             provider=f"ollama/{self.model}",
+            priority=priority,
+            action=action,
+            confidence=max(0.0, min(confidence, 1.0)),
+            reason=reason,
         )
 
     def close(self) -> None:

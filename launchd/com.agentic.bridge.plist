@@ -12,7 +12,12 @@
 		<string>/Users/g4ndr1k/agentic-ai</string>
 	</dict>
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+		<key>Crashed</key>
+		<true/>
+	</dict>
 	<key>Label</key>
 	<string>com.agentic.bridge</string>
 	<key>SoftResourceLimits</key>
@@ -36,7 +41,7 @@
 	<key>StandardOutPath</key>
 	<string>/Users/g4ndr1k/agentic-ai/logs/bridge-launchd.log</string>
 	<key>ThrottleInterval</key>
-	<integer>10</integer>
+	<integer>30</integer>
 	<key>WorkingDirectory</key>
 	<string>/Users/g4ndr1k/agentic-ai</string>
 </dict>

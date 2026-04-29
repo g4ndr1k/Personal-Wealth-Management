@@ -71,6 +71,78 @@ def unlock_pdf(src_path: str, password: str, unlocked_dir: str) -> str:
         ) from e
 
 
+def unlock_pdf_bytes(
+    pdf_bytes: bytes,
+    passwords: list[str],
+) -> dict:
+    """Unlock a PDF from in-memory bytes, trying each password in order.
+
+    No temp files on the host; all work is done in-memory via pikepdf.
+
+    Returns:
+        {
+            "unlocked_bytes": bytes,
+            "was_encrypted": bool,
+            "password_used_index": int | None,
+            "page_count": int,
+        }
+
+    Raises:
+        UnlockError  if the PDF is encrypted and no password works.
+        ImportError  if pikepdf is not installed.
+    """
+    import io
+    try:
+        import pikepdf
+    except ImportError:
+        raise ImportError(
+            "pikepdf is required for in-memory PDF unlock")
+
+    # ── Try opening without a password first ─────────────────────────────
+    buf = io.BytesIO(pdf_bytes)
+    try:
+        with pikepdf.open(buf) as pdf:
+            if not pdf.is_encrypted:
+                out = io.BytesIO()
+                pdf.save(out)
+                return {
+                    "unlocked_bytes": out.getvalue(),
+                    "was_encrypted": False,
+                    "password_used_index": None,
+                    "page_count": len(pdf.pages),
+                }
+    except (pikepdf.PasswordError, pikepdf.EncryptionError):
+        pass  # encrypted — fall through to password loop
+    except Exception as e:
+        raise UnlockError(f"Failed to open PDF: {e}") from e
+
+    # ── Try each password ─────────────────────────────────────────────────
+    for idx, password in enumerate(passwords):
+        buf = io.BytesIO(pdf_bytes)
+        try:
+            with pikepdf.open(buf, password=password) as pdf:
+                out = io.BytesIO()
+                pdf.save(out)
+                log.debug(
+                    "PDF unlocked with password index %d", idx)
+                return {
+                    "unlocked_bytes": out.getvalue(),
+                    "was_encrypted": True,
+                    "password_used_index": idx,
+                    "page_count": len(pdf.pages),
+                }
+        except (pikepdf.PasswordError, pikepdf.EncryptionError):
+            continue
+        except Exception as e:
+            log.warning(
+                "pikepdf error with password index %d: %s", idx, e)
+            continue
+
+    raise UnlockError(
+        f"PDF is encrypted and none of the {len(passwords)} "
+        "password(s) worked")
+
+
 def is_encrypted(pdf_path: str) -> bool:
     """Quick check whether a PDF is password-protected."""
     try:

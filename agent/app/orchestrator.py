@@ -1,8 +1,11 @@
 import time
 import logging
+import copy
 from datetime import datetime, timezone
 
 import httpx
+
+from app.net_guard import network_ok
 
 logger = logging.getLogger("agent.orchestrator")
 
@@ -24,6 +27,27 @@ class Orchestrator:
         self.bridge_ok = True
         self._last_bridge_retry = 0.0
         self.BRIDGE_RETRY_INTERVAL = 45  # seconds
+        self.mode = self._resolve_mode()
+
+        imap_cfg = self.settings.get("mail", {}).get("imap", {})
+        accounts = [
+            acct for acct in imap_cfg.get("accounts", [])
+            if not str(acct.get("email", "")).startswith("YOUR_EMAIL")
+        ]
+        self.use_imap = bool(accounts)
+        self.imap_intake = None
+        self.pdf_router = None
+        if self.use_imap:
+            from app.imap_source import IMAPIntake
+            from app.pdf_router import PdfRouter
+            imap_settings = copy.deepcopy(self.settings)
+            imap_settings.setdefault("mail", {}).setdefault("imap", {})[
+                "accounts"] = accounts
+            self.imap_intake = IMAPIntake(imap_settings, self.state)
+            self.pdf_router = PdfRouter(
+                self.state,
+                self.settings.get("mail_agent", {}).get("pdf", {}),
+            )
 
     def scan_mail_once(self) -> bool:
         """Scan pending mail and process.
@@ -32,9 +56,22 @@ class Orchestrator:
         whether any emails were found). Returns False if the bridge
         was unreachable — the caller should NOT advance last_mail.
         """
+        self.mode = self._resolve_mode()
+
         if self.commands.paused:
             logger.info("Scan skipped: paused")
             return True  # bridge is fine, just paused
+
+        # Pre-flight: verify network before any I/O
+        ok, reasons = network_ok()
+        if not ok:
+            logger.warning(
+                "scan_mail_once aborted — network probe failed: %s",
+                "; ".join(reasons))
+            return False
+
+        if self.use_imap:
+            return self._scan_imap_once()
 
         cycle_start = time.time()
         total = 0
@@ -108,7 +145,8 @@ class Orchestrator:
                     self.settings["agent"][
                         "alert_on_categories"])
                 should_alert = (
-                    result.category in alert_cats)
+                    result.category in alert_cats
+                    and self._action_allowed("imessage"))
                 alert_sent = False
 
                 if should_alert and not self.commands.quiet:
@@ -154,6 +192,168 @@ class Orchestrator:
                 datetime.now(timezone.utc).isoformat()))
 
         return True
+
+    def _scan_imap_once(self) -> bool:
+        if self.imap_intake is None:
+            logger.warning("IMAP scan requested but intake is not configured")
+            return True
+
+        try:
+            items = self.imap_intake.poll_all()
+        except Exception:
+            logger.exception("IMAP intake failed")
+            return False
+
+        if not items:
+            self.stats.update(
+                last_scan=datetime.now(timezone.utc).isoformat())
+            return True
+
+        logger.info("Processing %d IMAP email(s)", len(items))
+
+        for item in items[:MAX_PER_CYCLE]:
+            mkey = item.get("message_key")
+            fkey = item.get("fallback_message_key")
+            if ((mkey and self.state.message_key_processed(mkey))
+                    or (fkey and self.state.fallback_message_key_processed(fkey))):
+                self._checkpoint_imap_message(item)
+                self.stats.incr("emails_deduped")
+                continue
+
+            status = item.get("status", "pending")
+            if status.startswith("skipped_with_reason"):
+                self.state.save_message_result_imap(
+                    item, "not_financial", "low",
+                    "imap_size_guard", False,
+                    item.get("skipped_reason", "skipped"))
+                self._checkpoint_imap_message(item)
+                continue
+
+            try:
+                result = self.classifier.classify(item)
+            except Exception:
+                logger.exception("Classification failed: %s",
+                                 item.get("bridge_id"))
+                self.stats.incr("classification_failures")
+                return False
+
+            self.stats.incr("emails_seen")
+            if result.provider in ("apple_ml_prefilter", "domain_prefilter"):
+                self.stats.incr("emails_prefiltered")
+
+            if self._action_allowed("pdf_route"):
+                self._process_imap_attachments(item)
+            elif item.get("attachments"):
+                self.state.write_event(
+                    "mode_blocked",
+                    {"account": item.get("imap_account"),
+                     "action": "pdf_route",
+                     "mode": self.mode,
+                     "bridge_id": item.get("bridge_id")})
+
+            alert_cats = set(
+                self.settings["agent"]["alert_on_categories"])
+            should_alert = (
+                result.category in alert_cats
+                and self._action_allowed("imessage"))
+            alert_sent = False
+
+            if should_alert and not self.commands.quiet:
+                alert_text = self._format_alert(item, result)
+                try:
+                    resp = self.bridge.send_alert(alert_text)
+                    alert_sent = bool(resp.get("success", False))
+                    self.state.save_alert(
+                        item["bridge_id"], result.category,
+                        resp.get("recipient", ""),
+                        alert_text, alert_sent)
+                    if alert_sent:
+                        self.stats.incr("alerts_sent")
+                except Exception as e:
+                    logger.error("Alert error %s: %s",
+                                 item.get("bridge_id"), e)
+            elif result.category in alert_cats and not should_alert:
+                self.state.write_event(
+                    "mode_blocked",
+                    {"account": item.get("imap_account"),
+                     "action": "imessage",
+                     "mode": self.mode,
+                     "bridge_id": item.get("bridge_id")})
+
+            self.state.save_message_result_imap(
+                item, result.category, result.urgency,
+                result.provider, alert_sent, result.summary)
+            self._checkpoint_imap_message(item)
+
+        self.stats.update(
+            last_scan=datetime.now(timezone.utc).isoformat())
+        return True
+
+    def _process_imap_attachments(self, item: dict) -> None:
+        if self.pdf_router is None:
+            return
+        message_key = (
+            item.get("message_key")
+            or item.get("fallback_message_key")
+            or item.get("bridge_id"))
+        for att in item.get("attachments", []):
+            original = att.get("filename") or "attachment.pdf"
+            if att.get("status") == "skipped_oversized":
+                self.state.upsert_pdf_attachment(
+                    attachment_key=f"{message_key}:oversize:{original}",
+                    message_key=message_key,
+                    fallback_message_key=item.get("fallback_message_key"),
+                    account=item.get("imap_account", ""),
+                    folder=item.get("imap_folder", ""),
+                    uid=int(item.get("imap_uid", 0)),
+                    original_filename=original,
+                    status="pending_review",
+                    error_reason="attachment_size_limit",
+                )
+                continue
+            content = att.get("content")
+            if not content:
+                continue
+            self.pdf_router.process_attachment(
+                message_key=message_key,
+                fallback_message_key=item.get("fallback_message_key"),
+                account=item.get("imap_account", ""),
+                folder=item.get("imap_folder", ""),
+                uid=int(item.get("imap_uid", 0)),
+                original_filename=original,
+                pdf_bytes=content,
+                sender=item.get("sender_email") or item.get("sender", ""),
+                subject=item.get("subject", ""),
+            )
+
+    def _checkpoint_imap_message(self, item: dict) -> None:
+        account = item.get("imap_account")
+        folder = item.get("imap_folder")
+        uid = item.get("imap_uid")
+        uidvalidity = item.get("imap_uidvalidity")
+        if account and folder and uid is not None and uidvalidity is not None:
+            self.state.set_imap_folder_state(
+                account, folder, int(uid), int(uidvalidity))
+
+    def _resolve_mode(self) -> str:
+        agent_cfg = self.settings.get("agent", {})
+        mode = str(agent_cfg.get("mode", "")).strip()
+        if mode in ("observe", "draft_only", "live"):
+            return mode
+        safe_default = str(
+            agent_cfg.get("safe_default", "draft_only")).strip()
+        if safe_default in ("observe", "draft_only"):
+            return safe_default
+        return "draft_only"
+
+    def _action_allowed(self, action: str) -> bool:
+        required = {
+            "imessage": "draft_only",
+            "pdf_route": "draft_only",
+            "email_mutation": "live",
+        }.get(action, "live")
+        rank = {"observe": 0, "draft_only": 1, "live": 2}
+        return rank[self.mode] >= rank[required]
 
     def scan_commands_once(self):
         payload = self.bridge.commands_pending(limit=20)

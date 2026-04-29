@@ -59,6 +59,7 @@ services:
       - ./config/settings.toml:/app/config/settings.toml:ro
       - ./data:/app/data
       - ./secrets/bridge.token:/run/secrets/bridge.token:ro  # file, not directory
+      - /Volumes/Synology/mailagent:/mnt/mailagent
     extra_hosts:
       - "host.docker.internal:host-gateway"
     mem_limit: 2g

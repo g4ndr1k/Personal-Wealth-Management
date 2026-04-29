@@ -44,6 +44,60 @@ logging.basicConfig(
 logger = logging.getLogger("bridge")
 
 
+def _check_applescript() -> str:
+    """Run a no-op AppleScript to verify the osascript interpreter works."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", "return 1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return "ok" if result.returncode == 0 else "fail"
+    except Exception:
+        return "fail"
+
+
+def _build_health(ctx: "AppContext") -> dict:
+    """Return a structured component-health dict for the /health endpoint."""
+    components: dict[str, str] = {}
+
+    # HTTP layer is always ok if we got here
+    components["http"] = "ok"
+
+    # AppleScript interpreter
+    components["applescript"] = _check_applescript()
+
+    # Messages.app / chat.db access
+    if ctx.messages.can_access():
+        components["messages_app"] = "ok"
+        components["chat_db"] = "ok"
+    else:
+        from bridge.messages_source import MESSAGES_DB
+        if not MESSAGES_DB.exists():
+            components["messages_app"] = "fail"
+            components["chat_db"] = "skipped"
+        else:
+            components["messages_app"] = "fail"
+            components["chat_db"] = "fail"
+
+    # Overall: degraded if any component is 'fail'; ok if all ok
+    failed = [k for k, v in components.items() if v == "fail"]
+    if failed:
+        overall = "degraded" if components.get("http") == "ok" else "fail"
+    else:
+        overall = "ok"
+    components["overall"] = overall
+
+    return {
+        **components,
+        "service": "bridge",
+        "mail_available": ctx.mail.can_access() if ctx.mail is not None else False,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 class AppContext:
     def __init__(self):
         self.settings = load_settings(str(SETTINGS_PATH))
@@ -190,15 +244,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/health":
-                self._json(200, {
-                    "status": "ok",
-                    "service": "bridge",
-                    "mail_available": self.ctx.mail.can_access() if self.ctx.mail is not None else False,
-                    "messages_available": (
-                        self.ctx.messages.can_access()),
-                    "timestamp": (
-                        datetime.now(timezone.utc).isoformat()),
-                })
+                self._json(200, _build_health(self.ctx))
                 return
 
             if path == "/pdf/preflight":
@@ -292,10 +338,129 @@ class Handler(BaseHTTPRequestHandler):
             self.ctx.state.log_request(path, "error", False)
             self._json(500, {"error": "Internal server error"})
 
+    def _read_multipart(self) -> dict | None:
+        """Parse multipart/form-data from the request body.
+
+        Returns a dict of field_name → bytes.
+        Returns None and sends an error response on failure.
+        """
+        import email as _email_parse
+        ct = self.headers.get("Content-Type", "")
+        length = int(self.headers.get("Content-Length", "0"))
+        # Guard: 50 MB max for the unlock endpoint
+        if length > 50 * 1024 * 1024:
+            self._json(413, {"error": "Payload too large"})
+            return None
+        if length == 0:
+            self._json(400, {"error": "Empty body"})
+            return None
+        body = self.rfile.read(length)
+        msg_bytes = (
+            f"Content-Type: {ct}\r\n\r\n".encode() + body)
+        try:
+            msg = _email_parse.message_from_bytes(msg_bytes)
+        except Exception as e:
+            self._json(400,
+                       {"error": f"Multipart parse error: {e}"})
+            return None
+
+        fields: dict[str, bytes] = {}
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            cd = part.get("Content-Disposition", "")
+            if not cd:
+                continue
+            name = None
+            for segment in cd.split(";"):
+                segment = segment.strip()
+                if segment.lower().startswith("name="):
+                    name = segment[5:].strip().strip('"')
+                    break
+            if name is None:
+                continue
+            payload = part.get_payload(decode=True)
+            fields[name] = payload or b""
+        return fields
+
+    def _handle_pdf_unlock(self):
+        """POST /pdf/unlock — in-memory PDF decryption via pikepdf."""
+        import json as _json
+        from bridge.pdf_unlock import unlock_pdf_bytes, UnlockError
+
+        ct = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ct:
+            self._json(415, {
+                "error": "Content-Type must be multipart/form-data"})
+            return
+
+        fields = self._read_multipart()
+        if fields is None:
+            return
+
+        pdf_bytes = fields.get("file")
+        passwords_raw = fields.get("passwords", b"[]")
+
+        if not pdf_bytes:
+            self._json(400, {"error": "Missing 'file' field"})
+            return
+
+        try:
+            passwords = _json.loads(
+                passwords_raw.decode("utf-8"))
+            if not isinstance(passwords, list):
+                raise ValueError("passwords must be a JSON array")
+        except (ValueError, Exception) as e:
+            self._json(400, {
+                "error": f"Invalid 'passwords' field: {e}"})
+            return
+
+        try:
+            result = unlock_pdf_bytes(pdf_bytes, passwords)
+        except UnlockError as e:
+            self.ctx.state.log_request(
+                "/pdf/unlock", "unlock_failed", False)
+            self._json(422, {"error": str(e)})
+            return
+        except ImportError as e:
+            self._json(501, {"error": str(e)})
+            return
+
+        unlocked = result["unlocked_bytes"]
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         "application/octet-stream")
+        self.send_header("Content-Length", str(len(unlocked)))
+        self.send_header(
+            "X-Was-Encrypted",
+            "true" if result["was_encrypted"] else "false")
+        idx = result["password_used_index"]
+        self.send_header(
+            "X-Password-Used-Index",
+            str(idx) if idx is not None else "null")
+        self.send_header(
+            "X-Page-Count", str(result["page_count"]))
+        self.end_headers()
+        self.wfile.write(unlocked)
+        self.ctx.state.log_request(
+            "/pdf/unlock", "unlock_ok", True)
+
     def do_POST(self):
         if not self._auth():
             return
         path = urlparse(self.path).path
+
+        # /pdf/unlock uses multipart — handle before _read_json
+        if path == "/pdf/unlock":
+            try:
+                self._handle_pdf_unlock()
+            except Exception:
+                logger.exception("POST /pdf/unlock error")
+                self.ctx.state.log_request(
+                    path, "error", False)
+                self._json(500,
+                           {"error": "Internal server error"})
+            return
 
         try:
             data = self._read_json()

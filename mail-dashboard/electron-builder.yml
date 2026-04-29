@@ -1,0 +1,45 @@
+appId: com.mailagent.dashboard
+productName: Mail Dashboard
+copyright: Copyright © 2024
+
+directories:
+  buildResources: assets
+  output: dist-release
+
+files:
+  - dist/**
+  - dist-electron/**
+  - assets/**
+  - package.json
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  darkModeSupport: true
+  # LSUIElement=true keeps the app out of the Dock — tray-only
+  extendInfo:
+    LSUIElement: true
+    NSSupportsAutomaticGraphicsSwitching: true
+
+dmg:
+  title: Mail Dashboard
+  background: null
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 130
+      y: 220
+      type: file
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+nsis:
+  oneClick: false
+  perMachine: false
+
+publish: null
