@@ -395,7 +395,9 @@ Phase 4B AI enrichment is read-only. It adds an Ollama-backed triage layer on to
 
 Phase 4C.1 IMAP mutation primitives are available only behind the safety ladder. Keep `[mail.imap_mutations].enabled=false` and `dry_run_default=true` unless deliberately testing in `live`; `observe` and `draft_only` always audit `mode_blocked`.
 
-Phase 4C.3A AI triggers are preview-only. They can be configured in the dashboard and write `ai_trigger_matched` audit events after AI classification, but all actions are forced to dry-run and no mailbox, iMessage, reply, forward, delete, unsubscribe, or webhook action is executed.
+Phase 4C.3A AI triggers write `ai_trigger_matched` dry-run audit events after AI classification. In Phase 4D.1, matched actions also create pending Control Center approval items in `data/agent.db:mail_action_approvals`; they still do not execute autonomously.
+
+Approval authorizes only a later execution attempt. The existing gates still decide the final outcome: `[agent].mode`, `[mail.imap_mutations].enabled`, `dry_run_default`, UIDVALIDITY, folder metadata, IMAP capabilities, and the action allow/block list. There is no bulk approval path. `send_imessage`, reply, forward, delete, expunge, unsubscribe, and webhooks remain blocked and should appear only as planned/blocked/audited records.
 
 Settings live in `config/settings.toml`:
 
@@ -424,6 +426,10 @@ Useful probes:
 ```bash
 curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
   http://127.0.0.1:8090/api/mail/ai/settings | python3 -m json.tool
+
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
+  'http://127.0.0.1:8090/api/mail/approvals?status=pending&limit=50' \
+  | python3 -m json.tool
 
 curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
   -H "Content-Type: application/json" \

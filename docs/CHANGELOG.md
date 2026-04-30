@@ -2,6 +2,15 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-04-30 — Phase 4D.1 Control Center Operator Approval
+
+- Added `mail_action_approvals` in `data/agent.db` for human review of AI-triggered action suggestions.
+- AI trigger matches now keep dry-run audit behavior and create pending approval items instead of executing actions.
+- Added approval API endpoints for list/get/approve/reject/execute/expire with API-key protection and complete audit events.
+- Added a native dashboard Control Center tab for pending, approved, executed, blocked, failed, rejected, and expired approvals.
+- Approved execution remains explicit and reuses existing gated action paths; mode, mutation config, dry-run, UIDVALIDITY, and IMAP capabilities still decide the outcome.
+- Live autonomous AI actions, iMessage sends, reply, forward, delete, expunge, unsubscribe, webhooks, and bulk approval remain unavailable.
+
 ## 2026-04-30 — Phase 4A-4C.3A Release Stabilization
 
 - Confirmed the release boundary across docs: deterministic Phase 4A rules, read-only Phase 4B AI enrichment, gated rule-managed Phase 4C.1/4C.2 mailbox mutations, and preview-only Phase 4C.3A AI triggers.

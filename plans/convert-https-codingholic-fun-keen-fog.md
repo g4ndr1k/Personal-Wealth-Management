@@ -75,7 +75,7 @@ Rewrite `app/components/tokenizer.tsx` into a two-pane layout, and split the hea
    - `o200k_base` raw long paste (~5k chars) → no jank, count stable.
    - Toggle "Show token IDs", copy buttons work, model switching preserves content per the rule above.
    - Chat editor: add/remove rows, change roles, delete the last row gracefully.
-4. **Mobile** — resize browser to ~375px or hit it from phone on Tailscale: panes stack, no horizontal scroll.
+4. **Mobile** — resize browser to ~375px or hit it from phone on local network or Cloudflare Access: panes stack, no horizontal scroll.
 5. **Cards page** — `https://staging.codingholic.fun/` shows the renamed "Tokenizer" card linking to `/tokenizer`.
 6. **Promote**: `~/promote-codingholic.sh` → confirm `https://codingholic.fun/tokenizer` renders the new UI.
 

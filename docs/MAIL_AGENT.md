@@ -457,6 +457,44 @@ Safety constraints:
 
 ---
 
+## Phase 4D.1 Control Center — Operator Approval
+
+Phase 4D.1 inserts a human approval queue between AI trigger suggestions and any execution attempt.
+
+Default config:
+
+```toml
+[mail.approvals]
+enabled = true
+require_approval_for_ai_actions = true
+approval_expiry_hours = 72
+allow_bulk_approve = false
+```
+
+Safety constraints:
+
+- AI triggers create `mail_action_approvals` rows; they do not execute actions.
+- Operators approve or reject suggestions in the dashboard Control Center.
+- Approval and execution are separate API operations.
+- Approval does not bypass `[agent].mode`, `[mail.imap_mutations].enabled`, `dry_run_default`, UIDVALIDITY, folder, or IMAP capability checks.
+- `send_imessage`, reply, forward, delete, expunge, unsubscribe, and webhooks remain blocked in this phase.
+- Bulk approval is not implemented.
+
+Approval API:
+
+```text
+GET  /api/mail/approvals
+GET  /api/mail/approvals/{approval_id}
+POST /api/mail/approvals/{approval_id}/approve
+POST /api/mail/approvals/{approval_id}/reject
+POST /api/mail/approvals/{approval_id}/execute
+POST /api/mail/approvals/{approval_id}/expire
+```
+
+Execution support in this phase is limited to safe mailbox action attempts through the existing gated mutation path plus `add_to_needs_reply`. Unsupported approved actions are marked `blocked` and audited.
+
+---
+
 ## Transaction And I/O Boundary
 
 Hard rule:
@@ -586,7 +624,7 @@ Default release posture:
 - Keep `[mail.ai].enabled=false` unless deliberately validating read-only AI enrichment.
 - Keep `[mail.imap_mutations].enabled=false` for the release checkpoint.
 - Keep `[mail.imap_mutations].dry_run_default=true`; deterministic rule-managed mailbox actions should preview/audit unless intentionally promoted in `live`.
-- Treat AI triggers as preview-only. They may write `ai_trigger_matched` audit events with dry-run planned actions, but live AI-triggered actions are not enabled in Phase 4C.3A.
+- Treat AI triggers as approval-only. They may write `ai_trigger_matched` audit events and pending Control Center approval items, but live autonomous AI-triggered actions are not enabled in Phase 4D.1.
 
 ---
 

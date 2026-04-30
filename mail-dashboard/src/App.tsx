@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import Dashboard from './views/Dashboard';
 import Settings from './views/Settings';
+import ControlCenter from './views/ControlCenter';
 import { ApiProvider } from './api/mail';
 
-type Tab = 'dashboard' | 'emails' | 'drafts' | 'settings';
+type Tab = 'dashboard' | 'control' | 'emails' | 'drafts' | 'settings';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'dashboard', label: 'Dashboard' },
+    { id: 'control', label: 'Control Center' },
     { id: 'emails', label: 'Emails' },
     { id: 'drafts', label: 'Drafts' },
     { id: 'settings', label: 'Settings' },
@@ -54,6 +56,7 @@ export default function App() {
         {/* Main content */}
         <main className="flex-1 p-6">
           {activeTab === 'dashboard' && <Dashboard />}
+          {activeTab === 'control' && <ControlCenter />}
           {activeTab === 'emails' && (
             <PlaceholderTab title="Emails" />
           )}

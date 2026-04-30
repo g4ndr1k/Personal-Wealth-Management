@@ -710,3 +710,7 @@ Phase 4B is read-only. It never performs IMAP mutations, auto-reply, forwarding,
 Phase 4C.1 mutation primitives can still be blocked by design. Check `[agent].mode`, `[mail.imap_mutations].enabled`, dry-run status, UIDVALIDITY, and per-account IMAP capability output before treating a blocked mutation as a runtime failure.
 
 Phase 4C.3A AI triggers are also preview-only by design. A matched AI trigger should produce `mail_processing_events.event_type='ai_trigger_matched'` with `outcome='dry_run'`; it should not move mail, mark flags, send iMessage, reply, forward, delete, unsubscribe, or call webhooks.
+
+Phase 4D.1 adds Control Center approvals, but approval is still not execution. A matched AI trigger should create a pending `mail_action_approvals` row in `data/agent.db`; the operator must approve it and then explicitly run an execution attempt. If the result is `blocked`, inspect the execution status before treating it as a failure: common expected values are `mode_blocked`, `mutation_disabled`, `dry_run`, `unsupported`, and UIDVALIDITY/capability failures from the IMAP layer.
+
+There is no bulk approval path. Unsupported actions such as `send_imessage`, reply, forward, delete, expunge, unsubscribe, and webhooks should remain blocked even after approval.

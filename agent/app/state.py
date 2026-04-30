@@ -304,6 +304,60 @@ class AgentState:
                 ON mail_processing_events(message_id);
             CREATE INDEX IF NOT EXISTS idx_mail_processing_events_created
                 ON mail_processing_events(created_at);
+
+            -- ── Phase 4D.1 operator approval queue ──────────────────
+            CREATE TABLE IF NOT EXISTS mail_action_approvals (
+                approval_id TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                source_id TEXT,
+                message_key TEXT,
+                account_id TEXT,
+                folder TEXT,
+                uidvalidity TEXT,
+                imap_uid INTEGER,
+                subject TEXT,
+                sender TEXT,
+                received_at TEXT,
+                proposed_action_type TEXT NOT NULL,
+                proposed_target TEXT,
+                proposed_value_json TEXT,
+                reason TEXT,
+                ai_category TEXT,
+                ai_urgency_score INTEGER,
+                ai_confidence REAL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                decided_at TEXT,
+                decided_by TEXT,
+                decision_note TEXT,
+                executed_at TEXT,
+                execution_status TEXT,
+                execution_result_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(status IN (
+                    'pending','approved','rejected','expired',
+                    'executed','failed','blocked')),
+                CHECK(source_type IN ('ai_trigger','manual','rule_preview'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_action_approvals_status_requested
+                ON mail_action_approvals(status, requested_at);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_approvals_message
+                ON mail_action_approvals(message_key);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_approvals_source
+                ON mail_action_approvals(source_type, source_id);
+            DROP INDEX IF EXISTS idx_mail_action_approval_dedupe_pending;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_action_approval_dedupe_pending
+                ON mail_action_approvals(
+                    source_type,
+                    COALESCE(source_id, ''),
+                    COALESCE(message_key, ''),
+                    proposed_action_type,
+                    COALESCE(proposed_target, ''),
+                    COALESCE(proposed_value_json, '')
+                )
+                WHERE status = 'pending';
             """)
             conn.commit()
 
@@ -756,13 +810,25 @@ class AgentState:
             return results
         with self._connect() as conn:
             row = conn.execute("""
-                SELECT message_id, account_id, bridge_id
+                SELECT message_id, account_id, bridge_id, folder,
+                       uidvalidity, imap_uid, sender, subject, received_at
                 FROM mail_ai_queue
                 WHERE id = ?
             """, (queue_id,)).fetchone()
         message_id = row[0] if row else f"queue:{queue_id}"
         account_id = row[1] if row else None
         bridge_id = row[2] if row else None
+        message_meta = {
+            "message_key": message_id,
+            "account_id": account_id,
+            "bridge_id": bridge_id,
+            "folder": row[3] if row else None,
+            "uidvalidity": row[4] if row else None,
+            "imap_uid": row[5] if row else None,
+            "sender": row[6] if row else None,
+            "subject": row[7] if row else None,
+            "received_at": row[8] if row else None,
+        }
         now = self._now()
         with self._connect() as conn:
             for result in matched:
@@ -794,6 +860,16 @@ class AgentState:
                     now,
                 ))
             conn.commit()
+        for result in matched:
+            for action in result.get("planned_actions", []):
+                self.create_action_approval(
+                    source_type="ai_trigger",
+                    source_id=result["trigger_id"],
+                    message=message_meta,
+                    action=action,
+                    reason=result.get("reason"),
+                    classification=classification,
+                )
         return results
 
     def ai_trigger_events_for_message(self, message_id: str) -> list[dict]:
@@ -852,6 +928,326 @@ class AgentState:
                 str(error)[:1000], now, queue_id,
             ))
             conn.commit()
+
+    # ── Phase 4D.1 operator approvals ─────────────────────────────────────
+
+    def create_action_approval(
+            self, *, source_type: str, source_id: str | None,
+            message: dict, action: dict, reason: str | None = None,
+            classification: dict | None = None) -> dict:
+        now = self._now()
+        approval_id = str(uuid.uuid4())
+        message_key = (
+            message.get("message_key")
+            or message.get("message_id")
+            or message.get("bridge_id")
+        )
+        action_type = str(action.get("action_type") or "")
+        target = action.get("target")
+        proposed_value = action.get("value")
+        classification = classification or {}
+        payload = {
+            "approval_id": approval_id,
+            "source_type": source_type,
+            "source_id": source_id,
+            "message_key": message_key,
+            "account_id": message.get("account_id") or message.get("imap_account"),
+            "folder": message.get("folder") or message.get("imap_folder"),
+            "uidvalidity": (
+                message.get("uidvalidity") or message.get("imap_uidvalidity")),
+            "imap_uid": message.get("imap_uid"),
+            "subject": message.get("subject"),
+            "sender": message.get("sender") or message.get("sender_email"),
+            "received_at": (
+                message.get("received_at") or message.get("date_received")),
+            "proposed_action_type": action_type,
+            "proposed_target": target,
+            "proposed_value_json": (
+                json.dumps(proposed_value, sort_keys=True)
+                if proposed_value is not None else None),
+            "reason": reason or action.get("reason"),
+            "ai_category": classification.get("category"),
+            "ai_urgency_score": classification.get("urgency_score"),
+            "ai_confidence": classification.get("confidence"),
+            "status": "pending",
+            "requested_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO mail_action_approvals
+                    (approval_id, source_type, source_id, message_key,
+                     account_id, folder, uidvalidity, imap_uid, subject,
+                     sender, received_at, proposed_action_type,
+                     proposed_target, proposed_value_json, reason,
+                     ai_category, ai_urgency_score, ai_confidence, status,
+                     requested_at, created_at, updated_at)
+                VALUES (:approval_id, :source_type, :source_id, :message_key,
+                        :account_id, :folder, :uidvalidity, :imap_uid,
+                        :subject, :sender, :received_at,
+                        :proposed_action_type, :proposed_target,
+                        :proposed_value_json, :reason, :ai_category,
+                        :ai_urgency_score, :ai_confidence, :status,
+                        :requested_at, :created_at, :updated_at)
+            """, payload)
+            inserted = conn.execute("SELECT changes()").fetchone()[0] == 1
+            row = conn.execute("""
+                SELECT * FROM mail_action_approvals
+                WHERE source_type = ?
+                  AND COALESCE(source_id, '') = COALESCE(?, '')
+                  AND COALESCE(message_key, '') = COALESCE(?, '')
+                  AND proposed_action_type = ?
+                  AND COALESCE(proposed_target, '') = COALESCE(?, '')
+                  AND COALESCE(proposed_value_json, '') = COALESCE(?, '')
+                  AND status = 'pending'
+                ORDER BY requested_at DESC LIMIT 1
+            """, (
+                source_type, source_id, message_key, action_type, target,
+                payload["proposed_value_json"],
+            )).fetchone()
+            conn.commit()
+        result = self._approval_from_row(row)
+        if inserted and result:
+            self.write_approval_event(
+                result,
+                "approval_created",
+                "pending",
+                {"reason": payload["reason"], "dry_run_preview": True},
+            )
+        return result
+
+    def expire_pending_approvals(self, expiry_hours: int = 72) -> int:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=expiry_hours)
+        ).isoformat()
+        now = self._now()
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM mail_action_approvals
+                WHERE status = 'pending' AND requested_at < ?
+            """, (cutoff,)).fetchall()
+            for row in rows:
+                approval = self._approval_from_row(row)
+                conn.execute("""
+                    UPDATE mail_action_approvals
+                    SET status = 'expired', updated_at = ?
+                    WHERE approval_id = ? AND status = 'pending'
+                """, (now, approval["approval_id"]))
+            conn.commit()
+        for row in rows:
+            approval = self._approval_from_row(row)
+            approval["status"] = "expired"
+            self.write_approval_event(
+                approval, "approval_expired", "expired",
+                {"reason": "approval_expiry_hours elapsed"},
+            )
+        return len(rows)
+
+    def list_action_approvals(
+            self, *, status: str | None = "pending",
+            source_type: str | None = None, limit: int = 50,
+            expiry_hours: int = 72) -> list[dict]:
+        self.expire_pending_approvals(expiry_hours)
+        clauses = []
+        params = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if source_type:
+            clauses.append("source_type = ?")
+            params.append(source_type)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(f"""
+                SELECT * FROM mail_action_approvals
+                {where}
+                ORDER BY requested_at DESC
+                LIMIT ?
+            """, (*params, int(limit))).fetchall()
+        return [self._approval_from_row(row) for row in rows]
+
+    def get_action_approval(self, approval_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM mail_action_approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return self._approval_from_row(row) if row else None
+
+    def approve_action_approval(
+            self, approval_id: str, *, decided_by: str = "operator",
+            decision_note: str | None = None) -> dict:
+        return self._decide_action_approval(
+            approval_id, "approved", "approval_approved",
+            decided_by=decided_by, decision_note=decision_note)
+
+    def reject_action_approval(
+            self, approval_id: str, *, decided_by: str = "operator",
+            decision_note: str | None = None) -> dict:
+        return self._decide_action_approval(
+            approval_id, "rejected", "approval_rejected",
+            decided_by=decided_by, decision_note=decision_note)
+
+    def expire_action_approval(self, approval_id: str) -> dict:
+        approval = self.get_action_approval(approval_id)
+        if not approval:
+            raise KeyError("Approval not found")
+        if approval["status"] != "pending":
+            raise ValueError("Only pending approvals can be expired")
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE mail_action_approvals
+                SET status = 'expired', updated_at = ?
+                WHERE approval_id = ? AND status = 'pending'
+            """, (now, approval_id))
+            changed = conn.execute("SELECT changes()").fetchone()[0]
+            conn.commit()
+        if changed != 1:
+            raise ValueError("Only pending approvals can be expired")
+        updated = self.get_action_approval(approval_id)
+        self.write_approval_event(
+            updated, "approval_expired", "expired", {})
+        return updated
+
+    def mark_approval_execution_started(self, approval_id: str) -> dict:
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE mail_action_approvals
+                SET execution_status = 'started', updated_at = ?
+                WHERE approval_id = ?
+                  AND status = 'approved'
+                  AND execution_status IS NULL
+                  AND executed_at IS NULL
+            """, (now, approval_id))
+            changed = conn.execute("SELECT changes()").fetchone()[0]
+            conn.commit()
+        approval = self.get_action_approval(approval_id)
+        if not approval:
+            raise KeyError("Approval not found")
+        if changed != 1:
+            raise ValueError("Only approved approvals can execute")
+        self.write_approval_event(
+            approval, "approval_execution_started", "approved", {})
+        return approval
+
+    def finish_action_approval_execution(
+            self, approval_id: str, *, status: str,
+            execution_status: str, result: dict | None = None) -> dict:
+        if status not in {"executed", "blocked", "failed"}:
+            raise ValueError(f"Invalid execution terminal status: {status}")
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE mail_action_approvals
+                SET status = ?, executed_at = ?, execution_status = ?,
+                    execution_result_json = ?, updated_at = ?
+                WHERE approval_id = ?
+                  AND status = 'approved'
+                  AND execution_status = 'started'
+            """, (
+                status,
+                now,
+                execution_status,
+                json.dumps(result or {}, sort_keys=True),
+                now,
+                approval_id,
+            ))
+            changed = conn.execute("SELECT changes()").fetchone()[0]
+            conn.commit()
+        if changed != 1:
+            raise ValueError("Approval execution is not in progress")
+        updated = self.get_action_approval(approval_id)
+        event = {
+            "executed": "approval_executed",
+            "blocked": "approval_blocked",
+            "failed": "approval_failed",
+        }[status]
+        self.write_approval_event(
+            updated, event, execution_status, result or {})
+        return updated
+
+    def write_approval_event(
+            self, approval: dict, event_type: str, outcome: str,
+            details: dict | None = None) -> None:
+        details = {
+            **(details or {}),
+            "approval_id": approval.get("approval_id"),
+            "source_type": approval.get("source_type"),
+            "source_id": approval.get("source_id"),
+            "message_key": approval.get("message_key"),
+            "proposed_action_type": approval.get("proposed_action_type"),
+            "proposed_target": approval.get("proposed_target"),
+            "status": approval.get("status"),
+            "execution_status": approval.get("execution_status"),
+            "operator": approval.get("decided_by"),
+        }
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO mail_processing_events
+                    (message_id, account_id, bridge_id, rule_id, action_type,
+                     event_type, outcome, details_json, created_at)
+                VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+            """, (
+                approval.get("message_key") or approval.get("approval_id"),
+                approval.get("account_id"),
+                approval.get("proposed_action_type"),
+                event_type,
+                outcome,
+                json.dumps(details, sort_keys=True),
+                self._now(),
+            ))
+            conn.commit()
+
+    def _decide_action_approval(
+            self, approval_id: str, status: str, event_type: str, *,
+            decided_by: str, decision_note: str | None) -> dict:
+        approval = self.get_action_approval(approval_id)
+        if not approval:
+            raise KeyError("Approval not found")
+        if approval["status"] != "pending":
+            raise ValueError("Only pending approvals can be decided")
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE mail_action_approvals
+                SET status = ?, decided_at = ?, decided_by = ?,
+                    decision_note = ?, updated_at = ?
+                WHERE approval_id = ? AND status = 'pending'
+            """, (
+                status, now, decided_by, decision_note, now, approval_id,
+            ))
+            changed = conn.execute("SELECT changes()").fetchone()[0]
+            conn.commit()
+        if changed != 1:
+            raise ValueError("Only pending approvals can be decided")
+        updated = self.get_action_approval(approval_id)
+        self.write_approval_event(
+            updated, event_type, status,
+            {"decision_note": decision_note})
+        return updated
+
+    def _approval_from_row(self, row) -> dict:
+        keys = [
+            "approval_id", "source_type", "source_id", "message_key",
+            "account_id", "folder", "uidvalidity", "imap_uid", "subject",
+            "sender", "received_at", "proposed_action_type",
+            "proposed_target", "proposed_value_json", "reason",
+            "ai_category", "ai_urgency_score", "ai_confidence", "status",
+            "requested_at", "decided_at", "decided_by", "decision_note",
+            "executed_at", "execution_status", "execution_result_json",
+            "created_at", "updated_at",
+        ]
+        payload = dict(zip(keys, row))
+        payload["proposed_value"] = (
+            json.loads(payload["proposed_value_json"])
+            if payload.get("proposed_value_json") else None)
+        payload["execution_result"] = (
+            json.loads(payload["execution_result_json"])
+            if payload.get("execution_result_json") else None)
+        return payload
 
     def find_ai_reprocess_source(self, message_id: str) -> dict | None:
         candidates = [message_id]

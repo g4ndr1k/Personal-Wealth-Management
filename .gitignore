@@ -37,7 +37,6 @@ __pycache__/
 # Claude Code session data
 .claude/
 .qwen/
-.serena/
 
 # Local AI memory tooling
 .mempalace-src/
@@ -65,3 +64,4 @@ pwa/dist/
 data/
 CLAUDE.md
 finance_data.db
+.truecourse/

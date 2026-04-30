@@ -82,6 +82,8 @@ Phase 4C.1 implements IMAP mutation primitives only: capability probing, UIDVALI
 
 Phase 4C.3A adds preview-only AI trigger evaluation after validated classifications are persisted. Trigger matching is deterministic over category, urgency, confidence, needs-reply, summary, and reason fields. Matched triggers write `ai_trigger_matched` audit events with planned dry-run actions; they do not call IMAP helpers, bridge iMessage send, reply, forward, delete, expunge, unsubscribe, or webhooks.
 
+Phase 4D.1 adds the operator approval layer. AI trigger matches create `mail_action_approvals` rows and `approval_created` audit events; they still do not execute actions. Operators may approve or reject in the dashboard Control Center. Execution is a separate explicit step after approval and reuses the same gated mutation path, so `[agent].mode`, `[mail.imap_mutations].enabled`, dry-run defaults, UIDVALIDITY, folder, and IMAP capability checks still decide whether an approved action is executed, blocked, or failed. Bulk approval is absent, and unsupported/dangerous actions remain blocked.
+
 For detailed mail-agent architecture, API boundaries, rules, credential handling, safe actions, and troubleshooting, see [MAIL_AGENT.md](MAIL_AGENT.md).
 
 ## Bridge, API, And PWA Responsibilities
@@ -220,7 +222,7 @@ Current production provider order is `["rule_based"]`. `rule_based` is a support
 |---|---|
 | `output/xls/ALL_TRANSACTIONS.xlsx` | Immutable parser output used to rebuild SQLite. |
 | `data/finance.db` | Authoritative edited finance/PWM store. |
-| `data/agent.db` | Mail-agent runtime state, including Phase 4A mail rules, rule actions, rule audit events, needs-reply rows, Phase 4B AI queue/classification tables, and Phase 4C.3A preview-only AI trigger rules. |
+| `data/agent.db` | Mail-agent runtime state, including Phase 4A mail rules, rule actions, rule audit events, needs-reply rows, Phase 4B AI queue/classification tables, Phase 4C.3A preview-only AI trigger rules, and Phase 4D.1 operator approvals. |
 | `transactions` | Raw imported transaction rows keyed by hash. |
 | `category_overrides` | User edits that survive re-import. |
 | `transactions_resolved` | View merging base rows with overrides. |

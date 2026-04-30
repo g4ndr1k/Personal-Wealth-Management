@@ -23,6 +23,8 @@ from .rules import (
     evaluate_message,
     validate_action_type,
     validate_operator,
+    _execute_action,
+    _execute_mutation_action,
 )
 from .imap_source import probe_capabilities
 from .config_manager import (
@@ -231,6 +233,10 @@ class AiTriggerPreview(BaseModel):
     message_id: Optional[str] = None
     queue_id: Optional[int] = None
 
+class ApprovalDecision(BaseModel):
+    decision_note: Optional[str] = Field(None, max_length=1000)
+    decided_by: Optional[str] = Field("operator", max_length=200)
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _normalize_app_password(password: str) -> str:
@@ -356,6 +362,142 @@ def _classification_for_trigger_preview(
         return MailAiClassification.model_validate(raw).model_dump()
     finally:
         conn.close()
+
+def _approval_settings(settings: dict) -> dict[str, Any]:
+    cfg = settings.get("mail", {}).get("approvals", {})
+    return {
+        "enabled": bool(cfg.get("enabled", True)),
+        "require_approval_for_ai_actions": True,
+        "approval_expiry_hours": int(cfg.get("approval_expiry_hours", 72)),
+        "allow_bulk_approve": False,
+    }
+
+def _approval_message(approval: dict) -> dict[str, Any]:
+    return {
+        "bridge_id": approval.get("message_key") or approval.get("approval_id"),
+        "message_id": approval.get("message_key"),
+        "message_key": approval.get("message_key"),
+        "imap_account": approval.get("account_id"),
+        "imap_folder": approval.get("folder"),
+        "imap_uidvalidity": approval.get("uidvalidity"),
+        "imap_uid": approval.get("imap_uid"),
+        "sender_email": approval.get("sender"),
+        "subject": approval.get("subject"),
+        "date_received": approval.get("received_at"),
+    }
+
+def _approval_action(approval: dict) -> dict[str, Any]:
+    return {
+        "id": None,
+        "rule_id": None,
+        "action_type": approval["proposed_action_type"],
+        "target": approval.get("proposed_target"),
+        "value_json": approval.get("proposed_value_json"),
+        "stop_processing": False,
+    }
+
+def _approval_rule(approval: dict) -> dict[str, Any]:
+    return {
+        "rule_id": None,
+        "name": f"approval:{approval['approval_id']}",
+    }
+
+def _mutation_executor(settings: dict):
+    def execute(action_type: str, message: dict, target, *, dry_run: bool):
+        from .imap_source import move_message_by_uid, store_flags_by_uid
+
+        account = _find_account(str(message.get("imap_account") or ""))
+        if not account:
+            raise RuntimeError(
+                f"Unknown IMAP account: {message.get('imap_account')}")
+        account = {
+            **account,
+            "imap_mutations": settings.get("mail", {}).get("imap_mutations", {}),
+        }
+        folder = message.get("imap_folder")
+        uidvalidity = message.get("imap_uidvalidity")
+        uid = message.get("imap_uid")
+        if action_type == "move_to_folder":
+            return move_message_by_uid(
+                account, folder, uidvalidity, uid, target,
+                dry_run=dry_run)
+        flag_map = {
+            "mark_read": (["\\Seen"], []),
+            "mark_unread": ([], ["\\Seen"]),
+            "mark_flagged": (["\\Flagged"], []),
+            "unmark_flagged": ([], ["\\Flagged"]),
+        }
+        add_flags, remove_flags = flag_map[action_type]
+        return store_flags_by_uid(
+            account, folder, uidvalidity, uid,
+            add_flags=add_flags,
+            remove_flags=remove_flags,
+            dry_run=dry_run)
+    return execute
+
+def _execute_approved_action(state: AgentState, approval: dict) -> dict:
+    action_type = approval["proposed_action_type"]
+    blocked_actions = {
+        "send_imessage",
+        "reply",
+        "auto_reply",
+        "forward",
+        "delete",
+        "expunge",
+        "unsubscribe",
+        "webhook",
+        "external_webhook",
+        "notify_dashboard",
+    }
+    if action_type in blocked_actions:
+        return {
+            "status": "blocked",
+            "execution_status": "unsupported",
+            "reason": f"{action_type} execution is disabled in Phase 4D.1",
+        }
+    message = _approval_message(approval)
+    action = _approval_action(approval)
+    rule = _approval_rule(approval)
+    if action_type == "add_to_needs_reply":
+        outcome = _execute_action(state, message, rule, action)
+        return {
+            "status": "executed",
+            "execution_status": "completed",
+            "result": outcome,
+        }
+    if action_type not in MUTATION_ACTIONS:
+        return {
+            "status": "blocked",
+            "execution_status": "unsupported",
+            "reason": f"Unsupported approval action: {action_type}",
+        }
+
+    settings = _get_settings()
+    cfg = settings.get("mail", {}).get("imap_mutations", {})
+    outcome = _execute_mutation_action(
+        state,
+        message,
+        rule,
+        action,
+        {
+            "mode": _resolve_mode(settings),
+            "config": cfg,
+            "dry_run": bool(cfg.get("dry_run_default", True)),
+            "executor": _mutation_executor(settings),
+        },
+    )
+    execution_status = str(outcome.get("status") or "failed")
+    if execution_status == "completed":
+        status = "executed"
+    elif execution_status == "failed":
+        status = "failed"
+    else:
+        status = "blocked"
+    return {
+        "status": status,
+        "execution_status": execution_status,
+        "result": outcome,
+    }
 
 
 def _normalize_rule_action(action: RuleActionIn) -> RuleActionIn:
@@ -916,6 +1058,111 @@ async def preview_ai_triggers(data: AiTriggerPreview):
 )
 async def get_message_ai_triggers(message_id: str):
     return _ensure_state().ai_trigger_events_for_message(message_id)
+
+@router.get("/approvals", dependencies=[Depends(require_api_key)])
+async def list_approvals(
+        status: Optional[str] = Query("pending", max_length=50),
+        source_type: Optional[str] = Query(None, max_length=50),
+        limit: int = Query(50, ge=1, le=200)):
+    state = _ensure_state()
+    settings = _get_settings()
+    approval_cfg = _approval_settings(settings)
+    return state.list_action_approvals(
+        status=status,
+        source_type=source_type,
+        limit=limit,
+        expiry_hours=approval_cfg["approval_expiry_hours"],
+    )
+
+@router.get(
+    "/approvals/{approval_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def get_approval(approval_id: str):
+    approval = _ensure_state().get_action_approval(approval_id)
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return approval
+
+@router.post(
+    "/approvals/{approval_id}/approve",
+    dependencies=[Depends(require_api_key)],
+)
+async def approve_approval(approval_id: str, data: ApprovalDecision):
+    state = _ensure_state()
+    approval_cfg = _approval_settings(_get_settings())
+    state.expire_pending_approvals(approval_cfg["approval_expiry_hours"])
+    try:
+        return state.approve_action_approval(
+            approval_id,
+            decided_by=data.decided_by or "operator",
+            decision_note=data.decision_note,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+@router.post(
+    "/approvals/{approval_id}/reject",
+    dependencies=[Depends(require_api_key)],
+)
+async def reject_approval(approval_id: str, data: ApprovalDecision):
+    state = _ensure_state()
+    approval_cfg = _approval_settings(_get_settings())
+    state.expire_pending_approvals(approval_cfg["approval_expiry_hours"])
+    try:
+        return state.reject_action_approval(
+            approval_id,
+            decided_by=data.decided_by or "operator",
+            decision_note=data.decision_note,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+@router.post(
+    "/approvals/{approval_id}/expire",
+    dependencies=[Depends(require_api_key)],
+)
+async def expire_approval(approval_id: str):
+    try:
+        return _ensure_state().expire_action_approval(approval_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+@router.post(
+    "/approvals/{approval_id}/execute",
+    dependencies=[Depends(require_api_key)],
+)
+async def execute_approval(approval_id: str):
+    state = _ensure_state()
+    try:
+        approval = state.mark_approval_execution_started(approval_id)
+        result = _execute_approved_action(state, approval)
+        return state.finish_action_approval_execution(
+            approval_id,
+            status=result["status"],
+            execution_status=result["execution_status"],
+            result=result,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        approval = state.get_action_approval(approval_id)
+        if approval and approval.get("status") == "approved":
+            return state.finish_action_approval_execution(
+                approval_id,
+                status="failed",
+                execution_status="failed",
+                result={"error": str(exc)[:500]},
+            )
+        raise HTTPException(status_code=500, detail=str(exc))
 
 @router.post(
     "/messages/{message_id}/reprocess",

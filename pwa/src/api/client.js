@@ -6,7 +6,7 @@ const DESKTOP_MIN_WIDTH_PX = 1024
 const LAYOUT_STORAGE_KEY = 'pwa_layout_mode'
 // Security note: VITE_FINANCE_API_KEY is embedded in the JS bundle at build time and is
 // visible to anyone who can load the PWA. This is intentional — the app is only accessible
-// via Tailscale, so network-level ACLs are the real auth boundary. Do not reuse this key
+// via local network or Cloudflare Access, so network-level ACLs are the real auth boundary. Do not reuse this key
 // for any other service or store sensitive credentials here.
 const API_KEY = import.meta.env.VITE_FINANCE_API_KEY || ''
 const CF_CLIENT_ID = import.meta.env.VITE_CF_ACCESS_CLIENT_ID || ''

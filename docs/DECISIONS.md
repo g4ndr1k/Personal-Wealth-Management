@@ -209,3 +209,24 @@ Keeping a separate store limits blast radius, preserves a clean reconciliation b
 - Main finance Settings uses `/api/household/*` proxy/admin endpoints for household categories, recent expenses, and cash pools.
 - Reconciliation into the main finance model must be explicit.
 - Household deployment and health checks belong in operations docs, not a standalone implementation plan.
+
+## Require Operator Approval For AI-Triggered Action Attempts
+
+### Decision
+
+Phase 4D.1 uses a Control Center approval queue for AI-triggered action suggestions. AI trigger matches create pending rows in `data/agent.db:mail_action_approvals`; they never execute directly.
+
+### Context
+
+The mail agent now has safe IMAP mutation primitives, but AI classification and trigger matching can still be wrong. The dangerous boundary is not only whether an action is allowed, but whether an AI suggestion can cross from planning into mailbox or operator-visible side effects without a human checkpoint.
+
+### Rationale
+
+Approval keeps the human operator in the path while preserving the existing safety ladder. An approval records intent, not entitlement: execution remains a separate attempt and still runs through mode, mutation config, dry-run, UIDVALIDITY, IMAP capability, and action allow/block checks.
+
+### Consequences
+
+- No autonomous AI-triggered execution exists in Phase 4D.1.
+- Bulk approval is intentionally absent.
+- Rejected, expired, already executed, blocked, or failed approval rows are terminal for execution.
+- Unsupported actions such as `send_imessage`, reply, forward, delete, expunge, unsubscribe, and webhooks remain blocked even after approval.

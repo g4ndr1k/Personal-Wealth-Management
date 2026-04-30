@@ -48,7 +48,7 @@ IMAP is enabled only when `[mail.imap].accounts` contains real account entries. 
 
 State is tracked per `(account, folder)` using `last_uid` and `uidvalidity`. A UIDVALIDITY reset writes an event and performs a bounded lookback scan. Checkpoints are advanced by the orchestrator after message persistence, not inside the fetcher.
 
-Phase 4A deterministic mail-rule state also belongs in `data/agent.db`.
+Phase 4A deterministic mail-rule state also belongs in `data/agent.db`. Phase 4D.1 Control Center approval state lives there as `mail_action_approvals`; AI-triggered actions create approval items, not autonomous execution.
 This includes `mail_rules`, `mail_rule_conditions`, `mail_rule_actions`,
 `mail_processing_events`, and `mail_needs_reply`. Future AI queue and
 classification state (`mail_ai_queue`, `mail_ai_classifications`, categories,

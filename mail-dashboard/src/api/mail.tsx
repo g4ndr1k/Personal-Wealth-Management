@@ -199,6 +199,37 @@ export interface MailProcessingEvent {
   created_at: string;
 }
 
+export interface MailActionApproval {
+  approval_id: string;
+  source_type: 'ai_trigger' | 'manual' | 'rule_preview';
+  source_id: string | null;
+  message_key: string | null;
+  account_id: string | null;
+  folder: string | null;
+  uidvalidity: string | null;
+  imap_uid: number | null;
+  subject: string | null;
+  sender: string | null;
+  received_at: string | null;
+  proposed_action_type: string;
+  proposed_target: string | null;
+  proposed_value: any;
+  reason: string | null;
+  ai_category: string | null;
+  ai_urgency_score: number | null;
+  ai_confidence: number | null;
+  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'executed' | 'failed' | 'blocked';
+  requested_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  decision_note: string | null;
+  executed_at: string | null;
+  execution_status: string | null;
+  execution_result: any;
+  created_at: string;
+  updated_at: string;
+}
+
 export type MailRuleInput = Omit<MailRule, 'rule_id' | 'created_at' | 'updated_at'>;
 
 interface ApiContextType {
@@ -230,6 +261,11 @@ interface ApiContextType {
   updateAiTrigger: (triggerId: string, data: Partial<AiTriggerInput>) => Promise<AiTrigger>;
   deleteAiTrigger: (triggerId: string) => Promise<any>;
   previewAiTriggers: (classification: Partial<AiClassification>) => Promise<AiTriggerPreviewResult>;
+  listApprovals: (status?: string, limit?: number) => Promise<MailActionApproval[]>;
+  approveApproval: (approvalId: string, decision_note?: string) => Promise<MailActionApproval>;
+  rejectApproval: (approvalId: string, decision_note?: string) => Promise<MailActionApproval>;
+  executeApproval: (approvalId: string) => Promise<MailActionApproval>;
+  expireApproval: (approvalId: string) => Promise<MailActionApproval>;
 }
 
 const ApiContext = createContext<ApiContextType | null>(null);
@@ -481,6 +517,40 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     });
   }, [fetchWithAuth]);
 
+  const listApprovals = useCallback(async (status = 'pending', limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (status) params.set('status', status);
+    return fetchWithAuth(`/api/mail/approvals?${params.toString()}`);
+  }, [fetchWithAuth]);
+
+  const approveApproval = useCallback(async (approvalId: string, decision_note = '') => {
+    return fetchWithAuth(`/api/mail/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision_note }),
+    });
+  }, [fetchWithAuth]);
+
+  const rejectApproval = useCallback(async (approvalId: string, decision_note = '') => {
+    return fetchWithAuth(`/api/mail/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision_note }),
+    });
+  }, [fetchWithAuth]);
+
+  const executeApproval = useCallback(async (approvalId: string) => {
+    return fetchWithAuth(`/api/mail/approvals/${encodeURIComponent(approvalId)}/execute`, {
+      method: 'POST',
+    });
+  }, [fetchWithAuth]);
+
+  const expireApproval = useCallback(async (approvalId: string) => {
+    return fetchWithAuth(`/api/mail/approvals/${encodeURIComponent(approvalId)}/expire`, {
+      method: 'POST',
+    });
+  }, [fetchWithAuth]);
+
   useEffect(() => {
     refresh();
     const interval = setInterval(refresh, 30000);
@@ -495,7 +565,9 @@ export function ApiProvider({ children }: { children: ReactNode }) {
         listRules, createRule, updateRule, deleteRule, reorderRules,
         previewRules, listProcessingEvents, getAiSettings, updateAiSettings,
         testAi, reprocessMessage, listAiTriggers, createAiTrigger,
-        updateAiTrigger, deleteAiTrigger, previewAiTriggers
+        updateAiTrigger, deleteAiTrigger, previewAiTriggers,
+        listApprovals, approveApproval, rejectApproval, executeApproval,
+        expireApproval
       }}
     >
       {children}

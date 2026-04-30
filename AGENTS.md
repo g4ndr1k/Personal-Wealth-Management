@@ -12,9 +12,9 @@ Internet
 codingholic.fun  (public · Next.js · port 3003 on NAS)
   ├── /about, /articles — public reading pages
   ├── /future-public-web — planned BaZi public app
-  └── Tool cards → private tools (clearly labelled "Requires Tailscale")
+  └── Tool cards → private tools (clearly labelled "Private Access Required")
 
-Tailscale VPN (private access only)
+Private Network / Cloudflare Access
   ├── mac.codingholic.fun  → Mac finance API + PWA (:8090) — read/write
   └── ro.codingholic.fun   → NAS finance API + PWA (:8090) — read-only demo
 ```
@@ -24,8 +24,8 @@ Tailscale VPN (private access only)
 | Surface | URL | Access | Notes |
 |---|---|---|---|
 | Public homepage | codingholic.fun | Open internet | Next.js v2 on NAS port 3003 |
-| Finance dashboard | mac.codingholic.fun | Tailscale only | Mac-hosted, read/write |
-| NAS read-only demo | ro.codingholic.fun | Tailscale only | Synology DS920+, `FINANCE_READ_ONLY=true` |
+| Finance dashboard | mac.codingholic.fun | Private / CF Access | Mac-hosted, read/write |
+| NAS read-only demo | ro.codingholic.fun | Private / CF Access | Synology DS920+, `FINANCE_READ_ONLY=true` |
 
 ---
 
@@ -128,7 +128,7 @@ This project has four layers that run as separate processes:
 
 Next.js 14 + Tailwind + Framer Motion app that acts as the public face of the system.
 - Public pages (about, articles, future BaZi app) are reachable by anyone.
-- Tool cards for private services are visible but clearly marked "Requires Tailscale".
+- Tool cards for private services are visible but clearly marked "Private Access Required".
 - Served from Synology NAS via Docker on port 3003, fronted by Cloudflare Tunnel.
 - Content lives in `app/lib/content.ts` (`tools[]`, `articles[]`).
 
@@ -166,7 +166,7 @@ Vue 3 + Vite + Pinia + Vue Router. Bundled as static files and served by FastAPI
 
 ### NAS Read-Only Replica
 
-A second Docker container runs on the Synology DS920+ with `FINANCE_READ_ONLY=true`. All write endpoints return 403. The database is synced from the Mac via SSH after each import. Mobile users on Tailscale bookmark the NAS URL for faster read access.
+A second Docker container runs on the Synology DS920+ with `FINANCE_READ_ONLY=true`. All write endpoints return 403. The database is synced from the Mac via SSH after each import. Mobile users on private network bookmark the NAS URL for faster read access.
 
 ---
 
@@ -202,8 +202,8 @@ VITE_FINANCE_API_KEY=your-api-key-here
 
 ## Security Notes
 
-- **Network boundary:** private tools are only accessible via Tailscale. No public port forwarding.
-- **API key in bundle:** `VITE_FINANCE_API_KEY` is embedded in the built PWA JS — visible in DevTools. This is intentional; Tailscale ACLs are the real auth boundary. Do not reuse this key elsewhere.
+- **Network boundary:** private tools are only accessible via local network or Cloudflare Access. No public port forwarding.
+- **API key in bundle:** `VITE_FINANCE_API_KEY` is embedded in the built PWA JS — visible in DevTools. This is intentional; network-level ACLs (CF Access/local) are the real auth boundary. Do not reuse this key elsewhere.
 - **CORS:** `cors_origins` must not contain `"*"` — the API asserts this at startup.
 - **Rate limiting:** bridge `/alerts/send` is capped by `max_alerts_per_hour`; all `/api/*` endpoints are rate-limited at 60 req/min per path; all `limit=` params are server-side capped at 1000.
 - **Injection defenses:** NAS SSH remote path uses `shlex.quote()`; mdfind predicate validates RFC 2822 message-ID; PDF password tempfiles use `chmod 0o600` + zero-wipe before deletion.

@@ -145,16 +145,19 @@ def test_ai_completion_evaluates_enabled_triggers_and_writes_audit(tmp_path):
             "SELECT event_type, outcome, details_json "
             "FROM mail_processing_events ORDER BY id"
         ).fetchall()
-    assert [event[0] for event in events] == [
+    trigger_events = [event for event in events if event[0] == "ai_trigger_matched"]
+    approval_events = [event for event in events if event[0] == "approval_created"]
+    assert [event[0] for event in trigger_events] == [
         "ai_trigger_matched",
         "ai_trigger_matched",
     ]
+    assert len(approval_events) == 6
     assert [state.preview_ai_triggers(_classification())[i]["trigger_id"] for i in range(2)] == [
         second["trigger_id"],
         first["trigger_id"],
     ]
-    assert events[0][1] == "dry_run"
-    assert "Phase 4C.3A preview-only" in events[0][2]
+    assert trigger_events[0][1] == "dry_run"
+    assert "Phase 4C.3A preview-only" in trigger_events[0][2]
 
 
 def test_trigger_evaluation_failure_does_not_fail_ai_classification(tmp_path, monkeypatch):

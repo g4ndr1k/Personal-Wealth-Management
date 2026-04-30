@@ -21,16 +21,20 @@ ALLOWED_TRIGGER_ACTIONS = {
     "send_imessage",
     "move_to_folder",
     "mark_read",
+    "mark_unread",
     "mark_flagged",
+    "unmark_flagged",
     "add_to_needs_reply",
 }
 
 DANGEROUS_TRIGGER_ACTIONS = {
     "delete",
     "expunge",
+    "reply",
     "auto_reply",
     "forward",
     "unsubscribe",
+    "webhook",
     "external_webhook",
 }
 

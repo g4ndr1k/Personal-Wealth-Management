@@ -32,6 +32,12 @@ allow_create_folder = false
 allow_copy_delete_fallback = false
 dry_run_default = true
 
+[mail.approvals]
+enabled = true
+require_approval_for_ai_actions = true
+approval_expiry_hours = 72
+allow_bulk_approve = false
+
 [imessage]
 primary_recipient = "emanuel.adrianto@icloud.com"
 authorized_senders = ["emanuel.adrianto@icloud.com"]
