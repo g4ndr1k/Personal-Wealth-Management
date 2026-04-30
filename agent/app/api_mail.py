@@ -210,6 +210,27 @@ class AiTestRequest(BaseModel):
     received_at: Optional[str] = None
     account_id: Optional[str] = None
 
+class AiTriggerIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    enabled: bool = True
+    priority: int = 100
+    conditions_json: dict[str, Any]
+    actions_json: Any
+    cooldown_seconds: int = Field(3600, ge=0)
+
+class AiTriggerPatch(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    enabled: Optional[bool] = None
+    priority: Optional[int] = None
+    conditions_json: Optional[dict[str, Any]] = None
+    actions_json: Optional[Any] = None
+    cooldown_seconds: Optional[int] = Field(None, ge=0)
+
+class AiTriggerPreview(BaseModel):
+    classification: Optional[dict[str, Any]] = None
+    message_id: Optional[str] = None
+    queue_id: Optional[int] = None
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _normalize_app_password(password: str) -> str:
@@ -288,6 +309,53 @@ def _validate_rule_payload(conditions: list[RuleConditionIn],
             raise ValueError("move_to_folder requires a non-empty target")
         if action.action_type in MUTATION_ACTIONS - {"move_to_folder"} and target:
             raise ValueError(f"{action.action_type} does not accept a target")
+
+def _classification_for_trigger_preview(
+        state: AgentState, data: AiTriggerPreview) -> dict[str, Any]:
+    if data.classification:
+        return MailAiClassification.model_validate(data.classification).model_dump()
+    conn = _connect_rw()
+    try:
+        if data.queue_id is not None:
+            row = conn.execute("""
+                SELECT c.category, c.urgency_score, c.confidence,
+                       c.summary, c.raw_json
+                FROM mail_ai_classifications c
+                WHERE c.queue_id = ?
+                ORDER BY c.id DESC LIMIT 1
+            """, (data.queue_id,)).fetchone()
+        elif data.message_id:
+            candidates = [data.message_id]
+            if not data.message_id.startswith(("mkey:", "fkey:")):
+                candidates.extend([
+                    f"mkey:{data.message_id}",
+                    f"fkey:{data.message_id}",
+                ])
+            row = conn.execute("""
+                SELECT c.category, c.urgency_score, c.confidence,
+                       c.summary, c.raw_json
+                FROM mail_ai_classifications c
+                JOIN mail_ai_queue q ON q.id = c.queue_id
+                WHERE q.message_id IN ({})
+                   OR q.bridge_id = ?
+                ORDER BY c.id DESC LIMIT 1
+            """.format(",".join("?" for _ in candidates)),
+                (*candidates, data.message_id)).fetchone()
+        else:
+            raise ValueError(
+                "Provide classification, queue_id, or message_id")
+        if not row:
+            raise ValueError("AI classification not found")
+        raw = json.loads(row["raw_json"] or "{}")
+        raw.setdefault("category", row["category"])
+        raw.setdefault("urgency_score", row["urgency_score"])
+        raw.setdefault("confidence", row["confidence"])
+        raw.setdefault("summary", row["summary"] or "")
+        raw.setdefault("needs_reply", False)
+        raw.setdefault("reason", "")
+        return MailAiClassification.model_validate(raw).model_dump()
+    finally:
+        conn.close()
 
 
 def _normalize_rule_action(action: RuleActionIn) -> RuleActionIn:
@@ -787,6 +855,67 @@ async def test_ai(data: AiTestRequest):
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+@router.get("/ai/triggers", dependencies=[Depends(require_api_key)])
+async def list_ai_triggers():
+    return _ensure_state().list_ai_triggers()
+
+@router.post("/ai/triggers", dependencies=[Depends(require_api_key)])
+async def create_ai_trigger(data: AiTriggerIn):
+    try:
+        return _ensure_state().create_ai_trigger(data.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+@router.patch(
+    "/ai/triggers/{trigger_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def patch_ai_trigger(trigger_id: str, data: AiTriggerPatch):
+    try:
+        payload = data.model_dump(exclude_unset=True)
+        updated = _ensure_state().update_ai_trigger(trigger_id, payload)
+        if not updated:
+            raise HTTPException(status_code=404, detail="AI trigger not found")
+        return updated
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+@router.delete(
+    "/ai/triggers/{trigger_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def delete_ai_trigger(trigger_id: str):
+    if not _ensure_state().delete_ai_trigger(trigger_id):
+        raise HTTPException(status_code=404, detail="AI trigger not found")
+    return {"ok": True}
+
+@router.post("/ai/triggers/preview", dependencies=[Depends(require_api_key)])
+async def preview_ai_triggers(data: AiTriggerPreview):
+    state = _ensure_state()
+    try:
+        classification = _classification_for_trigger_preview(state, data)
+        results = state.preview_ai_triggers(classification)
+        matched = [r for r in results if r.get("matched")]
+        return {
+            "matched": bool(matched),
+            "results": results,
+            "matched_conditions": (
+                matched[0]["matched_conditions"] if matched else []),
+            "planned_actions": (
+                matched[0]["planned_actions"] if matched else []),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+@router.get(
+    "/messages/{message_id}/ai-triggers",
+    dependencies=[Depends(require_api_key)],
+)
+async def get_message_ai_triggers(message_id: str):
+    return _ensure_state().ai_trigger_events_for_message(message_id)
 
 @router.post(
     "/messages/{message_id}/reprocess",

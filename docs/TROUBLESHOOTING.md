@@ -708,3 +708,5 @@ ollama pull gemma3:4b
 Phase 4B is read-only. It never performs IMAP mutations, auto-reply, forwarding, deletion, unsubscribe, external webhooks, or AI-triggered iMessage actions.
 
 Phase 4C.1 mutation primitives can still be blocked by design. Check `[agent].mode`, `[mail.imap_mutations].enabled`, dry-run status, UIDVALIDITY, and per-account IMAP capability output before treating a blocked mutation as a runtime failure.
+
+Phase 4C.3A AI triggers are also preview-only by design. A matched AI trigger should produce `mail_processing_events.event_type='ai_trigger_matched'` with `outcome='dry_run'`; it should not move mail, mark flags, send iMessage, reply, forward, delete, unsubscribe, or call webhooks.

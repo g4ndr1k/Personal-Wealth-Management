@@ -80,6 +80,8 @@ Phase 4B adds read-only AI enrichment after deterministic rule evaluation. Eligi
 
 Phase 4C.1 implements IMAP mutation primitives only: capability probing, UIDVALIDITY-checked `UID MOVE`, UID-based `STORE` for `\Seen`/`\Flagged`, dry-run enforcement, and audit rows for planned/blocked/dry-run/unsupported/completed/failed outcomes. Mutations are blocked outside `live`, blocked when `[mail.imap_mutations].enabled=false`, and COPY + STORE `\Deleted` fallback is disabled by default and never EXPUNGEs automatically. AI-triggered external actions, labels, delete as a user action, unsubscribe, auto-reply, forwarding, webhooks, and AI-triggered iMessage remain out of scope.
 
+Phase 4C.3A adds preview-only AI trigger evaluation after validated classifications are persisted. Trigger matching is deterministic over category, urgency, confidence, needs-reply, summary, and reason fields. Matched triggers write `ai_trigger_matched` audit events with planned dry-run actions; they do not call IMAP helpers, bridge iMessage send, reply, forward, delete, expunge, unsubscribe, or webhooks.
+
 For detailed mail-agent architecture, API boundaries, rules, credential handling, safe actions, and troubleshooting, see [MAIL_AGENT.md](MAIL_AGENT.md).
 
 ## Bridge, API, And PWA Responsibilities

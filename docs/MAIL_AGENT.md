@@ -23,6 +23,7 @@ Keep the high-level architecture summary in `SYSTEM_DESIGN.md`, keep command-onl
 | Rules UI with account scoping and safe Phase 4A actions | Implemented |
 | Phase 4B AI enrichment | Implemented, read-only |
 | Phase 4C.1 IMAP mutation primitives | Implemented, gated/audited |
+| Phase 4C.3A AI trigger actions | Implemented, preview-only |
 | Unsafe actions such as auto-reply, forward, webhook, unsubscribe | Not exposed |
 
 Important database boundary:
@@ -417,6 +418,42 @@ Safety constraints:
 - COPY + STORE `\Deleted` fallback is disabled by default and never calls EXPUNGE in this phase.
 - STORE supports only `\Seen` and `\Flagged`.
 - Every planned, blocked, dry-run, unsupported, completed, or failed mutation path writes `mail_processing_events`.
+
+---
+
+## Phase 4C.3A AI Trigger Actions — Preview-Only
+
+AI triggers are deterministic rules evaluated after validated Phase 4B AI classifications are saved. They use `mail_ai_trigger_rules` and write `ai_trigger_matched` rows to `mail_processing_events`.
+
+Supported trigger fields:
+
+```text
+category
+urgency_score
+confidence
+needs_reply
+summary
+reason
+```
+
+Supported preview-only actions:
+
+```text
+notify_dashboard
+send_imessage
+move_to_folder
+mark_read
+mark_flagged
+add_to_needs_reply
+```
+
+Safety constraints:
+
+- Trigger matching is deterministic and never calls another LLM.
+- All AI-trigger actions are forced to `dry_run=true`.
+- AI triggers never call IMAP mutation helpers, bridge `send_alert`, auto-reply, forwarding, delete, expunge, unsubscribe, or webhooks in this phase.
+- Trigger evaluation failure is audited separately and must not mark the AI classification as failed.
+- Dashboard copy must clearly label AI triggers as preview-only.
 
 ---
 

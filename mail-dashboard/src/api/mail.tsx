@@ -73,6 +73,54 @@ export interface AiClassification {
   reason: string;
 }
 
+export interface AiTriggerCondition {
+  field: string;
+  operator: string;
+  value: any;
+}
+
+export interface AiTriggerAction {
+  action_type: string;
+  target?: string | null;
+  value?: any;
+  dry_run?: boolean;
+  would_execute?: boolean;
+  reason?: string;
+}
+
+export interface AiTrigger {
+  trigger_id: string;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  conditions_json: {
+    match_type: 'ALL' | 'ANY';
+    conditions: AiTriggerCondition[];
+  };
+  actions_json: AiTriggerAction[];
+  cooldown_seconds: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AiTriggerInput = Omit<AiTrigger, 'trigger_id' | 'created_at' | 'updated_at'>;
+
+export interface AiTriggerPreviewResult {
+  matched: boolean;
+  results: Array<{
+    trigger_id: string;
+    name: string;
+    priority: number;
+    matched: boolean;
+    matched_conditions: Array<AiTriggerCondition & { matched: boolean }>;
+    planned_actions: AiTriggerAction[];
+    dry_run: boolean;
+    reason: string;
+  }>;
+  matched_conditions: Array<AiTriggerCondition & { matched: boolean }>;
+  planned_actions: AiTriggerAction[];
+}
+
 export interface AccountHealth {
   id: string;
   name: string;
@@ -177,6 +225,11 @@ interface ApiContextType {
   updateAiSettings: (data: Partial<AiSettings>) => Promise<AiSettings>;
   testAi: (data: { sender: string; subject: string; body: string }) => Promise<AiClassification>;
   reprocessMessage: (messageId: string) => Promise<{ queue_id: number; status: string }>;
+  listAiTriggers: () => Promise<AiTrigger[]>;
+  createAiTrigger: (data: AiTriggerInput) => Promise<AiTrigger>;
+  updateAiTrigger: (triggerId: string, data: Partial<AiTriggerInput>) => Promise<AiTrigger>;
+  deleteAiTrigger: (triggerId: string) => Promise<any>;
+  previewAiTriggers: (classification: Partial<AiClassification>) => Promise<AiTriggerPreviewResult>;
 }
 
 const ApiContext = createContext<ApiContextType | null>(null);
@@ -394,6 +447,40 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     });
   }, [fetchWithAuth]);
 
+  const listAiTriggers = useCallback(async () => {
+    return fetchWithAuth('/api/mail/ai/triggers');
+  }, [fetchWithAuth]);
+
+  const createAiTrigger = useCallback(async (data: AiTriggerInput) => {
+    return fetchWithAuth('/api/mail/ai/triggers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }, [fetchWithAuth]);
+
+  const updateAiTrigger = useCallback(async (triggerId: string, data: Partial<AiTriggerInput>) => {
+    return fetchWithAuth(`/api/mail/ai/triggers/${encodeURIComponent(triggerId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }, [fetchWithAuth]);
+
+  const deleteAiTrigger = useCallback(async (triggerId: string) => {
+    return fetchWithAuth(`/api/mail/ai/triggers/${encodeURIComponent(triggerId)}`, {
+      method: 'DELETE',
+    });
+  }, [fetchWithAuth]);
+
+  const previewAiTriggers = useCallback(async (classification: Partial<AiClassification>) => {
+    return fetchWithAuth('/api/mail/ai/triggers/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ classification }),
+    });
+  }, [fetchWithAuth]);
+
   useEffect(() => {
     refresh();
     const interval = setInterval(refresh, 30000);
@@ -407,7 +494,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
         testAccount, addAccount, deleteAccount, reactivateAccount, reloadConfig,
         listRules, createRule, updateRule, deleteRule, reorderRules,
         previewRules, listProcessingEvents, getAiSettings, updateAiSettings,
-        testAi, reprocessMessage
+        testAi, reprocessMessage, listAiTriggers, createAiTrigger,
+        updateAiTrigger, deleteAiTrigger, previewAiTriggers
       }}
     >
       {children}

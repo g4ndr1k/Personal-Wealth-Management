@@ -3,6 +3,10 @@ import {
   ApiError,
   AiClassification,
   AiSettings,
+  AiTrigger,
+  AiTriggerCondition,
+  AiTriggerInput,
+  AiTriggerPreviewResult,
   MailProcessingEvent,
   MailRule,
   MailRuleAction,
@@ -70,6 +74,27 @@ const emptyAction = (): MailRuleAction => ({
   stop_processing: false,
 });
 
+const emptyAiTriggerCondition = (): AiTriggerCondition => ({
+  field: 'category',
+  operator: 'equals',
+  value: 'payment_due',
+});
+
+const newAiTriggerDraft = (order = 1): AiTriggerInput => ({
+  name: 'New AI trigger',
+  enabled: true,
+  priority: order * 10,
+  conditions_json: {
+    match_type: 'ALL',
+    conditions: [
+      emptyAiTriggerCondition(),
+      { field: 'urgency_score', operator: '>=', value: 7 },
+    ],
+  },
+  actions_json: [{ action_type: 'notify_dashboard' }],
+  cooldown_seconds: 3600,
+});
+
 const newRuleDraft = (priority: number, accountId: string | null): MailRuleInput => ({
   account_id: accountId,
   name: 'New rule',
@@ -110,6 +135,11 @@ export default function Settings() {
     getAiSettings,
     updateAiSettings,
     testAi,
+    listAiTriggers,
+    createAiTrigger,
+    updateAiTrigger,
+    deleteAiTrigger,
+    previewAiTriggers,
   } = useApi();
   const [showAddModal, setShowAddModal] = useState(false);
   const [formData, setFormData] = useState({ display_name: '', email: '', app_password: '' });
@@ -130,11 +160,18 @@ export default function Settings() {
   const [aiStatus, setAiStatus] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiTestResult, setAiTestResult] = useState<AiClassification | null>(null);
+  const [aiTriggers, setAiTriggers] = useState<AiTrigger[]>([]);
+  const [aiTriggerDraft, setAiTriggerDraft] = useState<AiTriggerInput>(newAiTriggerDraft());
+  const [selectedAiTriggerId, setSelectedAiTriggerId] = useState<string | 'new' | null>(null);
+  const [aiTriggerStatus, setAiTriggerStatus] = useState<string | null>(null);
+  const [aiTriggerError, setAiTriggerError] = useState<string | null>(null);
+  const [aiTriggerPreview, setAiTriggerPreview] = useState<AiTriggerPreviewResult | null>(null);
   const activeAccounts = activeRuleAccounts(accounts);
 
   useEffect(() => {
     refreshRulesAndAudit();
     refreshAiSettings();
+    refreshAiTriggers();
   }, []);
 
   useEffect(() => {
@@ -205,6 +242,96 @@ export default function Settings() {
       setAiError(e.message);
     }
   };
+
+  const refreshAiTriggers = async () => {
+    setAiTriggerError(null);
+    try {
+      const triggers = await listAiTriggers();
+      setAiTriggers(triggers);
+      if (selectedAiTriggerId && selectedAiTriggerId !== 'new') {
+        const selected = triggers.find((t) => t.trigger_id === selectedAiTriggerId);
+        if (selected) setAiTriggerDraft(triggerToDraft(selected));
+      }
+    } catch (e: any) {
+      setAiTriggerError(e.message);
+    }
+  };
+
+  const saveAiTrigger = async () => {
+    setAiTriggerStatus('Saving AI trigger...');
+    setAiTriggerError(null);
+    try {
+      if (selectedAiTriggerId === 'new' || selectedAiTriggerId === null) {
+        const created = await createAiTrigger(aiTriggerDraft);
+        setSelectedAiTriggerId(created.trigger_id);
+      } else {
+        await updateAiTrigger(selectedAiTriggerId, aiTriggerDraft);
+      }
+      setAiTriggerStatus('AI trigger saved.');
+      await refreshAiTriggers();
+    } catch (e: any) {
+      setAiTriggerStatus(null);
+      setAiTriggerError(e.message);
+    }
+  };
+
+  const runAiTriggerPreview = async () => {
+    setAiTriggerPreview(null);
+    setAiTriggerError(null);
+    try {
+      const savedPreview = await previewAiTriggers({
+        category: 'payment_due',
+        urgency_score: 8,
+        confidence: 0.9,
+        summary: 'Payment is due tomorrow.',
+        needs_reply: true,
+        reason: 'Payment reminder requires review.',
+      });
+      setAiTriggerPreview(savedPreview);
+    } catch (e: any) {
+      setAiTriggerError(e.message);
+    }
+  };
+
+  const removeAiTrigger = async (triggerId: string) => {
+    if (!confirm('Delete this AI trigger?')) return;
+    setAiTriggerError(null);
+    try {
+      await deleteAiTrigger(triggerId);
+      if (selectedAiTriggerId === triggerId) {
+        setSelectedAiTriggerId(null);
+        setAiTriggerDraft(newAiTriggerDraft());
+      }
+      await refreshAiTriggers();
+    } catch (e: any) {
+      setAiTriggerError(e.message);
+    }
+  };
+
+  const selectAiTrigger = (trigger: AiTrigger) => {
+    setSelectedAiTriggerId(trigger.trigger_id);
+    setAiTriggerDraft(triggerToDraft(trigger));
+    setAiTriggerStatus(null);
+    setAiTriggerError(null);
+    setAiTriggerPreview(null);
+  };
+
+  const startNewAiTrigger = () => {
+    setSelectedAiTriggerId('new');
+    setAiTriggerDraft(newAiTriggerDraft(aiTriggers.length + 1));
+    setAiTriggerStatus(null);
+    setAiTriggerError(null);
+    setAiTriggerPreview(null);
+  };
+
+  const triggerToDraft = (trigger: AiTrigger): AiTriggerInput => ({
+    name: trigger.name,
+    enabled: trigger.enabled,
+    priority: trigger.priority,
+    conditions_json: trigger.conditions_json,
+    actions_json: trigger.actions_json,
+    cooldown_seconds: trigger.cooldown_seconds,
+  });
 
   const ruleToDraft = (rule: MailRule): MailRuleInput => ({
     account_id: rule.account_id,
@@ -415,6 +542,22 @@ export default function Settings() {
         onRefresh={refreshAiSettings}
         onSave={saveAiSettings}
         onTest={runAiTest}
+      />
+
+      <AiTriggersCard
+        triggers={aiTriggers}
+        selectedTriggerId={selectedAiTriggerId}
+        draft={aiTriggerDraft}
+        setDraft={setAiTriggerDraft}
+        status={aiTriggerStatus}
+        error={aiTriggerError}
+        preview={aiTriggerPreview}
+        onRefresh={refreshAiTriggers}
+        onNew={startNewAiTrigger}
+        onSelect={selectAiTrigger}
+        onSave={saveAiTrigger}
+        onDelete={removeAiTrigger}
+        onPreview={runAiTriggerPreview}
       />
 
       <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
@@ -1030,6 +1173,221 @@ function AiSettingsCard({
       )}
     </div>
   );
+}
+
+const AI_TRIGGER_FIELDS = ['category', 'urgency_score', 'confidence', 'needs_reply', 'summary', 'reason'];
+const AI_TRIGGER_ACTIONS = [
+  'notify_dashboard',
+  'send_imessage',
+  'move_to_folder',
+  'mark_read',
+  'mark_flagged',
+  'add_to_needs_reply',
+];
+
+function AiTriggersCard({
+  triggers,
+  selectedTriggerId,
+  draft,
+  setDraft,
+  status,
+  error,
+  preview,
+  onRefresh,
+  onNew,
+  onSelect,
+  onSave,
+  onDelete,
+  onPreview,
+}: {
+  triggers: AiTrigger[];
+  selectedTriggerId: string | 'new' | null;
+  draft: AiTriggerInput;
+  setDraft: (draft: AiTriggerInput) => void;
+  status: string | null;
+  error: string | null;
+  preview: AiTriggerPreviewResult | null;
+  onRefresh: () => void;
+  onNew: () => void;
+  onSelect: (trigger: AiTrigger) => void;
+  onSave: () => void;
+  onDelete: (triggerId: string) => void;
+  onPreview: () => void;
+}) {
+  const updateCondition = (index: number, patch: Partial<AiTriggerCondition>) => {
+    const next = [...draft.conditions_json.conditions];
+    const updated = { ...next[index], ...patch };
+    if (patch.field) {
+      updated.operator = defaultAiTriggerOperator(patch.field);
+      updated.value = defaultAiTriggerValue(patch.field);
+    }
+    setDraft({
+      ...draft,
+      conditions_json: { ...draft.conditions_json, conditions: next.map((c, i) => i === index ? updated : c) },
+    });
+  };
+  const updateAction = (index: number, patch: Partial<any>) => {
+    const next = [...draft.actions_json];
+    const updated = { ...next[index], ...patch };
+    if (patch.action_type && patch.action_type !== 'move_to_folder') {
+      updated.target = null;
+    }
+    next[index] = updated;
+    setDraft({ ...draft, actions_json: next });
+  };
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">AI Triggers</h2>
+          <p className="text-xs text-amber-200 mt-1">
+            AI triggers are preview-only in this phase. They write audit events but do not move, mark, send, reply, forward, or delete emails.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={onRefresh} className="px-3 py-2 bg-gray-800 text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-700">Refresh</button>
+          <button onClick={onNew} className="px-3 py-2 bg-gray-800 text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-700">New</button>
+          <button onClick={onSave} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-500">
+            {selectedTriggerId === 'new' || selectedTriggerId === null ? 'Create' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="bg-red-900/20 border border-red-900/50 p-3 rounded-lg text-red-400 text-sm mb-4">{error}</div>}
+      {status && <div className="bg-green-900/20 border border-green-900/50 p-3 rounded-lg text-green-400 text-sm mb-4">{status}</div>}
+
+      <div className="grid grid-cols-1 xl:grid-cols-[340px_1fr] gap-4">
+        <div className="border border-gray-800 rounded-lg overflow-hidden">
+          {triggers.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500">No AI triggers configured.</div>
+          ) : triggers.map((trigger) => (
+            <button
+              key={trigger.trigger_id}
+              onClick={() => onSelect(trigger)}
+              className={`w-full text-left p-3 border-b border-gray-800 last:border-b-0 ${selectedTriggerId === trigger.trigger_id ? 'bg-indigo-950/30' : 'hover:bg-gray-800/30'}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium text-gray-200">{trigger.name}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded ${trigger.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-500'}`}>
+                  {trigger.enabled ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">Priority {trigger.priority} · {trigger.actions_json.length} preview actions</div>
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <label className="md:col-span-2">
+              <span className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Name</span>
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white" />
+            </label>
+            <label>
+              <span className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Priority</span>
+              <input type="number" value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white" />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300 mt-6">
+              <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
+              Enabled
+            </label>
+          </div>
+
+          <RuleListEditor
+            title="AI Conditions"
+            emptyLabel="Add condition"
+            items={draft.conditions_json.conditions}
+            onAdd={() => setDraft({ ...draft, conditions_json: { ...draft.conditions_json, conditions: [...draft.conditions_json.conditions, emptyAiTriggerCondition()] } })}
+            onRemove={(index) => setDraft({ ...draft, conditions_json: { ...draft.conditions_json, conditions: draft.conditions_json.conditions.filter((_, i) => i !== index) } })}
+            render={(condition, index) => (
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_1.2fr] gap-2">
+                <select value={condition.field} onChange={(e) => updateCondition(index, { field: e.target.value })} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white">
+                  {AI_TRIGGER_FIELDS.map((field) => <option key={field} value={field}>{field}</option>)}
+                </select>
+                <select value={condition.operator} onChange={(e) => updateCondition(index, { operator: e.target.value })} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white">
+                  {operatorsForAiTriggerField(condition.field).map((op) => <option key={op} value={op}>{op}</option>)}
+                </select>
+                <input value={String(condition.value ?? '')} onChange={(e) => updateCondition(index, { value: parseAiTriggerValue(condition.field, e.target.value) })} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white" />
+              </div>
+            )}
+          />
+
+          <RuleListEditor
+            title="Preview Actions"
+            emptyLabel="Add action"
+            items={draft.actions_json}
+            onAdd={() => setDraft({ ...draft, actions_json: [...draft.actions_json, { action_type: 'notify_dashboard' }] })}
+            onRemove={(index) => setDraft({ ...draft, actions_json: draft.actions_json.filter((_, i) => i !== index) })}
+            render={(action, index) => (
+              <div className={`grid grid-cols-1 gap-2 ${action.action_type === 'move_to_folder' ? 'md:grid-cols-[1fr_1fr]' : 'md:grid-cols-[1fr]'}`}>
+                <select value={action.action_type} onChange={(e) => updateAction(index, { action_type: e.target.value })} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white">
+                  {AI_TRIGGER_ACTIONS.map((actionType) => <option key={actionType} value={actionType}>{actionLabel(actionType)}</option>)}
+                </select>
+                {action.action_type === 'move_to_folder' && (
+                  <input value={action.target ?? ''} onChange={(e) => updateAction(index, { target: e.target.value })} placeholder="Target folder" className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white" />
+                )}
+              </div>
+            )}
+          />
+
+          <div className="flex items-center gap-2">
+            <button onClick={onPreview} className="px-3 py-2 bg-gray-800 text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-700">Preview</button>
+            {selectedTriggerId && selectedTriggerId !== 'new' && (
+              <button onClick={() => onDelete(selectedTriggerId)} className="px-3 py-2 bg-red-950/40 text-red-300 rounded-lg text-sm font-medium hover:bg-red-900/50">Delete</button>
+            )}
+          </div>
+
+          {preview && (
+            <div className="border border-gray-800 rounded-lg p-3 bg-gray-950/40 text-sm">
+              <div className={preview.matched ? 'text-green-400' : 'text-gray-400'}>
+                Preview matched: {String(preview.matched)}
+              </div>
+              <div className="mt-2 space-y-1">
+                {preview.results.map((result) => (
+                  <div key={result.trigger_id} className="text-xs text-gray-400">
+                    {result.name}: {result.matched ? 'matched' : 'not matched'} · {result.reason}
+                  </div>
+                ))}
+              </div>
+              {preview.planned_actions.length > 0 && (
+                <div className="mt-2 text-xs text-amber-200">
+                  Planned dry-run actions: {preview.planned_actions.map((a) => actionLabel(a.action_type)).join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function operatorsForAiTriggerField(field: string) {
+  if (field === 'urgency_score' || field === 'confidence') return ['>=', '<=', '='];
+  if (field === 'category') return ['equals', 'in'];
+  if (field === 'needs_reply') return ['equals'];
+  return ['contains', 'equals', 'in'];
+}
+
+function defaultAiTriggerOperator(field: string) {
+  return operatorsForAiTriggerField(field)[0];
+}
+
+function defaultAiTriggerValue(field: string) {
+  if (field === 'urgency_score') return 7;
+  if (field === 'confidence') return 0.8;
+  if (field === 'needs_reply') return true;
+  if (field === 'category') return 'payment_due';
+  return '';
+}
+
+function parseAiTriggerValue(field: string, raw: string) {
+  if (field === 'urgency_score') return Number(raw);
+  if (field === 'confidence') return Number(raw);
+  if (field === 'needs_reply') return raw === 'true' || raw === '1';
+  if (field === 'category' && raw.includes(',')) return raw.split(',').map((v) => v.trim()).filter(Boolean);
+  return raw;
 }
 
 function RuleListEditor<T>({

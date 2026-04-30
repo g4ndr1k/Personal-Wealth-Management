@@ -395,6 +395,8 @@ Phase 4B AI enrichment is read-only. It adds an Ollama-backed triage layer on to
 
 Phase 4C.1 IMAP mutation primitives are available only behind the safety ladder. Keep `[mail.imap_mutations].enabled=false` and `dry_run_default=true` unless deliberately testing in `live`; `observe` and `draft_only` always audit `mode_blocked`.
 
+Phase 4C.3A AI triggers are preview-only. They can be configured in the dashboard and write `ai_trigger_matched` audit events after AI classification, but all actions are forced to dry-run and no mailbox, iMessage, reply, forward, delete, unsubscribe, or webhook action is executed.
+
 Settings live in `config/settings.toml`:
 
 ```toml

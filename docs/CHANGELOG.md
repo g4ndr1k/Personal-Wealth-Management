@@ -2,6 +2,15 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-04-30 — Phase 4C.3A Preview-Only AI Triggers
+
+- Added deterministic AI trigger rules over validated AI classification fields: category, urgency score, confidence, needs-reply, summary, and reason.
+- Added `/api/mail/ai/triggers*` CRUD and preview endpoints plus `/api/mail/messages/{message_id}/ai-triggers`.
+- Trigger actions are recognized as preview-only plans: dashboard notification, iMessage, mailbox move/read/flag, and needs-reply planning.
+- Matched triggers write `ai_trigger_matched` audit events with dry-run planned actions.
+- AI triggers do not call IMAP mutation helpers, bridge iMessage send, reply, forward, delete, expunge, unsubscribe, or external webhooks.
+- Dashboard Settings gained an AI Triggers section with condition/action builders and explicit preview-only copy.
+
 ## 2026-04-30 — Mail Rules Phase 4B Through 4C.2
 
 - Added Phase 4B read-only AI enrichment with `mail_ai_queue`, `mail_ai_classifications`, Ollama JSON-schema validation, manual reprocess, and dashboard AI status display.

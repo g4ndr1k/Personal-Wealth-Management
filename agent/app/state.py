@@ -271,6 +271,12 @@ class AgentState:
                 threshold INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 value_json TEXT,
+                trigger_id TEXT,
+                name TEXT,
+                priority INTEGER NOT NULL DEFAULT 100,
+                conditions_json TEXT,
+                actions_json TEXT,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 3600,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(category_id)
@@ -318,6 +324,28 @@ class AgentState:
         self._add_column_if_missing("mail_ai_queue", "subject", "TEXT")
         self._add_column_if_missing("mail_ai_queue", "received_at", "TEXT")
         self._add_column_if_missing("mail_ai_queue", "body_text", "TEXT")
+        self._add_column_if_missing("mail_ai_trigger_rules", "trigger_id", "TEXT")
+        self._add_column_if_missing("mail_ai_trigger_rules", "name", "TEXT")
+        self._add_column_if_missing(
+            "mail_ai_trigger_rules", "priority", "INTEGER NOT NULL DEFAULT 100")
+        self._add_column_if_missing(
+            "mail_ai_trigger_rules", "conditions_json", "TEXT")
+        self._add_column_if_missing(
+            "mail_ai_trigger_rules", "actions_json", "TEXT")
+        self._add_column_if_missing(
+            "mail_ai_trigger_rules", "cooldown_seconds",
+            "INTEGER NOT NULL DEFAULT 3600")
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_ai_triggers_trigger_id
+                    ON mail_ai_trigger_rules(trigger_id)
+                    WHERE trigger_id IS NOT NULL
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_mail_ai_triggers_priority
+                    ON mail_ai_trigger_rules(enabled, priority)
+            """)
+            conn.commit()
 
     def _add_column_if_missing(
             self, table: str, column: str, definition: str):
@@ -573,6 +601,225 @@ class AgentState:
                 (now, queue_id),
             )
             conn.commit()
+        try:
+            self.evaluate_ai_triggers_for_queue(queue_id, classification)
+        except Exception as exc:
+            self.write_event(
+                "ai_trigger_evaluation_failed",
+                {"queue_id": queue_id, "error": str(exc)[:500]},
+            )
+
+    # ── Phase 4C.3A AI trigger rules ───────────────────────────────────────
+
+    def create_ai_trigger(self, payload: dict) -> dict:
+        from .ai_triggers import (
+            validate_trigger_actions,
+            validate_trigger_conditions,
+        )
+
+        now = self._now()
+        trigger_id = payload.get("trigger_id") or str(uuid.uuid4())
+        conditions = validate_trigger_conditions(payload["conditions_json"])
+        actions = validate_trigger_actions(payload["actions_json"])
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO mail_ai_trigger_rules
+                    (trigger_id, name, enabled, priority, conditions_json,
+                     actions_json, cooldown_seconds, action_type, threshold,
+                     value_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'preview_only', 0, NULL, ?, ?)
+            """, (
+                trigger_id,
+                str(payload["name"]).strip(),
+                int(bool(payload.get("enabled", True))),
+                int(payload.get("priority", 100)),
+                json.dumps(conditions, sort_keys=True),
+                json.dumps(actions, sort_keys=True),
+                int(payload.get("cooldown_seconds", 3600)),
+                now,
+                now,
+            ))
+            conn.commit()
+        return self.get_ai_trigger(trigger_id)
+
+    def update_ai_trigger(self, trigger_id: str, patch: dict) -> dict | None:
+        from .ai_triggers import (
+            validate_trigger_actions,
+            validate_trigger_conditions,
+        )
+
+        existing = self.get_ai_trigger(trigger_id)
+        if not existing:
+            return None
+        updates = dict(patch)
+        if "conditions_json" in updates:
+            updates["conditions_json"] = json.dumps(
+                validate_trigger_conditions(updates["conditions_json"]),
+                sort_keys=True,
+            )
+        if "actions_json" in updates:
+            updates["actions_json"] = json.dumps(
+                validate_trigger_actions(updates["actions_json"]),
+                sort_keys=True,
+            )
+        if "enabled" in updates:
+            updates["enabled"] = int(bool(updates["enabled"]))
+        if "priority" in updates:
+            updates["priority"] = int(updates["priority"])
+        if "cooldown_seconds" in updates:
+            updates["cooldown_seconds"] = int(updates["cooldown_seconds"])
+        if "name" in updates:
+            updates["name"] = str(updates["name"]).strip()
+        updates["updated_at"] = self._now()
+        allowed = {
+            "name", "enabled", "priority", "conditions_json",
+            "actions_json", "cooldown_seconds", "updated_at",
+        }
+        updates = {k: v for k, v in updates.items() if k in allowed}
+        with self._connect() as conn:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(
+                f"UPDATE mail_ai_trigger_rules SET {set_clause} "
+                "WHERE trigger_id = ?",
+                [*updates.values(), trigger_id],
+            )
+            conn.commit()
+        return self.get_ai_trigger(trigger_id)
+
+    def delete_ai_trigger(self, trigger_id: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM mail_ai_trigger_rules WHERE trigger_id = ?",
+                (trigger_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_ai_trigger(self, trigger_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT trigger_id, name, enabled, priority, conditions_json,
+                       actions_json, cooldown_seconds, created_at, updated_at
+                FROM mail_ai_trigger_rules
+                WHERE trigger_id = ?
+            """, (trigger_id,)).fetchone()
+        return self._ai_trigger_from_row(row) if row else None
+
+    def list_ai_triggers(self, enabled_only: bool = False) -> list[dict]:
+        where = "WHERE enabled = 1" if enabled_only else ""
+        with self._connect() as conn:
+            rows = conn.execute(f"""
+                SELECT trigger_id, name, enabled, priority, conditions_json,
+                       actions_json, cooldown_seconds, created_at, updated_at
+                FROM mail_ai_trigger_rules
+                {where}
+                  AND trigger_id IS NOT NULL
+                  AND conditions_json IS NOT NULL
+                ORDER BY priority ASC, trigger_id ASC
+            """ if enabled_only else """
+                SELECT trigger_id, name, enabled, priority, conditions_json,
+                       actions_json, cooldown_seconds, created_at, updated_at
+                FROM mail_ai_trigger_rules
+                WHERE trigger_id IS NOT NULL
+                  AND conditions_json IS NOT NULL
+                ORDER BY priority ASC, trigger_id ASC
+            """).fetchall()
+        return [self._ai_trigger_from_row(row) for row in rows]
+
+    def _ai_trigger_from_row(self, row) -> dict:
+        keys = [
+            "trigger_id", "name", "enabled", "priority", "conditions_json",
+            "actions_json", "cooldown_seconds", "created_at", "updated_at",
+        ]
+        payload = dict(zip(keys, row))
+        payload["enabled"] = bool(payload["enabled"])
+        payload["conditions_json"] = json.loads(
+            payload["conditions_json"] or '{"match_type":"ALL","conditions":[]}')
+        payload["actions_json"] = json.loads(payload["actions_json"] or "[]")
+        return payload
+
+    def preview_ai_triggers(
+            self, classification: dict,
+            *, triggers: list[dict] | None = None) -> list[dict]:
+        from .ai_triggers import evaluate_triggers
+
+        return evaluate_triggers(
+            triggers if triggers is not None else self.list_ai_triggers(enabled_only=True),
+            classification,
+        )
+
+    def evaluate_ai_triggers_for_queue(
+            self, queue_id: int, classification: dict) -> list[dict]:
+        results = self.preview_ai_triggers(classification)
+        matched = [r for r in results if r.get("matched")]
+        if not matched:
+            return results
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT message_id, account_id, bridge_id
+                FROM mail_ai_queue
+                WHERE id = ?
+            """, (queue_id,)).fetchone()
+        message_id = row[0] if row else f"queue:{queue_id}"
+        account_id = row[1] if row else None
+        bridge_id = row[2] if row else None
+        now = self._now()
+        with self._connect() as conn:
+            for result in matched:
+                details = {
+                    "trigger_id": result["trigger_id"],
+                    "trigger_name": result["name"],
+                    "message_id": message_id,
+                    "queue_id": queue_id,
+                    "category": classification.get("category"),
+                    "urgency_score": classification.get("urgency_score"),
+                    "confidence": classification.get("confidence"),
+                    "planned_actions": result["planned_actions"],
+                    "matched_conditions": result["matched_conditions"],
+                    "dry_run": True,
+                    "reason": result["reason"],
+                }
+                conn.execute("""
+                    INSERT INTO mail_processing_events
+                        (message_id, account_id, bridge_id, rule_id,
+                         action_type, event_type, outcome, details_json,
+                         created_at)
+                    VALUES (?, ?, ?, NULL, 'ai_trigger',
+                            'ai_trigger_matched', 'dry_run', ?, ?)
+                """, (
+                    message_id,
+                    account_id,
+                    bridge_id,
+                    json.dumps(details, sort_keys=True),
+                    now,
+                ))
+            conn.commit()
+        return results
+
+    def ai_trigger_events_for_message(self, message_id: str) -> list[dict]:
+        candidates = [message_id]
+        if not message_id.startswith(("mkey:", "fkey:")):
+            candidates.extend([f"mkey:{message_id}", f"fkey:{message_id}"])
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT id, message_id, account_id, bridge_id, action_type,
+                       event_type, outcome, details_json, created_at
+                FROM mail_processing_events
+                WHERE event_type = 'ai_trigger_matched'
+                  AND message_id IN ({})
+                ORDER BY id ASC
+            """.format(",".join("?" for _ in candidates)), candidates).fetchall()
+        keys = [
+            "id", "message_id", "account_id", "bridge_id", "action_type",
+            "event_type", "outcome", "details_json", "created_at",
+        ]
+        return [
+            {
+                **dict(zip(keys, row)),
+                "details_json": json.loads(row[7]) if row[7] else None,
+            }
+            for row in rows
+        ]
 
     def fail_ai_item(
             self, queue_id: int, error: str, *,
