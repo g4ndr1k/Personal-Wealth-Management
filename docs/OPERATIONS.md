@@ -64,6 +64,21 @@ npm run dev
 
 The dashboard is an Electron menu-bar app. It is a viewer/control surface only; mail processing continues when the dashboard is closed. For account setup, Gmail App Password handling, safe rule actions, and rules UI details, see [MAIL_AGENT.md](MAIL_AGENT.md).
 
+Phase 4F natural-language rule authoring is planned in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). Treat it as an AI draft/validate/preview/human-save workflow only. It must not save rules without review, execute actions, or mutate Gmail/IMAP.
+
+#### Synthetic approval visual QA
+
+For Phase 4D.7 Control Center review, run the dashboard in development with synthetic approval fixtures enabled:
+
+```bash
+cd mail-dashboard
+VITE_APPROVAL_FIXTURES=1 npm run dev
+```
+
+Open Control Center and use the `Synthetic QA on` toggle. The populated approvals are frontend-only fake records for `fixture.gmail.local` / `INBOX`; they do not require Gmail, IMAP credentials, or rows in `data/agent.db`.
+
+Synthetic mode is visibly labelled in the header, rows, and detail panel. Approval, execution, archive, and cleanup controls are read-only in this mode, and cleanup/export data comes from local fixtures. This mode is for UI verification before Phase 4E only and must not be used as evidence that live mailbox mutation is enabled.
+
 ### PWA
 
 ```bash
@@ -397,15 +412,19 @@ Phase 4C.1 IMAP mutation primitives are available only behind the safety ladder.
 
 Phase 4C.3A AI triggers write `ai_trigger_matched` dry-run audit events after AI classification. In Phase 4D.1, matched actions also create pending Control Center approval items in `data/agent.db:mail_action_approvals`; they still do not execute autonomously.
 
-Approval authorizes only a later execution attempt. The existing gates still decide the final outcome: `[agent].mode`, `[mail.imap_mutations].enabled`, `dry_run_default`, UIDVALIDITY, folder metadata, IMAP capabilities, and the action allow/block list. There is no bulk approval path. `send_imessage`, reply, forward, delete, expunge, unsubscribe, and webhooks remain blocked and should appear only as planned/blocked/audited records.
+Approval authorizes only human intent for a later execution attempt. In Phase 4E.2, the execution chassis is still mock-only: gates can report readiness/blockers, final verification can read mailbox identity with read-only IMAP selection/fetches, and the mock executor can write metadata-only audit rows only after verification passes. Read/unread are still not live and no approval path touches Gmail with mutating commands or issues IMAP flag mutations. The existing gates still decide the final outcome: `[agent].mode`, `[mail.imap_mutations].enabled`, `dry_run_default`, UIDVALIDITY, folder metadata, IMAP capabilities, and the action allow/block list. There is no bulk approval or bulk execute path. `send_imessage`, reply, forward, delete, expunge, unsubscribe, labels, folder moves, and webhooks remain blocked and should appear only as planned/blocked/audited records.
+
+Phase 4F can be developed before Phase 4E.3 only because its first scope is non-mutating rule authoring. AI drafts proposed deterministic rules, deterministic validation checks them, and a human saves them. Gmail spam, move, label, read, unread, reply, forward, unsubscribe, webhook, and delete-like mutations remain blocked/deferred unless a future Phase 4E execution gate explicitly supports them.
+
+Phase 4D.6 Control Center polish is visual/operator clarity only. Readiness preview is not live mutation. For future reversible candidates, the Control Center shows a safety banner, summary, blockers, dry-run plan, UID/UIDVALIDITY identity, cached capability status, config blockers, and rollback hint. Treat **Readiness only**, **Live mutation disabled**, **Approval records human intent only**, and **Requires explicit config enablement in a later phase** literally; there is no UI control to enable live mutation from the dashboard.
 
 Operator workflow:
 
 1. Open the dashboard Control Center and review pending approval items one at a time.
 2. Read the preview title, message sender/subject/account/folder/UID, AI trigger or rule explanation, proposed action, risk badge, and current gate preview.
 3. Treat **Dry-run only**, **Blocked by config**, **Unsupported action**, and **No mailbox change would occur under current settings** as expected safety outcomes, not live mutation.
-4. Use **Approve attempt** only when the preview context is acceptable; this still does not execute anything by itself and only allows one gated attempt.
-5. Use **Run gated attempt** on an approved item. Read the resulting execution state: `executed`, `blocked`, `failed`, `expired`, `rejected`, `started`, or `stuck`.
+4. Use **Approve attempt** only when the preview context is acceptable; this still does not execute anything by itself and records human intent only.
+5. Use **Audit gated attempt** on an approved item. Read the resulting execution state: `executed`, `blocked`, `failed`, `expired`, `rejected`, `started`, or `stuck`. When mock execution is available in dev/test, final verification must pass first and the result must be labelled mock-only.
 6. For `blocked`, inspect the gate result. Dry-run and mutation-disabled outcomes mean no mailbox change was made.
 7. For `stuck`, do not retry automatically. Review the audit trail and mark failed only after confirming the worker did not finish.
 8. Use **Archive from active view** only for terminal approvals. Archive hides the row from the active view; audit is retained and the row can be unarchived from History.

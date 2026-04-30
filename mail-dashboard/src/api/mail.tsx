@@ -236,6 +236,8 @@ export interface MailActionApproval {
   execution_error?: string | null;
   blocked_reason?: string | null;
   gate_result?: any;
+  final_verification?: any;
+  execution_mode?: string | null;
   preview_title?: string;
   preview_summary?: string;
   risk_level?: 'safe_readonly' | 'safe_reversible' | 'caution' | 'dangerous_blocked' | 'unsupported_blocked';
@@ -254,6 +256,19 @@ export interface MailActionApproval {
     mode?: string;
     mutation_enabled?: boolean;
     dry_run_default?: boolean;
+    allow_mark_read?: boolean;
+    allow_mark_unread?: boolean;
+    allow_add_label?: boolean;
+    allow_move_to_folder?: boolean;
+    identity_complete?: boolean;
+    uidvalidity_guard?: boolean;
+    capability_cache?: any;
+    folder_state?: any;
+    dry_run_plan?: any;
+    mutation_plan?: any;
+    rollback_hint?: string | null;
+    reversible?: boolean;
+    safety_gates?: Array<{ gate: string; status: string; reason: string }>;
   };
   message_context?: {
     sender?: string | null;

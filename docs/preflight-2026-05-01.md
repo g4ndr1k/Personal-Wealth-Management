@@ -1,6 +1,6 @@
 # Mail-Agent Preflight Report
 
-**Generated:** 2026-04-30T14:24:35Z  
+**Generated:** 2026-04-30T22:56:41Z  
 **Repo:** `/Users/g4ndr1k/agentic-ai`  
 **Python:** 3.14.4  
 
@@ -169,7 +169,7 @@
   - ✅ ThrottleInterval=30s
 
 **Live probe:** GET http://127.0.0.1:9100/health
-✅ Bridge responded: {"http": "ok", "applescript": "ok", "messages_app": "fail", "chat_db": "fail", "overall": "degraded", "service": "bridge", "mail_available": true, "timestamp": "2026-04-30T14:24:37.557825+00:00"}
+✅ Bridge responded: {"http": "ok", "applescript": "ok", "messages_app": "fail", "chat_db": "fail", "overall": "degraded", "service": "bridge", "mail_available": true, "timestamp": "2026-04-30T22:56:43.834234+00:00"}
 
 
 ## SQLite — agent state + pdf_jobs.db
@@ -195,6 +195,8 @@
   - `mail_processing_events`
   - `mail_action_approvals`
   - `imap_capability_cache`
+  - `mail_action_executions`
+  - `mail_action_execution_events`
 
 **Live agent DB:** `/Users/g4ndr1k/agentic-ai/data/agent.db`
 
@@ -209,7 +211,7 @@
   - `summary` TEXT
   - `status` TEXT
   - `source` TEXT
-  → 380 rows
+  → 391 rows
 
   **`alerts`** columns:
   - `id` INTEGER PK
@@ -304,6 +306,17 @@
   - `verify_ollama_host` = 'http://localhost:11434'
   - `verify_timeout_seconds` = 120
   - `verify_model` = 'gemma3:4b'
+
+### Phase 4E.2 execution safety
+✅ Final read-only verification module present
+✅ Mock execution module present
+✅ mail.imap_mutations.enabled=false
+✅ dry_run_default=true
+✅ allow_mark_read=false
+✅ allow_mark_unread=false
+✅ allow_add_label=false
+✅ allow_move_to_folder=false
+✅ Preflight performs no mailbox mutation
 
 
 

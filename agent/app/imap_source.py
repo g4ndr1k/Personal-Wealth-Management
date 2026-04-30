@@ -48,6 +48,9 @@ class ImapCapabilities:
     capabilities: list[str] = field(default_factory=list)
     supports_move: bool = False
     supports_uidplus: bool = False
+    supports_store_flags: bool | None = None
+    supports_create_folder: bool | None = None
+    supports_gmail_labels: bool | None = None
     permanent_flags: list[str] = field(default_factory=list)
     flag_support: bool = False
     mailbox_separator: str | None = None
@@ -431,7 +434,9 @@ class IMAPPoller:
             cap_set = set(capabilities.capabilities)
             capabilities.supports_move = "MOVE" in cap_set
             capabilities.supports_uidplus = "UIDPLUS" in cap_set
+            capabilities.supports_gmail_labels = "X-GM-EXT-1" in cap_set
             capabilities.create_supported = "CREATE" in cap_set
+            capabilities.supports_create_folder = capabilities.create_supported
 
             capabilities.list_available = False
             status, data = imap.list()
@@ -448,6 +453,7 @@ class IMAPPoller:
             capabilities.permanent_flags = _permanent_flags(
                 getattr(imap, "untagged_responses", {}))
             capabilities.flag_support = bool(capabilities.permanent_flags)
+            capabilities.supports_store_flags = capabilities.flag_support
 
             if target_folder:
                 capabilities.target_exists = _mailbox_exists(

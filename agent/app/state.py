@@ -14,6 +14,18 @@ def apply_sqlite_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA busy_timeout = 5000")
 
 
+def _bool_or_none(value) -> int | None:
+    if value is None:
+        return None
+    return int(bool(value))
+
+
+def _nullable_bool(value) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
 class AgentState:
     def __init__(self, db_path: str = "/app/data/agent.db"):
         self.db_path = Path(db_path)
@@ -360,6 +372,71 @@ class AgentState:
                     COALESCE(proposed_value_json, '')
                 )
                 WHERE status = 'pending';
+
+            CREATE TABLE IF NOT EXISTS imap_capability_cache (
+                account_id TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                uidvalidity TEXT,
+                capabilities_json TEXT,
+                supports_store_flags INTEGER,
+                supports_move INTEGER,
+                supports_create_folder INTEGER,
+                supports_gmail_labels INTEGER,
+                checked_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                status TEXT,
+                error TEXT,
+                PRIMARY KEY (account_id, folder)
+            );
+
+            -- ── Phase 4E.1 future execution chassis ─────────────────
+            CREATE TABLE IF NOT EXISTS mail_action_executions (
+                execution_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                uidvalidity TEXT NOT NULL,
+                imap_uid TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                target TEXT,
+                plan_hash TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                before_state_json TEXT,
+                after_state_json TEXT,
+                rollback_plan_json TEXT,
+                rollback_status TEXT,
+                requested_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(status IN (
+                    'blocked','ready','mock_executed','failed',
+                    'rolled_back','rollback_failed'))
+            );
+
+            CREATE TABLE IF NOT EXISTS mail_action_execution_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_action_exec_approval
+                ON mail_action_executions(approval_id);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_exec_status
+                ON mail_action_executions(status);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_exec_idempotency
+                ON mail_action_executions(idempotency_key);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_exec_created
+                ON mail_action_executions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_exec_events_execution
+                ON mail_action_execution_events(execution_id);
+            CREATE INDEX IF NOT EXISTS idx_mail_action_exec_events_created
+                ON mail_action_execution_events(created_at);
             """)
             conn.commit()
 
@@ -1503,6 +1580,221 @@ class AgentState:
             ))
             conn.commit()
 
+    # ── Phase 4E.1 mock execution audit rows ───────────────────────────────
+
+    def get_action_execution_by_idempotency(
+            self, idempotency_key: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT execution_id, approval_id, account_id, folder,
+                       uidvalidity, imap_uid, operation, target, plan_hash,
+                       idempotency_key, status, before_state_json,
+                       after_state_json, rollback_plan_json, rollback_status,
+                       requested_at, started_at, finished_at, error_message,
+                       created_at, updated_at
+                FROM mail_action_executions
+                WHERE idempotency_key = ?
+            """, (idempotency_key,)).fetchone()
+        return self._action_execution_from_row(row) if row else None
+
+    def list_action_execution_events(
+            self, execution_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT id, execution_id, event_type, event_json, created_at
+                FROM mail_action_execution_events
+                WHERE execution_id = ?
+                ORDER BY id ASC
+            """, (execution_id,)).fetchall()
+        events = []
+        for row in rows:
+            event_json = json.loads(row[3] or "{}")
+            events.append({
+                "id": row[0],
+                "execution_id": row[1],
+                "event_type": row[2],
+                "event_json": event_json,
+                "created_at": row[4],
+            })
+        return events
+
+    def insert_mock_action_execution(
+            self, *, execution_id: str, approval_id: str, account_id: str,
+            folder: str, uidvalidity: str, imap_uid: str, operation: str,
+            target: str | None, plan_hash: str, idempotency_key: str,
+            before_state: dict | None, after_state: dict | None,
+            rollback_plan: dict | None, requested_at: str | None = None) -> dict:
+        now = self._now()
+        requested = requested_at or now
+        before_json = (
+            json.dumps(before_state, sort_keys=True)
+            if before_state is not None else None)
+        after_json = (
+            json.dumps(after_state, sort_keys=True)
+            if after_state is not None else None)
+        rollback_json = (
+            json.dumps(rollback_plan, sort_keys=True)
+            if rollback_plan is not None else None)
+        event_payload = {
+            "approval_id": approval_id,
+            "account_id": account_id,
+            "folder": folder,
+            "uidvalidity": uidvalidity,
+            "imap_uid": imap_uid,
+            "operation": operation,
+            "target": target,
+            "plan_hash": plan_hash,
+            "idempotency_key": idempotency_key,
+            "mailbox_mutation_occurred": False,
+            "mock_only": True,
+        }
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT OR IGNORE INTO mail_action_executions
+                    (execution_id, approval_id, account_id, folder,
+                     uidvalidity, imap_uid, operation, target, plan_hash,
+                     idempotency_key, status, before_state_json,
+                     after_state_json, rollback_plan_json, rollback_status,
+                     requested_at, started_at, finished_at, error_message,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'mock_executed',
+                        ?, ?, ?, 'not_requested', ?, ?, ?, NULL, ?, ?)
+            """, (
+                execution_id, approval_id, account_id, folder,
+                uidvalidity, imap_uid, operation, target, plan_hash,
+                idempotency_key, before_json, after_json, rollback_json,
+                requested, now, now, now, now,
+            ))
+            inserted = conn.execute("SELECT changes()").fetchone()[0] == 1
+            if inserted:
+                conn.execute("""
+                    INSERT INTO mail_action_execution_events
+                        (execution_id, event_type, event_json, created_at)
+                    VALUES (?, 'mock_executed', ?, ?)
+                """, (
+                    execution_id,
+                    json.dumps(event_payload, sort_keys=True),
+                    now,
+                ))
+            row = conn.execute("""
+                SELECT execution_id, approval_id, account_id, folder,
+                       uidvalidity, imap_uid, operation, target, plan_hash,
+                       idempotency_key, status, before_state_json,
+                       after_state_json, rollback_plan_json, rollback_status,
+                       requested_at, started_at, finished_at, error_message,
+                       created_at, updated_at
+                FROM mail_action_executions
+                WHERE idempotency_key = ?
+            """, (idempotency_key,)).fetchone()
+            conn.commit()
+        result = self._action_execution_from_row(row)
+        result["inserted"] = inserted
+        return result
+
+    def insert_blocked_action_execution(
+            self, *, execution_id: str, approval_id: str, account_id: str,
+            folder: str, uidvalidity: str, imap_uid: str, operation: str,
+            target: str | None, plan_hash: str, idempotency_key: str,
+            error_message: str | None, event_type: str,
+            event_payload: dict | None = None) -> dict:
+        now = self._now()
+        payload = event_payload or {}
+        payload.update({
+            "approval_id": approval_id,
+            "account_id": account_id,
+            "folder": folder,
+            "uidvalidity": uidvalidity,
+            "imap_uid": imap_uid,
+            "operation": operation,
+            "target": target,
+            "plan_hash": plan_hash,
+            "idempotency_key": idempotency_key,
+            "mailbox_mutation_occurred": False,
+            "mock_only": True,
+        })
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT OR IGNORE INTO mail_action_executions
+                    (execution_id, approval_id, account_id, folder,
+                     uidvalidity, imap_uid, operation, target, plan_hash,
+                     idempotency_key, status, before_state_json,
+                     after_state_json, rollback_plan_json, rollback_status,
+                     requested_at, started_at, finished_at, error_message,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked',
+                        NULL, NULL, NULL, NULL, ?, NULL, ?, ?, ?, ?)
+            """, (
+                execution_id, approval_id, account_id, folder,
+                uidvalidity, imap_uid, operation, target, plan_hash,
+                idempotency_key, now, now,
+                error_message[:500] if error_message else None, now, now,
+            ))
+            inserted = conn.execute("SELECT changes()").fetchone()[0] == 1
+            if inserted:
+                conn.execute("""
+                    INSERT INTO mail_action_execution_events
+                        (execution_id, event_type, event_json, created_at)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    execution_id,
+                    event_type,
+                    json.dumps(payload, sort_keys=True),
+                    now,
+                ))
+            row = conn.execute("""
+                SELECT execution_id, approval_id, account_id, folder,
+                       uidvalidity, imap_uid, operation, target, plan_hash,
+                       idempotency_key, status, before_state_json,
+                       after_state_json, rollback_plan_json, rollback_status,
+                       requested_at, started_at, finished_at, error_message,
+                       created_at, updated_at
+                FROM mail_action_executions
+                WHERE idempotency_key = ?
+            """, (idempotency_key,)).fetchone()
+            conn.commit()
+        result = self._action_execution_from_row(row)
+        result["inserted"] = inserted
+        return result
+
+    def write_action_execution_event(
+            self, execution_id: str, event_type: str,
+            event_payload: dict | None = None) -> int:
+        now = self._now()
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO mail_action_execution_events
+                    (execution_id, event_type, event_json, created_at)
+                VALUES (?, ?, ?, ?)
+            """, (
+                execution_id,
+                event_type,
+                json.dumps(event_payload or {}, sort_keys=True),
+                now,
+            ))
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def _action_execution_from_row(self, row) -> dict:
+        keys = [
+            "execution_id", "approval_id", "account_id", "folder",
+            "uidvalidity", "imap_uid", "operation", "target", "plan_hash",
+            "idempotency_key", "status", "before_state_json",
+            "after_state_json", "rollback_plan_json", "rollback_status",
+            "requested_at", "started_at", "finished_at", "error_message",
+            "created_at", "updated_at",
+        ]
+        payload = dict(zip(keys, row))
+        for json_key, out_key in (
+                ("before_state_json", "before_state"),
+                ("after_state_json", "after_state"),
+                ("rollback_plan_json", "rollback_plan")):
+            payload[out_key] = (
+                json.loads(payload[json_key])
+                if payload.get(json_key) else None)
+        return payload
+
     def _decide_action_approval(
             self, approval_id: str, status: str, event_type: str, *,
             decided_by: str, decision_note: str | None) -> dict:
@@ -1626,6 +1918,82 @@ class AgentState:
             """, (account_name, folder,
                   last_uid, uidvalidity, self._now()))
             conn.commit()
+
+    def get_imap_capability_cache(
+            self, account_id: str, folder: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT account_id, folder, uidvalidity, capabilities_json,
+                       supports_store_flags, supports_move,
+                       supports_create_folder, supports_gmail_labels,
+                       checked_at, source, status, error
+                FROM imap_capability_cache
+                WHERE account_id = ? AND folder = ?
+            """, (account_id, folder)).fetchone()
+        if not row:
+            return None
+        try:
+            capabilities = json.loads(row[3] or "[]")
+        except json.JSONDecodeError:
+            capabilities = []
+        return {
+            "account_id": row[0],
+            "folder": row[1],
+            "uidvalidity": row[2],
+            "capabilities": capabilities,
+            "supports_store_flags": _nullable_bool(row[4]),
+            "supports_move": _nullable_bool(row[5]),
+            "supports_create_folder": _nullable_bool(row[6]),
+            "supports_gmail_labels": _nullable_bool(row[7]),
+            "checked_at": row[8],
+            "source": row[9],
+            "status": row[10],
+            "error": row[11],
+        }
+
+    def upsert_imap_capability_cache(
+            self, *, account_id: str, folder: str,
+            uidvalidity=None, capabilities=None,
+            supports_store_flags=None, supports_move=None,
+            supports_create_folder=None, supports_gmail_labels=None,
+            source: str = "cached", status: str | None = "ok",
+            error: str | None = None) -> dict:
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO imap_capability_cache
+                    (account_id, folder, uidvalidity, capabilities_json,
+                     supports_store_flags, supports_move,
+                     supports_create_folder, supports_gmail_labels,
+                     checked_at, source, status, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, folder) DO UPDATE
+                    SET uidvalidity = excluded.uidvalidity,
+                        capabilities_json = excluded.capabilities_json,
+                        supports_store_flags = excluded.supports_store_flags,
+                        supports_move = excluded.supports_move,
+                        supports_create_folder = excluded.supports_create_folder,
+                        supports_gmail_labels = excluded.supports_gmail_labels,
+                        checked_at = excluded.checked_at,
+                        source = excluded.source,
+                        status = excluded.status,
+                        error = excluded.error
+            """, (
+                account_id,
+                folder,
+                None if uidvalidity is None else str(uidvalidity),
+                json.dumps(capabilities or [], sort_keys=True),
+                _bool_or_none(supports_store_flags),
+                _bool_or_none(supports_move),
+                _bool_or_none(supports_create_folder),
+                _bool_or_none(supports_gmail_labels),
+                now,
+                source,
+                status,
+                error[:500] if error else None,
+            ))
+            conn.commit()
+        return self.get_imap_capability_cache(account_id, folder)
 
     def update_imap_account_success(self, account_name: str):
         with self._connect() as conn:

@@ -1,25 +1,34 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { MailActionApproval, useApi } from '../api/mail';
+import {
+  listSyntheticApprovals,
+  syntheticApprovalCleanupPreview,
+  syntheticApprovalFixtures,
+} from './approvalFixtures';
+import {
+  actionSupportLabel,
+  approvalActionType,
+  approvalBanner,
+  approvalStatusLabel,
+  approvalTarget,
+  capabilitySummary,
+  configBlockers,
+  dryRunPlanSummary,
+  finalVerificationSummary,
+  humanLabel,
+  identityBlockers,
+  isReadinessAction,
+  READINESS_ACTIONS,
+} from './approvalUiHelpers';
 
-const STATUS_OPTIONS = ['pending', 'approved', 'executed', 'blocked', 'failed', 'rejected', 'expired'];
+const STATUS_OPTIONS = ['', 'pending', 'approved', 'executed', 'blocked', 'failed', 'rejected', 'expired'];
 const EXECUTION_OPTIONS = ['', 'not_requested', 'started', 'stuck', 'executed', 'blocked', 'failed', 'expired', 'rejected'];
 const RISK_OPTIONS = ['', 'safe_readonly', 'safe_reversible', 'caution', 'dangerous_blocked', 'unsupported_blocked'];
-const UNSUPPORTED_ACTIONS = new Set([
-  'send_imessage',
-  'reply',
-  'auto_reply',
-  'forward',
-  'delete',
-  'expunge',
-  'unsubscribe',
-  'webhook',
-  'external_webhook',
-  'notify_dashboard',
-]);
+const ALLOW_SYNTHETIC_APPROVAL_FIXTURES = import.meta.env.DEV && import.meta.env.VITE_APPROVAL_FIXTURES === '1';
 
 function label(value: string | null | undefined) {
-  return (value || 'none').replace(/_/g, ' ');
+  return humanLabel(value);
 }
 
 function fmt(value: string | null | undefined) {
@@ -64,10 +73,15 @@ function gateClass(gate: string | undefined) {
 
 function gateLabel(approval: MailActionApproval) {
   const gate = approval.current_gate_preview?.gate;
-  if (gate === 'dry_run') return 'Dry-run only';
-  if (gate === 'mutation_disabled' || gate === 'mode_blocked') return 'Blocked by config';
+  if (gate === 'dry_run') return 'Dry-run planned';
+  if (gate === 'mutation_disabled' || gate === 'mode_blocked') return 'Live mutation disabled';
   if (gate === 'unsupported') return 'Unsupported action';
-  if (gate === 'ready') return approval.current_gate_preview?.capability === 'unknown' ? 'Ready, capability unknown' : 'Ready for gated attempt';
+  if (gate === 'capability_cache_missing') return 'Capability cache missing';
+  if (gate === 'capability_unknown') return 'Capability unknown';
+  if (gate === 'uidvalidity_mismatch') return 'UIDVALIDITY mismatch';
+  if (gate === 'identity_incomplete') return 'Identity incomplete';
+  if (gate === 'action_not_allowed') return 'Per-action flag disabled';
+  if (gate === 'ready') return READINESS_ACTIONS.has(approval.action_type || approval.proposed_action_type) ? 'Readiness checks present' : 'Gate checks present';
   if (gate === 'manual_review_required') return 'Manual review required';
   if (gate === 'terminal') return 'Already terminal';
   return label(gate || approval.execution_state || approval.status);
@@ -75,7 +89,7 @@ function gateLabel(approval: MailActionApproval) {
 
 function nextStep(approval: MailActionApproval) {
   const state = approval.execution_state;
-  if (approval.status === 'pending') return 'Review the proposed action. Approval allows one gated attempt.';
+  if (approval.status === 'pending') return 'Review the proposed action. Approval records intent only; it does not mutate Gmail in this phase.';
   if (state === 'started') return 'Execution started. Wait for a terminal audit event.';
   if (state === 'stuck') return 'Execution started but did not finish. Manual review required.';
   if (state === 'blocked') return 'Blocked by safety gate. No mailbox change was made.';
@@ -87,9 +101,7 @@ function nextStep(approval: MailActionApproval) {
 }
 
 function supportLabel(actionType: string) {
-  if (UNSUPPORTED_ACTIONS.has(actionType)) return 'Blocked in Phase 4D.2';
-  if (actionType === 'add_to_needs_reply') return 'Operator action';
-  return 'Gate checked at execution';
+  return actionSupportLabel(actionType);
 }
 
 function isTerminal(approval: MailActionApproval) {
@@ -112,10 +124,11 @@ export default function ControlCenter() {
     exportApprovals,
   } = useApi();
   const [viewMode, setViewMode] = useState<'active' | 'history'>('active');
-  const [status, setStatus] = useState('pending');
+  const [status, setStatus] = useState('');
   const [executionState, setExecutionState] = useState('');
   const [riskLevel, setRiskLevel] = useState('');
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [syntheticMode, setSyntheticMode] = useState(ALLOW_SYNTHETIC_APPROVAL_FIXTURES);
   const [approvals, setApprovals] = useState<MailActionApproval[]>([]);
   const [selected, setSelected] = useState<MailActionApproval | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<any>(null);
@@ -127,8 +140,24 @@ export default function ControlCenter() {
     setLoading(true);
     setError(null);
     try {
+      if (syntheticMode) {
+        const rows = listSyntheticApprovals({
+          status: status || undefined,
+          execution_state: executionState || undefined,
+          risk_level: riskLevel || undefined,
+          include_archived: viewMode === 'history' && includeArchived,
+        });
+        setApprovals(rows);
+        setCleanupPreview(syntheticApprovalCleanupPreview);
+        if (selected) {
+          setSelected(rows.find((row) => row.approval_id === selected.approval_id) || rows[0] || null);
+        } else {
+          setSelected(rows[0] || null);
+        }
+        return;
+      }
       const rows = await listApprovals({
-        status,
+        status: status || undefined,
         execution_state: executionState || undefined,
         risk_level: riskLevel || undefined,
         include_archived: viewMode === 'history' && includeArchived,
@@ -148,9 +177,13 @@ export default function ControlCenter() {
 
   useEffect(() => {
     refresh();
-  }, [status, executionState, riskLevel, includeArchived, viewMode]);
+  }, [status, executionState, riskLevel, includeArchived, viewMode, syntheticMode]);
 
   const run = async (approvalId: string, action: string, fn: () => Promise<MailActionApproval>) => {
+    if (syntheticMode) {
+      setError(`Synthetic visual QA mode is read-only. ${label(action)} did not call an approval endpoint for ${approvalId}.`);
+      return;
+    }
     setBusy((state) => ({ ...state, [approvalId]: action }));
     setError(null);
     try {
@@ -171,6 +204,10 @@ export default function ControlCenter() {
   const openDetail = async (approvalId: string) => {
     setError(null);
     try {
+      if (syntheticMode) {
+        setSelected(syntheticApprovalFixtures.find((row) => row.approval_id === approvalId) || null);
+        return;
+      }
       setSelected(await getApproval(approvalId));
     } catch (e: any) {
       setError(e.message);
@@ -178,6 +215,10 @@ export default function ControlCenter() {
   };
 
   const runCleanup = async () => {
+    if (syntheticMode) {
+      setError('Synthetic visual QA mode does not call cleanup endpoints.');
+      return;
+    }
     if (!window.confirm('Run explicit approval cleanup? Audit retained. Started/stuck approvals are excluded.')) return;
     setError(null);
     try {
@@ -191,20 +232,28 @@ export default function ControlCenter() {
   const exportJson = async () => {
     setError(null);
     try {
+      if (syntheticMode) {
+        const payload = {
+          synthetic_fixture: true,
+          exported_at: new Date().toISOString(),
+          notes: [
+            'Frontend-only Control Center visual QA fixture.',
+            'No backend rows, Gmail account, IMAP credentials, or approval execution endpoints are used.',
+          ],
+          cleanup_preview: syntheticApprovalCleanupPreview,
+          approvals,
+        };
+        downloadJson(payload, `synthetic-approval-fixture-${new Date().toISOString().slice(0, 10)}.json`);
+        return;
+      }
       const payload = await exportApprovals({
-        status,
+        status: status || undefined,
         execution_state: executionState || undefined,
         include_archived: viewMode === 'history' && includeArchived,
         limit: 500,
         include_events: true,
       });
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `approval-audit-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadJson(payload, `approval-audit-${new Date().toISOString().slice(0, 10)}.json`);
     } catch (e: any) {
       setError(e.message);
     }
@@ -218,8 +267,21 @@ export default function ControlCenter() {
           <p className="text-xs text-gray-500 mt-1 max-w-3xl">
             Approval allows one gated attempt. Blocked, dry-run, failed, and stuck results are audit outcomes, not autonomous action.
           </p>
+          {syntheticMode && (
+            <p className="text-xs text-sky-300 mt-2 max-w-3xl">
+              Synthetic visual QA mode is active. Records are frontend-only fixtures for fixture.gmail.local and cannot call approval, cleanup, or IMAP endpoints.
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {ALLOW_SYNTHETIC_APPROVAL_FIXTURES && (
+            <button
+              onClick={() => setSyntheticMode((value) => !value)}
+              className={`px-3 py-2 rounded-lg text-sm font-medium ${syntheticMode ? 'bg-sky-700 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+            >
+              {syntheticMode ? 'Synthetic QA on' : 'Synthetic QA off'}
+            </button>
+          )}
           <div className="inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1">
             {(['active', 'history'] as const).map((mode) => (
               <button
@@ -240,7 +302,7 @@ export default function ControlCenter() {
             className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200"
           >
             {STATUS_OPTIONS.map((option) => (
-              <option key={option} value={option}>{label(option)}</option>
+              <option key={option || 'all'} value={option}>{option ? label(option) : 'all statuses'}</option>
             ))}
           </select>
           <select
@@ -278,6 +340,21 @@ export default function ControlCenter() {
 
       {error && <div className="bg-red-900/20 border border-red-900/50 p-3 rounded-lg text-red-400 text-sm">{error}</div>}
 
+      {ALLOW_SYNTHETIC_APPROVAL_FIXTURES && !syntheticMode && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 text-xs text-gray-400">
+          Synthetic approval fixtures are available because <span className="text-gray-200">VITE_APPROVAL_FIXTURES=1</span> is set. Toggle Synthetic QA to inspect populated states without backend writes.
+        </div>
+      )}
+
+      {syntheticMode && (
+        <div className="bg-sky-950/30 border border-sky-800/60 rounded-lg p-3 text-sm text-sky-100">
+          <div className="font-semibold">Synthetic data only</div>
+          <div className="text-xs mt-1 opacity-90">
+            This mode uses local fake approvals, fake audit events, and a fake cleanup preview. It does not touch Gmail, IMAP, data/agent.db, or approval execution endpoints.
+          </div>
+        </div>
+      )}
+
       {cleanupPreview && (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -293,7 +370,7 @@ export default function ControlCenter() {
                 cleanup {cleanupPreview.cleanup_enabled ? 'enabled' : 'disabled'} / archive after {cleanupPreview.archive_terminal_after_days}d / audit retained {cleanupPreview.retain_audit_days}d
               </div>
             </div>
-            <SmallButton muted busy={busy.__cleanup === 'running'} disabled={Boolean(busy.__cleanup)} onClick={() => {
+            {!syntheticMode && <SmallButton muted busy={busy.__cleanup === 'running'} disabled={Boolean(busy.__cleanup)} onClick={() => {
               setBusy((state) => ({ ...state, __cleanup: 'running' }));
               runCleanup().finally(() => setBusy((state) => {
                 const next = { ...state };
@@ -302,18 +379,18 @@ export default function ControlCenter() {
               }));
             }}>
               Run explicit cleanup
-            </SmallButton>
+            </SmallButton>}
           </div>
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(380px,460px)] gap-4">
         <div className="space-y-3">
           {loading ? (
             <div className="text-gray-500 text-sm">Loading approvals...</div>
           ) : approvals.length === 0 ? (
             <div className="border border-dashed border-gray-800 rounded-lg p-8 text-center text-sm text-gray-500">
-              No {label(status)} approvals
+              No {status ? label(status) : 'matching'} approvals
             </div>
           ) : approvals.map((approval) => (
             <ApprovalRow
@@ -329,6 +406,7 @@ export default function ControlCenter() {
               expireApproval={expireApproval}
               archiveApproval={archiveApproval}
               unarchiveApproval={unarchiveApproval}
+              readOnlySynthetic={syntheticMode}
             />
           ))}
         </div>
@@ -356,10 +434,21 @@ export default function ControlCenter() {
               ? () => run(selected.approval_id, 'unarchiving', () => unarchiveApproval(selected.approval_id))
               : undefined
           }
+          readOnlySynthetic={syntheticMode}
         />
       </div>
     </div>
   );
+}
+
+function downloadJson(payload: any, filename: string) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function ApprovalRow({
@@ -374,6 +463,7 @@ function ApprovalRow({
   expireApproval,
   archiveApproval,
   unarchiveApproval,
+  readOnlySynthetic,
 }: {
   approval: MailActionApproval;
   busy?: string;
@@ -386,13 +476,14 @@ function ApprovalRow({
   expireApproval: (approvalId: string) => Promise<MailActionApproval>;
   archiveApproval: (approvalId: string) => Promise<MailActionApproval>;
   unarchiveApproval: (approvalId: string) => Promise<MailActionApproval>;
+  readOnlySynthetic?: boolean;
 }) {
-  const actionType = approval.action_type || approval.proposed_action_type;
+  const actionType = approvalActionType(approval);
   const state = approval.execution_state || 'not_requested';
   const reason = approval.blocked_reason || approval.execution_error;
   const message = approval.message_context || {};
   const gate = approval.current_gate_preview?.gate;
-  const target = approval.target || approval.proposed_target;
+  const target = approvalTarget(approval);
 
   return (
     <div className={`bg-gray-900 border rounded-lg p-4 ${selected ? 'border-indigo-700' : 'border-gray-800'}`}>
@@ -402,6 +493,8 @@ function ApprovalRow({
           <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${stateClass(state)}`}>{label(state)}</span>
           <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${riskClass(approval.risk_level)}`}>{label(approval.risk_level)}</span>
           <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${gateClass(gate)}`}>{gateLabel(approval)}</span>
+          <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${gateClass(gate)}`}>{approvalStatusLabel(approval)}</span>
+          {readOnlySynthetic && <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-sky-950/60 text-sky-300">Synthetic fixture</span>}
           {approval.is_archived && <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-300">Audit retained</span>}
           <span className="text-xs text-gray-500">{supportLabel(actionType)}</span>
         </div>
@@ -424,7 +517,11 @@ function ApprovalRow({
       </button>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {approval.status === 'pending' && (
+        {readOnlySynthetic ? (
+          <span className="text-xs text-sky-300">
+            Read-only fixture: approval, execution, archive, and cleanup endpoints are unavailable.
+          </span>
+        ) : approval.status === 'pending' && (
           <>
             <SmallButton busy={busy === 'approving'} disabled={Boolean(busy)} onClick={() => run(approval.approval_id, 'approving', () => approveApproval(approval.approval_id, 'Approved from Control Center'))}>
               Approve attempt
@@ -437,17 +534,17 @@ function ApprovalRow({
             </SmallButton>
           </>
         )}
-        {approval.status === 'approved' && approval.execution_state !== 'started' && approval.execution_state !== 'stuck' && (
+        {!readOnlySynthetic && approval.status === 'approved' && approval.execution_state !== 'started' && approval.execution_state !== 'stuck' && (
           <SmallButton busy={busy === 'executing'} disabled={Boolean(busy)} onClick={() => run(approval.approval_id, 'executing', () => executeApproval(approval.approval_id))}>
-            Run gated attempt
+            Mock verify + audit
           </SmallButton>
         )}
-        {isTerminal(approval) && !approval.is_archived && (
+        {!readOnlySynthetic && isTerminal(approval) && !approval.is_archived && (
           <SmallButton muted busy={busy === 'archiving'} disabled={Boolean(busy)} onClick={() => run(approval.approval_id, 'archiving', () => archiveApproval(approval.approval_id))}>
             Archive from active view
           </SmallButton>
         )}
-        {approval.is_archived && (
+        {!readOnlySynthetic && approval.is_archived && (
           <SmallButton muted busy={busy === 'unarchiving'} disabled={Boolean(busy)} onClick={() => run(approval.approval_id, 'unarchiving', () => unarchiveApproval(approval.approval_id))}>
             Unarchive
           </SmallButton>
@@ -464,6 +561,7 @@ function ApprovalDetail({
   onMarkFailed,
   onArchive,
   onUnarchive,
+  readOnlySynthetic,
 }: {
   approval: MailActionApproval | null;
   busy?: string;
@@ -471,6 +569,7 @@ function ApprovalDetail({
   onMarkFailed?: () => void;
   onArchive?: () => void;
   onUnarchive?: () => void;
+  readOnlySynthetic?: boolean;
 }) {
   const timeline = useMemo(() => approval?.events || [], [approval]);
   if (!approval) {
@@ -480,25 +579,106 @@ function ApprovalDetail({
       </div>
     );
   }
-  const actionType = approval.action_type || approval.proposed_action_type;
+  const actionType = approvalActionType(approval);
   const state = approval.execution_state || 'not_requested';
   const message = approval.message_context || {};
   const gate = approval.current_gate_preview;
   const trigger = approval.trigger_context;
   const rule = approval.rule_context;
-  const target = approval.target || approval.proposed_target;
+  const target = approvalTarget(approval);
+  const banner = approvalBanner(approval);
+  const identityWarnings = identityBlockers(approval);
+  const configWarnings = configBlockers(approval);
+  const capability = capabilitySummary(approval);
+  const dryRun = dryRunPlanSummary(approval);
+  const finalVerification = finalVerificationSummary(approval);
+  const mailboxAccount = message.account_label || message.account_id || approval.account_id || 'n/a';
+  const mailboxFolder = message.folder || approval.folder || 'n/a';
+  const mailboxUid = message.imap_uid ?? approval.imap_uid ?? 'n/a';
+  const mailboxUidvalidity = message.uidvalidity ?? approval.uidvalidity ?? 'n/a';
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-4 xl:sticky xl:top-4 self-start">
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-auto self-start">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${stateClass(state)}`}>{label(state)}</div>
+          <div className="flex flex-wrap gap-2">
+            <div className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${stateClass(state)}`}>{label(state)}</div>
+            <div className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${gateClass(gate?.gate)}`}>{approvalStatusLabel(approval)}</div>
+            {readOnlySynthetic && <div className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium bg-sky-950/60 text-sky-300">Synthetic fixture</div>}
+          </div>
           {approval.is_archived && <div className="inline-flex ml-2 px-2 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-300">Audit retained</div>}
           <h3 className="text-sm font-semibold text-gray-100 mt-2">{approval.preview_title || 'Approval detail'}</h3>
           <p className="text-xs text-gray-500 mt-1">{approval.approval_id}</p>
         </div>
         <button onClick={onClose} className="text-xs text-gray-500 hover:text-gray-300">Close</button>
       </div>
+
+      <SafetyBanner tone={banner.tone} title={banner.title} body={banner.body} />
+
+      {readOnlySynthetic && (
+        <div className="rounded-lg border border-sky-800/60 bg-sky-950/20 p-3 text-xs text-sky-100">
+          Frontend-only fixture record. This detail panel is safe for visual QA and cannot call approval execution, cleanup, Gmail, or IMAP endpoints.
+        </div>
+      )}
+
+      <Section title="Summary">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Info label="Action" value={`${label(actionType)}${target ? ` -> ${target}` : ''}`} />
+          <Info label="Current status" value={approvalStatusLabel(approval)} />
+          <Info label="Account" value={mailboxAccount} />
+          <Info label="Folder" value={mailboxFolder} />
+          <Info label="UID" value={String(mailboxUid)} />
+          <Info label="UIDVALIDITY" value={String(mailboxUidvalidity)} />
+        </div>
+        <Info label="Message identity" value={approval.message_id || approval.message_key || 'n/a'} />
+      </Section>
+
+      <Section title="Blockers / warnings">
+        <WarningList title="Config blockers" items={configWarnings} />
+        <WarningList title="Identity blockers" items={identityWarnings} empty="No account, folder, UID, or UIDVALIDITY blocker was reported." />
+        <WarningList title="Capability blockers" items={capability.blocker ? [capability.blocker] : []} empty="No capability blocker was reported." />
+      </Section>
+
+      <Section title="Capability state">
+        <Info label="Cache" value={`${capability.cacheStatus} / ${capability.capability}`} />
+        <Info label="Required operation" value={capability.operation} />
+        <Info label="Supported operations" value={capability.supported} />
+        <JsonBlock title="Capability cache" value={gate?.capability_cache} />
+      </Section>
+
+      <Section title="Dry-run plan">
+        <Info label="Plan status" value={dryRun.present ? 'Dry-run plan returned. No mailbox change will be made.' : 'Approval exists but has no dry-run plan.'} />
+        <Info label="Operation" value={dryRun.operation} />
+        <Info label="Target" value={dryRun.target} />
+        <Info label="Mutation flag" value={dryRun.wouldMutate} />
+        <Info label="Rollback hint" value={dryRun.rollback} />
+        <JsonBlock title="Safety gates" value={dryRun.gates} />
+      </Section>
+
+      <Section title="Safety preview">
+        <div className="flex flex-wrap gap-2">
+          <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${gateClass(gate?.gate)}`}>{gateLabel(approval)}</span>
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-sky-950/50 text-sky-300">
+            {gate?.would_execute_now ? 'Gate would allow non-mailbox action only' : 'No mailbox change under current settings'}
+          </span>
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-sky-950/50 text-sky-300">Mock only</span>
+          {isReadinessAction(actionType) && (
+            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-sky-950/50 text-sky-300">Readiness only</span>
+          )}
+        </div>
+        <Info label="Reason" value={gate?.reason || approval.blocked_reason || 'n/a'} />
+        <Info label="Config" value={`mode ${gate?.mode || 'n/a'} / live mutation ${gate?.mutation_enabled === true ? 'configured true' : 'disabled'} / dry-run default ${gate?.dry_run_default === true ? 'on' : gate?.dry_run_default === false ? 'off' : 'n/a'} / capability ${gate?.capability || 'n/a'}`} />
+        {gate?.notes?.length ? <Info label="Notes" value={gate.notes.join(' ')} /> : null}
+      </Section>
+
+      <Section title="Final verification">
+        <Info label="Status" value={finalVerification.present ? `${finalVerification.status} / safe_to_execute=${finalVerification.safe}` : 'Not run yet.'} />
+        <WarningList title="Verification blockers" items={finalVerification.blockers} empty="No final verification blocker was reported." />
+        <WarningList title="Verification warnings" items={finalVerification.warnings} empty="No final verification warning was reported." />
+        <JsonBlock title="Mailbox identity" value={finalVerification.mailbox} />
+        <JsonBlock title="Message identity" value={finalVerification.message} />
+        <JsonBlock title="Current flags" value={finalVerification.flags} />
+      </Section>
 
       <Section title="Why this appeared">
         <Info label="Source" value={`${label(approval.source_type)}${approval.trigger_id ? ` / ${approval.trigger_id}` : ''}`} />
@@ -510,26 +690,11 @@ function ApprovalDetail({
         <Info label="Sender" value={message.sender || approval.sender || 'n/a'} />
         <Info label="Subject" value={message.subject || approval.subject || approval.message_id || approval.message_key || 'n/a'} />
         <Info label="Received" value={fmt(message.received_at || approval.received_at)} />
-        <Info label="Account / folder" value={`${message.account_label || approval.account_id || 'n/a'} / ${message.folder || approval.folder || 'n/a'}`} />
-        <Info label="Mailbox reference" value={`UID ${message.imap_uid || approval.imap_uid || 'n/a'} / UIDVALIDITY ${message.uidvalidity || approval.uidvalidity || 'n/a'}`} />
       </Section>
 
-      <Section title="Proposed action">
-        <Info label="Action" value={`${label(actionType)}${target ? ` -> ${target}` : ''}`} />
+      <Section title="Proposed value">
         <Info label="Guidance" value={approval.operator_guidance || nextStep(approval)} />
         <JsonBlock title="Proposed value" value={approval.proposed_value} />
-      </Section>
-
-      <Section title="Safety preview">
-        <div className="flex flex-wrap gap-2">
-          <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${gateClass(gate?.gate)}`}>{gateLabel(approval)}</span>
-          <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${gate?.would_execute_now ? 'bg-green-950/50 text-green-300' : 'bg-amber-950/50 text-amber-300'}`}>
-            {gate?.would_execute_now ? 'Approval allows one gated attempt' : 'No mailbox change under current settings'}
-          </span>
-        </div>
-        <Info label="Blocked reason" value={gate?.reason || approval.blocked_reason || 'n/a'} />
-        <Info label="Config" value={`mode ${gate?.mode || 'n/a'} / mutations ${gate?.mutation_enabled ?? 'n/a'} / dry-run ${gate?.dry_run_default ?? 'n/a'} / capability ${gate?.capability || 'n/a'}`} />
-        {gate?.notes?.length ? <Info label="Notes" value={gate.notes.join(' ')} /> : null}
       </Section>
 
       <Section title="Risk">
@@ -553,23 +718,24 @@ function ApprovalDetail({
         </div>
       )}
 
-      <JsonBlock title="Gate result" value={approval.gate_result || approval.execution_result} />
+      <JsonBlock title="Gate result" value={approval.gate_result || approval.execution_result?.gate_result || approval.execution_result} />
+      <JsonBlock title="Execution result" value={approval.execution_result} />
       <JsonBlock title="Trigger context" value={trigger} />
       <JsonBlock title="Rule context" value={rule} />
 
-      {state === 'stuck' && onMarkFailed && (
+      {!readOnlySynthetic && state === 'stuck' && onMarkFailed && (
         <SmallButton danger busy={busy === 'marking_failed'} disabled={Boolean(busy)} onClick={onMarkFailed}>
           Mark failed after review
         </SmallButton>
       )}
 
-      {isTerminal(approval) && !approval.is_archived && onArchive && (
+      {!readOnlySynthetic && isTerminal(approval) && !approval.is_archived && onArchive && (
         <SmallButton muted busy={busy === 'archiving'} disabled={Boolean(busy)} onClick={onArchive}>
           Archive from active view
         </SmallButton>
       )}
 
-      {approval.is_archived && onUnarchive && (
+      {!readOnlySynthetic && approval.is_archived && onUnarchive && (
         <SmallButton muted busy={busy === 'unarchiving'} disabled={Boolean(busy)} onClick={onUnarchive}>
           Unarchive
         </SmallButton>
@@ -601,6 +767,38 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <div className="text-[10px] uppercase tracking-wider text-gray-500">{title}</div>
       <div className="space-y-2">
         {children}
+      </div>
+    </div>
+  );
+}
+
+function SafetyBanner({ tone, title, body }: { tone: string; title: string; body: string }) {
+  const color = tone === 'danger'
+    ? 'border-red-800/70 bg-red-950/30 text-red-100'
+    : tone === 'warning'
+      ? 'border-amber-800/70 bg-amber-950/30 text-amber-100'
+      : tone === 'info'
+        ? 'border-sky-800/70 bg-sky-950/30 text-sky-100'
+        : 'border-gray-700 bg-gray-950/60 text-gray-200';
+  return (
+    <div className={`rounded-lg border p-3 ${color}`}>
+      <div className="text-sm font-semibold break-words">{title}</div>
+      <div className="text-xs mt-1 opacity-90 break-words">{body}</div>
+    </div>
+  );
+}
+
+function WarningList({ title, items, empty }: { title: string; items: string[]; empty?: string }) {
+  const rows = items.length ? items : [empty || 'No blocker was reported.'];
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-gray-500">{title}</div>
+      <div className="mt-1 space-y-1">
+        {rows.map((item, idx) => (
+          <div key={`${title}-${idx}`} className={`rounded border px-2 py-1.5 text-xs break-words ${items.length ? 'border-amber-900/50 bg-amber-950/20 text-amber-100' : 'border-gray-800 bg-gray-950/40 text-gray-400'}`}>
+            {item}
+          </div>
+        ))}
       </div>
     </div>
   );

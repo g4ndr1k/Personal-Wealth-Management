@@ -19,6 +19,7 @@ ACTIVE_ACTIONS = {
     "notify_dashboard",
     "stop_processing",
     "move_to_folder",
+    "add_label",
     "mark_read",
     "mark_unread",
     "mark_flagged",
@@ -27,6 +28,7 @@ ACTIVE_ACTIONS = {
 
 MUTATION_ACTIONS = {
     "move_to_folder",
+    "add_label",
     "mark_read",
     "mark_unread",
     "mark_flagged",
@@ -435,6 +437,48 @@ def _execute_mutation_action(
             details=details)
         return {"event_written": events_written + 1, "status": status}
 
+    allow_gate = {
+        "mark_read": "allow_mark_read",
+        "mark_unread": "allow_mark_unread",
+        "add_label": "allow_add_label",
+        "move_to_folder": "allow_move_to_folder",
+    }.get(action_type)
+    if allow_gate and not cfg.get(allow_gate, False):
+        status = "action_not_allowed"
+        details = {**audit_base, "status": status,
+                   "gate_status": status,
+                   "reason": f"mail.imap_mutations.{allow_gate}=false"}
+        _write_processing_event(
+            state, message, rule, action,
+            event_type="mutation:action_not_allowed",
+            outcome=status,
+            details=details)
+        return {"event_written": events_written + 1, "status": status}
+
+    if not _message_has_imap_identity(message):
+        status = "identity_incomplete"
+        details = {**audit_base, "status": status,
+                   "gate_status": status,
+                   "reason": "message lacks account/folder/UID/UIDVALIDITY"}
+        _write_processing_event(
+            state, message, rule, action,
+            event_type="mutation:identity_incomplete",
+            outcome=status,
+            details=details)
+        return {"event_written": events_written + 1, "status": status}
+
+    if action_type == "add_label":
+        status = "unsupported"
+        details = {**audit_base, "status": status,
+                   "gate_status": status,
+                   "reason": "add_label live execution is not implemented"}
+        _write_processing_event(
+            state, message, rule, action,
+            event_type="mutation:unsupported",
+            outcome=status,
+            details=details)
+        return {"event_written": events_written + 1, "status": status}
+
     executor = mutation_context.get("executor")
     if executor is None:
         status = "unsupported"
@@ -457,7 +501,8 @@ def _execute_mutation_action(
         status = result.get("status") or "failed"
         event_status = status if status in {
             "completed", "failed", "unsupported", "uidvalidity_mismatch",
-            "mutation_disabled", "dry_run", "mode_blocked"
+            "mutation_disabled", "dry_run", "mode_blocked",
+            "action_not_allowed", "identity_incomplete"
         } else "failed"
         event_type = (
             "mutation:completed"
@@ -523,6 +568,14 @@ def _mutation_cfg(raw: dict[str, Any] | None) -> dict[str, bool]:
     raw = raw or {}
     return {
         "enabled": bool(raw.get("enabled", False)),
+        "allow_mark_read": bool(raw.get("allow_mark_read", False)),
+        "allow_mark_unread": bool(raw.get("allow_mark_unread", False)),
+        "allow_add_label": bool(raw.get("allow_add_label", False)),
+        "allow_move_to_folder": bool(raw.get("allow_move_to_folder", False)),
+        "require_uidvalidity_match": bool(
+            raw.get("require_uidvalidity_match", True)),
+        "require_capability_cache": bool(
+            raw.get("require_capability_cache", True)),
         "allow_create_folder": bool(raw.get("allow_create_folder", False)),
         "allow_copy_delete_fallback": bool(
             raw.get("allow_copy_delete_fallback", False)),
@@ -541,6 +594,16 @@ def _mutation_audit_payload(
         message: dict[str, Any], rule: dict[str, Any],
         action: dict[str, Any], mode: str, cfg: dict[str, bool],
         target: Any) -> dict[str, Any]:
+    plan = build_dry_run_mutation_plan(
+        action["action_type"],
+        account_id=message.get("imap_account"),
+        folder=message.get("imap_folder"),
+        uid=message.get("imap_uid"),
+        uidvalidity=message.get("imap_uidvalidity"),
+        target=target,
+        cfg=cfg,
+        mode=mode,
+    )
     return {
         "rule_name": rule["name"],
         "account_id": message.get("imap_account"),
@@ -552,6 +615,10 @@ def _mutation_audit_payload(
         "mode": mode,
         "mutation_enabled": cfg["enabled"],
         "dry_run_default": cfg["dry_run_default"],
+        "dry_run_plan": plan,
+        "safety_gates": plan["safety_gates"],
+        "rollback_hint": plan.get("rollback_hint"),
+        "mailbox_mutation_occurred": False,
     }
 
 
@@ -564,6 +631,16 @@ def _mutation_preview_metadata(
     dry_run = bool(mutation_context.get("dry_run", cfg["dry_run_default"]))
     target = _mutation_target(action)
     action_type = action["action_type"]
+    plan = build_dry_run_mutation_plan(
+        action_type,
+        account_id=message.get("imap_account"),
+        folder=message.get("imap_folder"),
+        uid=message.get("imap_uid"),
+        uidvalidity=message.get("imap_uidvalidity"),
+        target=target,
+        cfg=cfg,
+        mode=mode,
+    )
 
     if mode != "live":
         status = "mode_blocked"
@@ -596,7 +673,96 @@ def _mutation_preview_metadata(
         "reason": reason,
         "dry_run": dry_run,
         "mutation": True,
+        "dry_run_plan": plan,
+        "safety_gates": plan["safety_gates"],
+        "rollback_hint": plan.get("rollback_hint"),
+        "reversible": plan.get("reversible"),
     }
+
+
+def build_dry_run_mutation_plan(
+        action_type: str, *, account_id: Any, folder: Any, uid: Any,
+        uidvalidity: Any, target: Any = None,
+        cfg: dict[str, bool] | None = None, mode: str = "draft_only",
+        extra_gates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    cfg = _mutation_cfg(cfg)
+    operation, rollback_hint, reversible = _mutation_operation(
+        action_type, target)
+    gates = [
+        {
+            "gate": "agent_mode_live",
+            "status": "passed" if mode == "live" else "blocked",
+            "reason": mode,
+        },
+        {
+            "gate": "imap_mutations_enabled",
+            "status": "passed" if cfg["enabled"] else "blocked",
+            "reason": str(cfg["enabled"]).lower(),
+        },
+        {
+            "gate": "dry_run_default",
+            "status": "blocked" if cfg["dry_run_default"] else "passed",
+            "reason": str(cfg["dry_run_default"]).lower(),
+        },
+    ]
+    allow_gate = {
+        "mark_read": "allow_mark_read",
+        "mark_unread": "allow_mark_unread",
+        "add_label": "allow_add_label",
+        "move_to_folder": "allow_move_to_folder",
+    }.get(action_type)
+    if allow_gate:
+        gates.append({
+            "gate": allow_gate,
+            "status": "passed" if cfg.get(allow_gate) else "blocked",
+            "reason": str(bool(cfg.get(allow_gate))).lower(),
+        })
+    if extra_gates:
+        gates.extend(extra_gates)
+    return {
+        "action_type": action_type,
+        "account_id": account_id,
+        "folder": folder,
+        "uid": uid,
+        "uidvalidity": uidvalidity,
+        "target": target,
+        "operation": operation,
+        "dry_run": True,
+        "would_mutate": False,
+        "reversible": reversible,
+        "rollback_hint": rollback_hint,
+        "safety_gates": gates,
+    }
+
+
+def _mutation_operation(action_type: str, target: Any = None) -> tuple[str, str | None, bool]:
+    if action_type == "mark_read":
+        return (
+            r"STORE +FLAGS.SILENT (\Seen)",
+            r"mark_unread using STORE -FLAGS.SILENT (\Seen)",
+            True,
+        )
+    if action_type == "mark_unread":
+        return (
+            r"STORE -FLAGS.SILENT (\Seen)",
+            r"mark_read using STORE +FLAGS.SILENT (\Seen)",
+            True,
+        )
+    if action_type == "add_label":
+        label = str(target or "<label>")
+        return (
+            f"STORE +X-GM-LABELS.SILENT ({label})",
+            f"remove Gmail label {label} if supported",
+            True,
+        )
+    if action_type == "move_to_folder":
+        folder = str(target or "<target folder>")
+        return (
+            f"UID MOVE/COPY to {folder}",
+            "move back to original folder if UID identity can be re-established",
+            True,
+        )
+    return action_type, None, False
 
 
 def _message_has_imap_identity(message: dict[str, Any]) -> bool:

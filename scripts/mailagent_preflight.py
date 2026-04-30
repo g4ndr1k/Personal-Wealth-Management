@@ -407,6 +407,39 @@ def inspect_config() -> list[str]:
             lines.append(f"  - `{k}` = {display}")
         lines.append("")
 
+    mutation_cfg = cfg.get("mail", {}).get("imap_mutations", {})
+    lines.append("### Phase 4E.2 execution safety")
+    verifier_path = REPO / "agent" / "app" / "action_verification.py"
+    executor_path = REPO / "agent" / "app" / "action_execution.py"
+    lines.append(
+        _ok("Final read-only verification module present")
+        if verifier_path.exists()
+        else _fail("Final read-only verification module missing"))
+    lines.append(
+        _ok("Mock execution module present")
+        if executor_path.exists()
+        else _fail("Mock execution module missing"))
+    if mutation_cfg.get("enabled") is True:
+        lines.append(_warn("mail.imap_mutations.enabled=true"))
+    else:
+        lines.append(_ok("mail.imap_mutations.enabled=false"))
+    if mutation_cfg.get("dry_run_default") is True:
+        lines.append(_ok("dry_run_default=true"))
+    else:
+        lines.append(_warn("dry_run_default=false"))
+    for key in (
+            "allow_mark_read", "allow_mark_unread",
+            "allow_add_label", "allow_move_to_folder"):
+        value = mutation_cfg.get(key)
+        if value is True and not mutation_cfg.get("enabled"):
+            lines.append(_warn(f"{key}=true while global mutations are disabled"))
+        elif value is True:
+            lines.append(_warn(f"{key}=true"))
+        else:
+            lines.append(_ok(f"{key}=false"))
+    lines.append(_ok("Preflight performs no mailbox mutation"))
+    lines.append("")
+
     return lines
 
 

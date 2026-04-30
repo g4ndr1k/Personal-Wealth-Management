@@ -24,6 +24,8 @@ Keep the high-level architecture summary in `SYSTEM_DESIGN.md`, keep command-onl
 | Phase 4B AI enrichment | Implemented, read-only |
 | Phase 4C.1 IMAP mutation primitives | Implemented, gated/audited |
 | Phase 4C.3A AI trigger actions | Implemented, preview-only |
+| Phase 4E.2 final read-only verification + mock execution API | Implemented, non-mutating |
+| Phase 4F natural-language rule builder | Planned, docs-only |
 | Unsafe actions such as auto-reply, forward, webhook, unsubscribe | Not exposed |
 
 Important database boundary:
@@ -143,6 +145,8 @@ PUT    /api/mail/rules/reorder
 POST   /api/mail/rules/preview
 GET    /api/mail/processing-events
 ```
+
+Planned Phase 4F AI rule-builder endpoints are documented in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). They are draft/validate/preview/save-after-human-review surfaces only; AI must not write directly to `mail_rules` or execute mailbox actions.
 
 ### Worker health/debug API
 
@@ -404,9 +408,15 @@ Default config:
 ```toml
 [mail.imap_mutations]
 enabled = false
+dry_run_default = true
+allow_mark_read = false
+allow_mark_unread = false
+allow_add_label = false
+allow_move_to_folder = false
+require_uidvalidity_match = true
+require_capability_cache = true
 allow_create_folder = false
 allow_copy_delete_fallback = false
-dry_run_default = true
 ```
 
 Safety constraints:
@@ -418,6 +428,8 @@ Safety constraints:
 - COPY + STORE `\Deleted` fallback is disabled by default and never calls EXPUNGE in this phase.
 - STORE supports only `\Seen` and `\Flagged`.
 - Every planned, blocked, dry-run, unsupported, completed, or failed mutation path writes `mail_processing_events`.
+
+Phase 4D.5 adds readiness plumbing without enabling live mailbox mutation. Approval preview/detail can include `current_gate_preview.dry_run_plan` for future reversible candidates (`mark_read`, `mark_unread`, `add_label`, and cautious `move_to_folder`). The plan records account, folder, UID, UIDVALIDITY, the would-be IMAP operation, `would_mutate=false`, safety gates, and a rollback hint. Capability summaries are cached per account/folder in `imap_capability_cache`; discovery is read-only and must not create folders, mark messages, move messages, or label messages. If capability cache is missing/unknown, UIDVALIDITY is missing/mismatched, the account is disabled, or an allow flag is false, preview remains blocked. Under default config, approved mutation attempts still cannot perform real mailbox changes.
 
 ---
 
@@ -513,6 +525,28 @@ GET  /api/mail/approvals/export?format=json
 ```
 
 Cleanup is disabled by default. The preview is read-only. Explicit cleanup may expire old pending approvals and archive old terminal approvals, but started/stuck approvals are excluded and hard delete is not used in this phase. Archive hides terminal approvals from the active Control Center; audit history remains retained and exportable. JSON export includes sanitized approval/message context and optional events, not raw email bodies or secrets.
+
+Phase 4D.5 readiness fields extend the same preview surface. For reversible candidates the Control Center shows mailbox identity, capability status, config blockers, dry-run plan, safety gates, and rollback hint with explicit wording that no mailbox change will occur under current settings. Dangerous actions still do not receive dry-run mutation plans.
+
+---
+
+## Phase 4F Natural Language Rule Builder — Planned
+
+Phase 4F will add AI-assisted rule authoring without changing the mailbox mutation boundary. The intended flow is:
+
+```text
+User natural-language request
+  -> AI rule drafting
+  -> deterministic schema validation
+  -> safety allow-list validation
+  -> preview/diff
+  -> human approve/save
+  -> existing deterministic rules engine
+```
+
+AI drafts proposed rules only. It does not save rules, execute actions, or mutate Gmail/IMAP. Phase 4F.1 is scoped to safe non-mutating rule actions such as `mark_pending_alert`, `skip_ai_inference`, `add_to_needs_reply`, `route_to_pdf_pipeline`, `notify_dashboard`, and `stop_processing`. Gmail spam/move/label/read/unread mutations remain blocked or deferred unless they later pass through the Phase 4E approval/execution gates.
+
+Detailed plan: [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md).
 
 ---
 

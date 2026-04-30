@@ -2,6 +2,51 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-05-01 — Planned Phase 4F Natural Language Rule Builder
+
+- Added roadmap/design documentation for AI-assisted rule authoring.
+- The planned builder translates natural-language user requests into proposed deterministic mail rules.
+- AI drafts only; it does not save rules or execute mailbox actions.
+- Human review/save remains required.
+- Phase 4F.1 is scoped to safe non-mutating rule actions only.
+- Gmail/IMAP mutations such as move_to_spam, add_label, move_to_folder, mark_read, and mark_unread remain blocked/deferred unless routed through future execution gates.
+
+## 2026-05-01 — Phase 4E.2 Final Read-Only Verification
+
+- Added a final read-only verification layer with a mailbox adapter boundary and fake adapter tests before mock execution records can be written.
+- Approval mailbox execution now follows `gate evaluator -> final read-only verifier -> mock executor`; verification failures write blocked execution audit rows and do not run the mock executor.
+- Added mock execution API response details for gate results, final verification, execution mode, and blocker metadata.
+- Updated the Control Center detail view to label the action as mock verification/audit and surface final verification blockers, warnings, mailbox identity, message identity, and current flags.
+- Preserved the safety boundary: no live Gmail/IMAP mutation, no `STORE`/flag mutation from approval execution, no bulk execute, no auto-execute, and `add_label` / `move_to_folder` remain deferred.
+
+## 2026-05-01 — Phase 4E.1 Execution Chassis Mock-Only
+
+- Added future execution tables, deterministic plan hashing, idempotency keys, and a pure execution gate evaluator for approved mailbox actions.
+- Added a mock-only executor that writes metadata-only execution and immutable event audit rows without touching Gmail or issuing IMAP mutation commands.
+- Limited executable readiness to `mark_read` and `mark_unread`; `add_label`, `move_to_folder`, and dangerous actions remain blocked.
+- Preserved the safety boundary: approval records human intent only, read/unread are not live, no real IMAP mutation exists in this phase, no bulk execute, no auto-execute, and conservative mutation defaults remain unchanged.
+
+## 2026-05-01 — Phase 4E Live Reversible Mutation Design Review
+
+- Added a design-only Phase 4E spec for future live reversible IMAP mutations.
+- Defined execution gates, idempotency keys, audit records, rollback semantics, Gmail/IMAP caveats, capability verification, operator flow, failure handling, and later implementation tests.
+- Recommended the first live phase support only `mark_read` and `mark_unread`; `add_label` and `move_to_folder` remain deferred.
+- Preserved the safety boundary: no live mutation by default, no autonomous execution, no auto-execute after approval, no bulk actions, no dangerous actions, and no mutation when identity or rollback safety is uncertain.
+
+## 2026-04-30 — Phase 4D.7 Synthetic Approval Visual QA
+
+- Added a dev-only, frontend-only Control Center synthetic approval fixture mode gated by `VITE_APPROVAL_FIXTURES=1` during Vite development.
+- Fixture records cover populated readiness, approved-but-live-disabled, dangerous blocked, missing UID, missing UIDVALIDITY, UIDVALIDITY mismatch, missing capability cache, disabled account, terminal/archived, and cleanup preview states.
+- Synthetic mode is visibly labelled, uses fake `fixture.gmail.local` data, disables approval/execution/archive/cleanup endpoint controls, and does not write `data/agent.db` or touch Gmail/IMAP.
+- Preserved the Phase 4D safety boundary: no live mutation enablement, no auto-approval, no bulk approval, no auto-retry, and no default safety config changes.
+
+## 2026-04-30 — Phase 4D.6 Control Center Operator Polish
+
+- Polished the Control Center approval detail view with a top safety banner, summary, blockers, capability state, dry-run plan, safety preview, and lifecycle/audit context.
+- Updated operator copy so readiness, dry-run planning, approval, blocked states, and archived terminal records are visually distinct and do not imply Gmail or mailbox mutation.
+- Added frontend helper coverage for readiness-only labels, live-disabled approval wording, dangerous blocked wording, missing capability cache, UIDVALIDITY mismatch, `would_mutate=false`, and safe-default config blockers.
+- Preserved the Phase 4D safety boundary: live mailbox mutation remains disabled, approval records human intent only, no bulk approval or auto-execution was added, and safe/off/dry-run defaults remain intact.
+
 ## 2026-04-30 — Phase 4D.4 Approval Lifecycle Hygiene
 
 - Added `archived_at` lifecycle metadata for terminal approvals so old items can be hidden from the active Control Center while retaining audit history.
@@ -154,6 +199,14 @@ Human-readable project history. Reverse chronological order.
 - Kept root `README.md` short and moved detailed operations/troubleshooting elsewhere.
 - Merged Household Expense implementation details into core docs and removed the standalone household plan.
 - Added fail-fast XLSX header validation in `finance/importer.py` so shifted columns cannot import positionally.
+
+## 2026-04-30 — Phase 4D.5 Reversible Mutation Readiness
+
+- Added conservative `[mail.imap_mutations]` allow flags and UIDVALIDITY/capability-cache requirements, all disabled by default.
+- Added cached IMAP capability readiness storage and read-only readiness summaries.
+- Added dry-run mutation plans, safety gates, UID/UIDVALIDITY identity checks, and rollback hints for future reversible action candidates.
+- Updated Control Center detail to show readiness-only mutation plans without offering live enablement.
+- Preserved dangerous action blocking, no bulk approval, no auto-retry, and no live mailbox mutation by default.
 
 ## 2026-04-25 — PDF Preflight And Silent Failure Hardening
 

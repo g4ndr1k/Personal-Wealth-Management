@@ -27,9 +27,15 @@ urgency_threshold = 8
 
 [mail.imap_mutations]
 enabled = false
+dry_run_default = true
+allow_mark_read = false
+allow_mark_unread = false
+allow_add_label = false
+allow_move_to_folder = false
+require_uidvalidity_match = true
+require_capability_cache = true
 allow_create_folder = false
 allow_copy_delete_fallback = false
-dry_run_default = true
 
 [mail.approvals]
 enabled = true

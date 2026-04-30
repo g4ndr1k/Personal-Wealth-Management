@@ -68,6 +68,7 @@ For first-time setup, secrets, LaunchAgents, PDF workflows, and maintenance comm
 |---|---|
 | [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) | Stable architecture, contracts, flows, and component responsibilities. |
 | [docs/MAIL_AGENT.md](docs/MAIL_AGENT.md) | Detailed mail-agent, dashboard, IMAP, rules, credential, and troubleshooting reference. |
+| [docs/phase-4f-natural-language-rule-builder.md](docs/phase-4f-natural-language-rule-builder.md) | Planned AI-assisted mail rule authoring design; AI drafts, deterministic validation checks, human saves. |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running, maintaining, validating, and backing up the system. |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom-driven diagnosis and fixes. |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Human-readable recent change history. |
@@ -79,6 +80,7 @@ For first-time setup, secrets, LaunchAgents, PDF workflows, and maintenance comm
 - Stage 1 mail alerting: active
 - Stage 1 IMAP intake and attachment routing: implemented; enabled when `[mail.imap].accounts` contains real accounts, otherwise the bridge mail source remains the fallback
 - Native mail dashboard: implemented and buildable; talks to dashboard mail APIs on local port `8090`
+- Mail rule roadmap: Phase 4F natural-language rule builder is planned as non-mutating AI draft/preview/human-save only
 - Stage 2 finance import and PWA: active
 - Stage 3 wealth management: active
 - CoreTax SPT mapping-first ledger and wizard: active

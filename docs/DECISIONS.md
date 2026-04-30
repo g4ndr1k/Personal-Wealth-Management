@@ -2,6 +2,29 @@
 
 Lightweight ADR-style notes. Keep entries short and link to operational details instead of repeating them.
 
+## Use AI For Rule Drafting, Not Rule Execution
+
+### Decision
+
+AI may translate natural-language user intent into proposed deterministic rules, but it must not directly save rules, execute actions, or mutate mailboxes.
+
+### Context
+
+Phase 4F plans a natural-language rule builder for requests such as local sender suppression or finance-email alert routing. The usability goal is a simple text interface, while the safety architecture still requires deterministic validation, human review/save, and deterministic rule execution.
+
+### Rationale
+
+This preserves the existing safety model: AI suggests, deterministic validation checks, human approves, and the safe deterministic engine applies saved rules later.
+
+### Consequences
+
+- AI output must use a strict schema.
+- Only allow-listed actions can be proposed.
+- Blocked/deferred actions must be surfaced as warnings.
+- Saving remains a human action.
+- Live mailbox mutation remains governed by Phase 4E execution gates.
+- Detailed Phase 4F design lives in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md).
+
 ## Use A Shared Matching Engine With Flag-Gated Domains
 
 ### Decision
@@ -292,3 +315,45 @@ Archiving hides terminal approvals from the active view without deleting audit r
 - Started/stuck approvals are reported and excluded.
 - Terminal approvals can be archived/unarchived one at a time or archived by explicit cleanup.
 - Export returns sanitized approval records and optional events, not raw email bodies or secrets.
+
+## Reversible Mutation Support Starts As Dry-Run Readiness
+
+### Decision
+
+Phase 4D.5 validates reversible mailbox mutation plumbing through read-only capability cache, UIDVALIDITY guards, dry-run mutation plans, safety gates, rollback hints, and audit visibility. It does not enable live mutation execution.
+
+### Context
+
+Future actions such as `mark_read`, `mark_unread`, Gmail-style labels, and cautious folder moves need precise message identity and provider capability knowledge before they can be considered. The operator also needs to see why a future action is blocked by default config instead of by missing safety plumbing.
+
+### Rationale
+
+Starting with readiness keeps the human approval boundary intact while proving the reversible-action contract. A dry-run plan can be reviewed, exported, and audited without touching mailbox state.
+
+### Consequences
+
+- `[mail.imap_mutations].enabled=false`, `dry_run_default=true`, and all `allow_*` flags remain conservative defaults.
+- Capability discovery is read-only and cached per account/folder.
+- Missing UID, missing UIDVALIDITY, UIDVALIDITY mismatch, disabled account, and missing/unknown capability cache block readiness.
+- No delete, expunge, reply, forward, unsubscribe, webhook, external webhook, or iMessage expansion is introduced.
+
+## First Live Reversible IMAP Phase Should Be Read/Unread Only
+
+### Decision
+
+Phase 4E recommends that the first future live mailbox mutation phase support only `mark_read` and `mark_unread`, behind explicit live config, explicit human approval, explicit human execute, final read-only identity verification, idempotency records, and immutable audit events.
+
+### Context
+
+Phase 4D.5 proved readiness and dry-run planning for reversible action candidates, including labels and moves. The next risk boundary is not whether an operation can be performed, but whether the system can prove the exact message identity, perform the mutation once, and describe rollback safely before it mutates a real mailbox.
+
+### Rationale
+
+`mark_read` and `mark_unread` map to the IMAP `\Seen` flag and can be rolled back from known before-state. Gmail labels and folder moves have provider-specific behavior around labels, system labels, All Mail, archive semantics, UID changes, MOVE support, and copy/delete fallback. Those need separate review before live execution.
+
+### Consequences
+
+- `add_label` remains readiness-only until existing-label verification and Gmail label semantics are fully tested.
+- `move_to_folder` remains deferred until rollback identity is airtight.
+- Approval continues to record intent only; execution remains a separate explicit action.
+- No live mutation occurs by default, and no mutation occurs if final verification changes or rollback cannot be described safely.

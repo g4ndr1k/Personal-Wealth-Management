@@ -16,11 +16,22 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, EmailStr, ValidationError
 
+from .action_execution import (
+    evaluate_execution_gate,
+    execution_id_for_key,
+    mock_execute_approved_action,
+)
+from .action_verification import (
+    FinalVerificationRequest,
+    ImapReadOnlyMailboxAdapter,
+    verify_action_plan_readonly,
+)
 from .state import AgentState, apply_sqlite_pragmas
 from .rules import (
     ACTIVE_ACTIONS,
     ALLOWED_OPERATORS,
     MUTATION_ACTIONS,
+    build_dry_run_mutation_plan,
     evaluate_message,
     validate_action_type,
     validate_operator,
@@ -28,7 +39,7 @@ from .rules import (
     _execute_mutation_action,
     _mutation_preview_metadata,
 )
-from .imap_source import probe_capabilities
+from .imap_source import probe_capabilities, _load_app_password
 from .config_manager import (
     ConfigManager,
     DuplicateAccountError,
@@ -328,7 +339,9 @@ def _validate_rule_payload(conditions: list[RuleConditionIn],
         target = (action.target or "").strip()
         if action.action_type == "move_to_folder" and not target:
             raise ValueError("move_to_folder requires a non-empty target")
-        if action.action_type in MUTATION_ACTIONS - {"move_to_folder"} and target:
+        if action.action_type == "add_label" and not target:
+            raise ValueError("add_label requires a non-empty target")
+        if action.action_type in MUTATION_ACTIONS - {"move_to_folder", "add_label"} and target:
             raise ValueError(f"{action.action_type} does not accept a target")
 
 def _classification_for_trigger_preview(
@@ -524,6 +537,171 @@ def _approval_message_context(approval: dict) -> dict[str, Any]:
         "confidence": approval.get("ai_confidence"),
     }
 
+def _mutation_cfg(settings: dict) -> dict[str, Any]:
+    raw = settings.get("mail", {}).get("imap_mutations", {})
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "dry_run_default": bool(raw.get("dry_run_default", True)),
+        "allow_mark_read": bool(raw.get("allow_mark_read", False)),
+        "allow_mark_unread": bool(raw.get("allow_mark_unread", False)),
+        "allow_add_label": bool(raw.get("allow_add_label", False)),
+        "allow_move_to_folder": bool(raw.get("allow_move_to_folder", False)),
+        "require_uidvalidity_match": bool(
+            raw.get("require_uidvalidity_match", True)),
+        "require_capability_cache": bool(
+            raw.get("require_capability_cache", True)),
+        "allow_create_folder": bool(raw.get("allow_create_folder", False)),
+        "allow_copy_delete_fallback": bool(
+            raw.get("allow_copy_delete_fallback", False)),
+    }
+
+def _capability_status_for_action(
+        action_type: str, cache: dict | None) -> tuple[str, str | None]:
+    if not cache:
+        return "missing", "Capability cache is missing."
+    if cache.get("status") not in {None, "ok"}:
+        return "unknown", cache.get("error") or "Capability check did not succeed."
+    if action_type in {"mark_read", "mark_unread"}:
+        value = cache.get("supports_store_flags")
+        if value is True:
+            return "known", None
+        if value is False:
+            return "unsupported", "STORE flag support is not advertised."
+        return "unknown", "STORE flag support is unknown."
+    if action_type == "add_label":
+        value = cache.get("supports_gmail_labels")
+        if value is True:
+            return "known", None
+        if value is False:
+            return "unsupported", "Gmail label capability is not advertised."
+        return "unknown", "Gmail label capability is unknown."
+    if action_type == "move_to_folder":
+        value = cache.get("supports_move")
+        if value is True:
+            return "known", None
+        if value is False:
+            return "unsupported", "UID MOVE support is not advertised."
+        return "unknown", "UID MOVE support is unknown."
+    return "not_applicable", None
+
+def _mutation_readiness(
+        state: AgentState, approval: dict, settings: dict) -> dict[str, Any]:
+    action_type = str(approval.get("proposed_action_type") or "")
+    cfg = _mutation_cfg(settings)
+    mode = _resolve_mode(settings)
+    account_id = approval.get("account_id")
+    folder = approval.get("folder")
+    uid = approval.get("imap_uid")
+    uidvalidity = approval.get("uidvalidity")
+    target = approval.get("proposed_target")
+    account = _find_account(str(account_id or "")) if account_id else None
+    folder_state = (
+        state.get_imap_folder_state(str(account_id), str(folder))
+        if account_id and folder else None
+    )
+    cache = (
+        state.get_imap_capability_cache(str(account_id), str(folder))
+        if account_id and folder else None
+    )
+    capability_status, capability_reason = _capability_status_for_action(
+        action_type, cache)
+    gates: list[dict[str, Any]] = []
+
+    def add_gate(name: str, passed: bool, reason: str,
+                 *, warning: bool = False) -> None:
+        gates.append({
+            "gate": name,
+            "status": (
+                "passed" if passed else "warning" if warning else "blocked"),
+            "reason": reason,
+        })
+
+    add_gate("account_present", bool(account_id), str(account_id or "missing"))
+    add_gate("folder_present", bool(folder), str(folder or "missing"))
+    add_gate("imap_uid_present", uid is not None, str(uid or "missing"))
+    add_gate(
+        "uidvalidity_present",
+        uidvalidity is not None and str(uidvalidity) != "",
+        str(uidvalidity or "missing"),
+    )
+    if account is None:
+        add_gate("account_enabled", False, "account unavailable")
+    else:
+        add_gate(
+            "account_enabled",
+            bool(account.get("enabled", True)),
+            "true" if account.get("enabled", True) else "false",
+        )
+    if folder_state is None:
+        add_gate("folder_state_available", False, "folder state unavailable")
+    else:
+        cached_validity = folder_state.get("uidvalidity")
+        add_gate(
+            "folder_state_available",
+            cached_validity is not None,
+            "uidvalidity cached" if cached_validity is not None else "uidvalidity missing",
+        )
+        if cfg["require_uidvalidity_match"] and uidvalidity is not None and cached_validity is not None:
+            add_gate(
+                "uidvalidity_match",
+                str(cached_validity) == str(uidvalidity),
+                f"cached={cached_validity} approval={uidvalidity}",
+            )
+    if cfg["require_capability_cache"]:
+        add_gate(
+            "capability_cache_present",
+            cache is not None,
+            "cached" if cache else "missing",
+        )
+    if cache and cache.get("uidvalidity") and uidvalidity is not None and cfg["require_uidvalidity_match"]:
+        add_gate(
+            "capability_uidvalidity_match",
+            str(cache.get("uidvalidity")) == str(uidvalidity),
+            f"cached={cache.get('uidvalidity')} approval={uidvalidity}",
+        )
+    if cache:
+        add_gate(
+            "capability_known",
+            capability_status == "known",
+            capability_reason or capability_status,
+            warning=capability_status == "unknown",
+        )
+    allow_gate = {
+        "mark_read": "allow_mark_read",
+        "mark_unread": "allow_mark_unread",
+        "add_label": "allow_add_label",
+        "move_to_folder": "allow_move_to_folder",
+    }.get(action_type)
+    if allow_gate:
+        add_gate(allow_gate, bool(cfg.get(allow_gate)), str(bool(cfg.get(allow_gate))).lower())
+
+    plan = build_dry_run_mutation_plan(
+        action_type,
+        account_id=account_id,
+        folder=folder,
+        uid=uid,
+        uidvalidity=uidvalidity,
+        target=target,
+        cfg=cfg,
+        mode=mode,
+        extra_gates=gates,
+    )
+    blockers = [
+        gate for gate in plan["safety_gates"]
+        if gate.get("status") == "blocked"
+    ]
+    return {
+        "config": cfg,
+        "mode": mode,
+        "folder_state": folder_state,
+        "capability_cache": cache,
+        "capability_status": capability_status,
+        "capability_reason": capability_reason,
+        "identity_complete": bool(account_id and folder and uid is not None and uidvalidity),
+        "blockers": blockers,
+        "plan": plan,
+    }
+
 def _approval_trigger_context(
         approval: dict, events: list[dict] | None = None) -> dict[str, Any] | None:
     if approval.get("source_type") != "ai_trigger":
@@ -651,39 +829,79 @@ def _approval_current_gate_preview(
             "notes": ["No execution path is available for this action."],
         }
 
-    cfg = settings.get("mail", {}).get("imap_mutations", {})
-    message = _approval_message(approval)
-    action = _approval_action(approval)
-    preview = _mutation_preview_metadata(
-        message,
-        action,
-        {
-            "mode": _resolve_mode(settings),
-            "config": cfg,
-            "dry_run": bool(cfg.get("dry_run_default", True)),
-        },
+    readiness = _mutation_readiness(state, approval, settings)
+    cfg = readiness["config"]
+    plan = readiness["plan"]
+    blockers = readiness["blockers"]
+    first_blocker = blockers[0] if blockers else None
+    gate_map = {
+        "agent_mode_live": "mode_blocked",
+        "imap_mutations_enabled": "mutation_disabled",
+        "dry_run_default": "dry_run",
+        "allow_mark_read": "action_not_allowed",
+        "allow_mark_unread": "action_not_allowed",
+        "allow_add_label": "action_not_allowed",
+        "allow_move_to_folder": "action_not_allowed",
+        "imap_uid_present": "identity_incomplete",
+        "uidvalidity_present": "identity_incomplete",
+        "account_present": "identity_incomplete",
+        "folder_present": "identity_incomplete",
+        "account_enabled": "account_disabled",
+        "folder_state_available": "folder_state_unavailable",
+        "uidvalidity_match": "uidvalidity_mismatch",
+        "capability_uidvalidity_match": "uidvalidity_mismatch",
+        "capability_cache_present": "capability_cache_missing",
+        "capability_known": "capability_unknown",
+    }
+    gate = gate_map.get(first_blocker["gate"], "blocked") if first_blocker else "ready"
+    reason_map = {
+        "imap_mutations_enabled": "mail.imap_mutations.enabled=false",
+        "dry_run_default": "mail.imap_mutations.dry_run_default=true",
+        "allow_mark_read": "mail.imap_mutations.allow_mark_read=false",
+        "allow_mark_unread": "mail.imap_mutations.allow_mark_unread=false",
+        "allow_add_label": "mail.imap_mutations.allow_add_label=false",
+        "allow_move_to_folder": "mail.imap_mutations.allow_move_to_folder=false",
+    }
+    reason = (
+        reason_map.get(first_blocker["gate"], first_blocker["reason"])
+        if first_blocker
+        else "all readiness gates are present, but live mutation remains phase-gated"
     )
-    gate = str(preview.get("gate_status") or "blocked")
-    reason = str(preview.get("reason") or gate)
-    capability = "unknown" if gate == "ready" else "not_checked"
-    notes = []
-    if gate == "ready":
-        notes.append(
-            "Static gates allow an attempt, but IMAP capability is not probed for preview.")
-    else:
-        notes.append("Approval would authorize an attempt, but current config would block mutation.")
-    if gate == "dry_run":
-        notes.append("No mailbox change would occur under current settings.")
+    capability = readiness["capability_status"]
+    notes = [
+        "Readiness only.",
+        "No mailbox change will occur under current settings.",
+        "Live mutation disabled unless explicitly enabled in a later phase.",
+    ]
+    if blockers:
+        notes.append("Blocked by default config or readiness guard.")
+    if readiness["identity_complete"]:
+        notes.append("UIDVALIDITY guard present.")
+    if capability in {"missing", "unknown"}:
+        notes.append("Capability unknown; live execution would be blocked.")
     return {
-        "would_execute_now": bool(preview.get("would_execute")),
-        "would_be_blocked_now": not bool(preview.get("would_execute")),
+        "would_execute_now": False,
+        "would_be_blocked_now": True,
         "gate": gate,
         "reason": reason,
         "capability": capability,
         "notes": notes,
-        "mode": _resolve_mode(settings),
-        "mutation_enabled": bool(cfg.get("enabled", False)),
-        "dry_run_default": bool(cfg.get("dry_run_default", True)),
+        "mode": readiness["mode"],
+        "mutation_enabled": cfg["enabled"],
+        "dry_run_default": cfg["dry_run_default"],
+        "allow_mark_read": cfg["allow_mark_read"],
+        "allow_mark_unread": cfg["allow_mark_unread"],
+        "allow_add_label": cfg["allow_add_label"],
+        "allow_move_to_folder": cfg["allow_move_to_folder"],
+        "identity_complete": readiness["identity_complete"],
+        "uidvalidity_guard": bool(approval.get("uidvalidity")),
+        "capability_cache": readiness["capability_cache"],
+        "folder_state": readiness["folder_state"],
+        "dry_run_plan": plan,
+        "mutation_plan": plan,
+        "rollback_hint": plan.get("rollback_hint"),
+        "reversible": plan.get("reversible"),
+        "safety_gates": plan["safety_gates"],
     }
 
 def _approval_risk(
@@ -711,7 +929,7 @@ def _approval_risk(
     if gate_preview.get("would_be_blocked_now"):
         reasons.append(f"Current gate preview blocks execution: {gate_preview.get('reason')}")
     if gate_preview.get("capability") == "unknown":
-        reasons.append("Mailbox capability is unknown because preview does not open IMAP transactions.")
+        reasons.append("Mailbox capability is unknown; live execution would be blocked.")
     reversibility = {
         "safe_readonly": "No mailbox mutation.",
         "safe_reversible": "Generally reversible in the mailbox UI.",
@@ -955,6 +1173,11 @@ def _mutation_executor(settings: dict):
             return move_message_by_uid(
                 account, folder, uidvalidity, uid, target,
                 dry_run=dry_run)
+        if action_type == "add_label":
+            return {
+                "status": "unsupported",
+                "error": "add_label live execution is not implemented",
+            }
         flag_map = {
             "mark_read": (["\\Seen"], []),
             "mark_unread": ([], ["\\Seen"]),
@@ -968,6 +1191,89 @@ def _mutation_executor(settings: dict):
             remove_flags=remove_flags,
             dry_run=dry_run)
     return execute
+
+def _execution_plan_for_approval(approval: dict, settings: dict) -> dict:
+    action_type = str(approval.get("proposed_action_type") or "")
+    value = approval.get("proposed_value")
+    value = value if isinstance(value, dict) else {}
+    plan = build_dry_run_mutation_plan(
+        action_type,
+        account_id=approval.get("account_id"),
+        folder=approval.get("folder"),
+        uid=approval.get("imap_uid"),
+        uidvalidity=approval.get("uidvalidity"),
+        target=approval.get("proposed_target"),
+        cfg=_mutation_cfg(settings),
+        mode=_resolve_mode(settings),
+    )
+    if isinstance(value.get("before_state"), dict):
+        plan["before_state"] = value["before_state"]
+    if isinstance(value.get("message_identity"), dict):
+        plan["message_identity"] = value["message_identity"]
+    if value.get("plan_hash"):
+        plan["plan_hash"] = value["plan_hash"]
+    return plan
+
+def _readonly_mailbox_adapter(settings: dict, approval: dict):
+    account_id = str(approval.get("account_id") or "")
+    account = _find_account(account_id)
+    if not account:
+        raise RuntimeError(f"IMAP account not found: {account_id}")
+    password = _load_app_password(account)
+    return ImapReadOnlyMailboxAdapter(account, password=password)
+
+def _first_gate_reason(gate_result) -> str:
+    if not gate_result.blocked_reasons:
+        return "blocked"
+    reason = gate_result.blocked_reasons[0]
+    if reason.startswith("agent.mode="):
+        return "mode_blocked"
+    if reason == "mail.imap_mutations.dry_run_default=true":
+        return "dry_run"
+    if reason == "mail.imap_mutations.enabled=false":
+        return "mutation_disabled"
+    if reason.startswith("mail.imap_mutations.allow_"):
+        return "action_not_allowed"
+    if reason.startswith("unsupported_execution_action"):
+        return "unsupported"
+    if reason.endswith("_deferred"):
+        return "unsupported"
+    if reason.startswith("dangerous_action"):
+        return "unsupported"
+    return reason
+
+def _blocked_execution_record(
+        state: AgentState, gate_result, final_verification: dict | None,
+        *, event_type: str) -> dict | None:
+    if not gate_result.idempotency_key or not gate_result.plan_hash:
+        return None
+    execution_id = execution_id_for_key(gate_result.idempotency_key)
+    blockers = (
+        final_verification.get("blockers", [])
+        if final_verification else [
+            {"code": "gate_blocked", "message": "; ".join(gate_result.blocked_reasons)}
+        ]
+    )
+    error = blockers[0].get("message") if blockers else "Execution blocked"
+    return state.insert_blocked_action_execution(
+        execution_id=execution_id,
+        approval_id=str(gate_result.approval_id),
+        account_id=str(gate_result.account_id),
+        folder=str(gate_result.folder),
+        uidvalidity=str(gate_result.uidvalidity),
+        imap_uid=str(gate_result.imap_uid),
+        operation=str(gate_result.operation),
+        target=None if gate_result.target is None else str(gate_result.target),
+        plan_hash=gate_result.plan_hash,
+        idempotency_key=gate_result.idempotency_key,
+        error_message=error,
+        event_type=event_type,
+        event_payload={
+            "gate_result": gate_result.to_dict(),
+            "final_verification": final_verification,
+            "execution_mode": "mock",
+        },
+    )
 
 def _execute_approved_action(state: AgentState, approval: dict) -> dict:
     action_type = approval["proposed_action_type"]
@@ -1007,30 +1313,123 @@ def _execute_approved_action(state: AgentState, approval: dict) -> dict:
         }
 
     settings = _get_settings()
-    cfg = settings.get("mail", {}).get("imap_mutations", {})
-    outcome = _execute_mutation_action(
-        state,
-        message,
-        rule,
-        action,
+    plan = _execution_plan_for_approval(approval, settings)
+    account = _find_account(str(approval.get("account_id") or ""))
+    folder_state = (
+        state.get_imap_folder_state(
+            str(approval.get("account_id")), str(approval.get("folder")))
+        if approval.get("account_id") and approval.get("folder") else None
+    )
+    capability_cache = (
+        state.get_imap_capability_cache(
+            str(approval.get("account_id")), str(approval.get("folder")))
+        if approval.get("account_id") and approval.get("folder") else None
+    )
+    gate_result = evaluate_execution_gate(
+        approval=approval,
+        settings=settings,
+        account=account,
+        folder_state=folder_state,
+        capability_cache=capability_cache,
+        dry_run_plan=plan,
+        existing_execution=None,
+        mock_mode=True,
+    )
+    existing = (
+        state.get_action_execution_by_idempotency(gate_result.idempotency_key)
+        if gate_result.idempotency_key else None
+    )
+    if existing:
+        gate_result = evaluate_execution_gate(
+            approval=approval,
+            settings=settings,
+            account=account,
+            folder_state=folder_state,
+            capability_cache=capability_cache,
+            dry_run_plan=plan,
+            existing_execution=existing,
+            mock_mode=True,
+        )
+    if gate_result.status != "ready":
+        execution_status = _first_gate_reason(gate_result)
+        _blocked_execution_record(
+            state, gate_result, None, event_type="mock_execution_blocked")
+        return {
+            "status": "blocked",
+            "execution_status": execution_status,
+            "execution_mode": "mock",
+            "gate_result": gate_result.to_dict(),
+            "final_verification": None,
+            "result": {
+                "status": execution_status,
+                "gate_result": gate_result.to_dict(),
+                "mailbox_mutation_occurred": False,
+                "mock_only": True,
+            },
+        }
+
+    verification_request = FinalVerificationRequest(
+        approval=approval,
+        gate_result=gate_result,
+        plan_hash=str(gate_result.plan_hash),
+        idempotency_key=str(gate_result.idempotency_key),
+    )
+    verifier = verify_action_plan_readonly(
+        verification_request,
+        _readonly_mailbox_adapter(settings, approval),
+    )
+    verifier_payload = verifier.to_dict()
+    if verifier.status != "verified":
+        blocked = _blocked_execution_record(
+            state, gate_result, verifier_payload,
+            event_type="final_verification_blocked")
+        return {
+            "status": "blocked",
+            "execution_status": "final_verification_blocked",
+            "execution_mode": "mock",
+            "gate_result": gate_result.to_dict(),
+            "final_verification": verifier_payload,
+            "execution": blocked,
+            "result": {
+                "status": "final_verification_blocked",
+                "gate_result": gate_result.to_dict(),
+                "final_verification": verifier_payload,
+                "mailbox_mutation_occurred": False,
+                "mock_only": True,
+            },
+        }
+
+    execution = mock_execute_approved_action(state, gate_result)
+    state.write_action_execution_event(
+        execution["execution_id"],
+        "final_verification_passed",
+        verifier_payload,
+    )
+    state.write_action_execution_event(
+        execution["execution_id"],
+        "mock_execution_completed",
         {
-            "mode": _resolve_mode(settings),
-            "config": cfg,
-            "dry_run": bool(cfg.get("dry_run_default", True)),
-            "executor": _mutation_executor(settings),
+            "execution_id": execution["execution_id"],
+            "approval_id": approval.get("approval_id"),
+            "execution_mode": "mock",
+            "mailbox_mutation_occurred": False,
         },
     )
-    execution_status = str(outcome.get("status") or "failed")
-    if execution_status == "completed":
-        status = "executed"
-    elif execution_status == "failed":
-        status = "failed"
-    else:
-        status = "blocked"
     return {
-        "status": status,
-        "execution_status": execution_status,
-        "result": outcome,
+        "status": "executed",
+        "execution_status": "mock_executed",
+        "execution_mode": "mock",
+        "gate_result": gate_result.to_dict(),
+        "final_verification": verifier_payload,
+        "execution": execution,
+        "result": {
+            "status": "mock_executed",
+            "gate_result": gate_result.to_dict(),
+            "final_verification": verifier_payload,
+            "execution": execution,
+            "mailbox_mutation_occurred": False,
+            "mock_only": True,
+        },
     }
 
 
@@ -1378,7 +1777,62 @@ async def get_imap_capabilities(
     payload["folder"] = folder
     if target_folder:
         payload["target_folder"] = target_folder
-    return probe_capabilities(payload).to_dict()
+    caps = probe_capabilities(payload).to_dict()
+    _ensure_state().upsert_imap_capability_cache(
+        account_id=account_id,
+        folder=folder,
+        uidvalidity=caps.get("uidvalidity"),
+        capabilities=caps.get("capabilities") or [],
+        supports_store_flags=caps.get("supports_store_flags"),
+        supports_move=caps.get("supports_move"),
+        supports_create_folder=(
+            caps.get("supports_create_folder")
+            if caps.get("supports_create_folder") is not None
+            else caps.get("create_supported")
+        ),
+        supports_gmail_labels=caps.get("supports_gmail_labels"),
+        source="live",
+        status=caps.get("status") or "ok",
+        error=caps.get("error"),
+    )
+    return caps
+
+@router.get(
+    "/imap-mutations/readiness",
+    dependencies=[Depends(require_api_key)],
+)
+async def imap_mutation_readiness():
+    state = _ensure_state()
+    settings = _get_settings()
+    cfg = _mutation_cfg(settings)
+    summaries = []
+    for account in _get_config_accounts():
+        account_id = account.get("id") or account.get("name") or account.get("email")
+        for folder in account.get("folders") or ["INBOX"]:
+            cache = state.get_imap_capability_cache(str(account_id), str(folder))
+            folder_state = state.get_imap_folder_state(str(account_id), str(folder))
+            blockers = []
+            if not account.get("enabled", True):
+                blockers.append("account disabled")
+            if cfg["require_capability_cache"] and not cache:
+                blockers.append("capability cache missing")
+            if cfg["require_uidvalidity_match"] and not folder_state.get("uidvalidity"):
+                blockers.append("UIDVALIDITY missing")
+            summaries.append({
+                "account_id": account_id,
+                "folder": folder,
+                "account_enabled": bool(account.get("enabled", True)),
+                "folder_state": folder_state,
+                "capability_cache": cache,
+                "blockers": blockers,
+            })
+    return {
+        "readiness_only": True,
+        "live_mutation_disabled": not cfg["enabled"],
+        "dry_run_default": cfg["dry_run_default"],
+        "config": cfg,
+        "accounts": summaries,
+    }
 
 @router.post(
     "/messages/{message_id}/mutation-preview",
@@ -1387,7 +1841,7 @@ async def get_imap_capabilities(
 async def mutation_preview(message_id: str, data: MutationPreview):
     validate_action_type(data.action_type)
     if data.action_type not in {
-        "move_to_folder", "mark_read", "mark_unread",
+        "move_to_folder", "add_label", "mark_read", "mark_unread",
         "mark_flagged", "unmark_flagged",
     }:
         raise HTTPException(
@@ -1434,6 +1888,16 @@ async def mutation_preview(message_id: str, data: MutationPreview):
             "imap_uid": source.get("imap_uid"),
             "uidvalidity": source.get("uidvalidity"),
         },
+        "dry_run_plan": build_dry_run_mutation_plan(
+            data.action_type,
+            account_id=source.get("account_id"),
+            folder=source.get("folder"),
+            uid=source.get("imap_uid"),
+            uidvalidity=source.get("uidvalidity"),
+            target=data.target,
+            cfg=_mutation_cfg(settings),
+            mode=mode,
+        ),
     }
 
 @router.get(

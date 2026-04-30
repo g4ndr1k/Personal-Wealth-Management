@@ -717,6 +717,12 @@ There is no bulk approval path. Unsupported actions such as `send_imessage`, rep
 
 If an approval shows `execution_state='stuck'`, the API detected `execution_status='started'` older than `[mail.approvals].started_stale_after_minutes` without a terminal result. This is intentionally read-only detection; it does not retry. Review `/api/mail/approvals/{approval_id}` and `/api/mail/approvals/{approval_id}/events`, check container logs for the same timestamp, then use the Control Center **Mark failed after review** action if the worker did not finish. That endpoint writes an audit event and does not execute or retry the action.
 
-Phase 4D.3 approval preview may show `capability='unknown'` when static gates are otherwise ready. That means the preview did not open a live IMAP transaction just to inspect mailbox capability. It is expected for read-only preview; the actual gated execution attempt still performs the normal UIDVALIDITY and capability checks before any mutation.
+Phase 4D.5 approval preview may show `capability='missing'` or `capability='unknown'`. Missing means no cached account/folder capability summary is available while `require_capability_cache=true`; unknown means the cache could not safely prove support. Both block live execution. Run the read-only capability probe endpoint only when you intentionally want to refresh cache; it must not create folders, mark messages, move messages, or label messages.
+
+If preview reports UIDVALIDITY missing or mismatch, do not execute. Missing means the approval/message identity is incomplete. Mismatch means cached folder or capability UIDVALIDITY differs from the approval context, so the IMAP UID may no longer identify the same message.
+
+If preview reports `mutation_disabled`, `dry_run`, or an `allow_*` blocker, this is expected default config. Phase 4D.5 is readiness only; no mailbox mutation occurred and no live mutation should be enabled from troubleshooting.
+
+Phase 4E.2 mock execution can also block at `final_verification_blocked`. This means the final read-only verifier could not prove that the folder UIDVALIDITY, approved UID, message headers, or current flags still match the approved plan. Inspect `execution_result.final_verification.blockers` and `mail_action_execution_events` for the structured reason. Do not treat this as a Gmail failure: the verifier uses read-only selection/fetches and the mock executor does not issue IMAP `STORE`, `MOVE`, `COPY`, `CREATE`, or `EXPUNGE`.
 
 If a terminal approval is missing from the active Control Center, check History mode with **Include archived** enabled or query `/api/mail/approvals?include_archived=true`. Archive only hides terminal rows from the active view; it does not delete the approval or its audit events.

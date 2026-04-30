@@ -1,3 +1,6 @@
+import tomllib
+
+from agent.app.action_verification import FakeReadOnlyMailboxAdapter
 from agent.app.imap_source import (
     IMAPPoller,
     _capability_names,
@@ -260,7 +263,11 @@ def test_live_enabled_rule_managed_mutation_uses_executor_and_audits_result(tmp_
         _message(),
         mutation_context={
             "mode": "live",
-            "config": {"enabled": True, "dry_run_default": False},
+            "config": {
+                "enabled": True,
+                "dry_run_default": False,
+                "allow_move_to_folder": True,
+            },
             "dry_run": False,
             "executor": executor,
         },
@@ -274,3 +281,33 @@ def test_live_enabled_rule_managed_mutation_uses_executor_and_audits_result(tmp_
         ).fetchall()
     assert [row[0] for row in rows] == ["planned", "completed"]
     assert '"mutation_result"' in rows[-1][1]
+
+
+def test_read_only_adapter_exposes_no_mutating_methods():
+    adapter = FakeReadOnlyMailboxAdapter()
+
+    for name in (
+        "store",
+        "move",
+        "copy",
+        "create",
+        "expunge",
+        "store_flags_by_uid",
+        "move_message_by_uid",
+    ):
+        assert not hasattr(adapter, name)
+
+
+def test_config_defaults_still_disable_mutations():
+    with open("config/settings.toml", "rb") as f:
+        cfg = tomllib.load(f)
+    mutation_cfg = cfg["mail"]["imap_mutations"]
+
+    assert mutation_cfg["enabled"] is False
+    assert mutation_cfg["dry_run_default"] is True
+    assert mutation_cfg["allow_mark_read"] is False
+    assert mutation_cfg["allow_mark_unread"] is False
+    assert mutation_cfg["allow_add_label"] is False
+    assert mutation_cfg["allow_move_to_folder"] is False
+    assert mutation_cfg["require_uidvalidity_match"] is True
+    assert mutation_cfg["require_capability_cache"] is True

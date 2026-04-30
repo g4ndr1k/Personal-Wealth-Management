@@ -5,10 +5,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent.app import api_mail
+from agent.app.action_verification import FakeReadOnlyMailboxAdapter
 from agent.app.state import AgentState
 
 
-def _settings(tmp_path: Path, *, mode="draft_only", mutations_enabled=False, dry_run=True) -> Path:
+def _settings(
+        tmp_path: Path, *, mode="draft_only", mutations_enabled=False,
+        dry_run=True, allow=False, require_capability_cache=True) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "settings.toml"
     path.write_text(
@@ -26,9 +29,15 @@ safe_default = "draft_only"
 
 [mail.imap_mutations]
 enabled = {str(mutations_enabled).lower()}
+dry_run_default = {str(dry_run).lower()}
+allow_mark_read = {str(allow).lower()}
+allow_mark_unread = {str(allow).lower()}
+allow_add_label = {str(allow).lower()}
+allow_move_to_folder = {str(allow).lower()}
+require_uidvalidity_match = true
+require_capability_cache = {str(require_capability_cache).lower()}
 allow_create_folder = false
 allow_copy_delete_fallback = false
-dry_run_default = {str(dry_run).lower()}
 
 [mail.imap]
 accounts = [
@@ -40,13 +49,18 @@ accounts = [
     return path
 
 
-def _client(tmp_path, monkeypatch, *, mode="draft_only", mutations_enabled=False, dry_run=True):
+def _client(
+        tmp_path, monkeypatch, *, mode="draft_only",
+        mutations_enabled=False, dry_run=True, allow=False,
+        require_capability_cache=True):
     db_path = tmp_path / "agent.db"
     settings_path = _settings(
         tmp_path,
         mode=mode,
         mutations_enabled=mutations_enabled,
         dry_run=dry_run,
+        allow=allow,
+        require_capability_cache=require_capability_cache,
     )
     monkeypatch.setenv("AGENT_DB_PATH", str(db_path))
     monkeypatch.setenv("SETTINGS_FILE", str(settings_path))
@@ -151,16 +165,17 @@ def _age_approval(state: AgentState, approval_id: str, *, days=0, hours=0):
 
 def _create_approval(
         state: AgentState, *, action_type="mark_read", message_key="m1",
-        source_id="trigger", target=None):
+        source_id="trigger", target=None, imap_uid=42, uidvalidity=7,
+        account_id="acct", folder="INBOX"):
     state.create_action_approval(
         source_type="ai_trigger",
         source_id=source_id,
         message={
             "message_key": message_key,
-            "account_id": "acct",
-            "folder": "INBOX",
-            "uidvalidity": 7,
-            "imap_uid": 42,
+            "account_id": account_id,
+            "folder": folder,
+            "uidvalidity": uidvalidity,
+            "imap_uid": imap_uid,
         },
         action={"action_type": action_type, "target": target},
         classification=_classification(),
@@ -471,7 +486,7 @@ def test_approved_action_does_not_bypass_dry_run_default(tmp_path, monkeypatch):
     assert calls == []
 
 
-def test_approved_mailbox_action_uses_existing_gated_mutation_path(tmp_path, monkeypatch):
+def test_approved_mailbox_action_does_not_call_live_mutation_executor(tmp_path, monkeypatch):
     class Result:
         def to_dict(self):
             return {"status": "completed"}
@@ -483,7 +498,7 @@ def test_approved_mailbox_action_uses_existing_gated_mutation_path(tmp_path, mon
         lambda settings: lambda *args, **kwargs: calls.append((args, kwargs)) or Result(),
     )
     client, state = _client(
-        tmp_path, monkeypatch, mode="live", mutations_enabled=True, dry_run=False
+        tmp_path, monkeypatch, mode="live", mutations_enabled=True, dry_run=False, allow=True
     )
     state.create_action_approval(
         source_type="ai_trigger",
@@ -503,9 +518,147 @@ def test_approved_mailbox_action_uses_existing_gated_mutation_path(tmp_path, mon
     executed = client.post(f"/api/mail/approvals/{approval_id}/execute", headers={"X-Api-Key": "secret"})
 
     assert executed.status_code == 200
-    assert executed.json()["status"] == "executed"
-    assert executed.json()["execution_status"] == "completed"
-    assert calls
+    assert executed.json()["status"] == "blocked"
+    assert executed.json()["execution_status"] == "folder_state_missing"
+    assert calls == []
+
+
+def _create_verifiable_approval(state: AgentState, *, action_type="mark_read"):
+    state.set_imap_folder_state("acct", "INBOX", 42, 7)
+    state.upsert_imap_capability_cache(
+        account_id="acct",
+        folder="INBOX",
+        uidvalidity=7,
+        capabilities=["IMAP4REV1"],
+        supports_store_flags=True,
+        source="test",
+    )
+    state.create_action_approval(
+        source_type="ai_trigger",
+        source_id=f"verifiable-{action_type}",
+        message={
+            "message_key": "<m42@example.test>",
+            "account_id": "acct",
+            "folder": "INBOX",
+            "uidvalidity": 7,
+            "imap_uid": 42,
+            "subject": "Payment due",
+            "sender": "billing@example.test",
+            "received_at": "Fri, 01 May 2026 07:00:00 +0700",
+        },
+        action={
+            "action_type": action_type,
+            "value": {"before_state": {"seen": action_type == "mark_unread"}},
+        },
+        classification=_classification(),
+    )
+    return _approval_id(state)
+
+
+def _fake_adapter(*, uidvalidity="7", seen=False):
+    return FakeReadOnlyMailboxAdapter(
+        uidvalidity=uidvalidity,
+        messages={
+            "42": {
+                "identity": {
+                    "message_id": "<m42@example.test>",
+                    "subject": "Payment due",
+                    "from": "billing@example.test",
+                    "date": "Fri, 01 May 2026 07:00:00 +0700",
+                },
+                "flags": {"seen": seen},
+            }
+        },
+    )
+
+
+def test_approval_execute_runs_final_verifier_before_mock_executor(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api_mail,
+        "_readonly_mailbox_adapter",
+        lambda settings, approval: calls.append(approval["approval_id"]) or _fake_adapter(),
+    )
+    monkeypatch.setattr(
+        api_mail,
+        "_mutation_executor",
+        lambda settings: (_ for _ in ()).throw(RuntimeError("live executor must not be built")),
+    )
+    client, state = _client(
+        tmp_path, monkeypatch, mode="live",
+        mutations_enabled=True, dry_run=False, allow=True,
+    )
+    approval_id = _create_verifiable_approval(state)
+    client.post(
+        f"/api/mail/approvals/{approval_id}/approve",
+        headers={"X-Api-Key": "secret"},
+        json={},
+    )
+    executed = client.post(
+        f"/api/mail/approvals/{approval_id}/execute",
+        headers={"X-Api-Key": "secret"},
+    )
+
+    body = executed.json()
+    assert executed.status_code == 200
+    assert calls == [approval_id]
+    assert body["status"] == "executed"
+    assert body["execution_status"] == "mock_executed"
+    assert body["execution_result"]["execution_mode"] == "mock"
+    assert body["execution_result"]["final_verification"]["status"] == "verified"
+    with state._connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM mail_action_executions"
+        ).fetchone()[0] == "mock_executed"
+
+
+def test_verifier_block_prevents_mock_execution_and_writes_audit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        api_mail,
+        "_readonly_mailbox_adapter",
+        lambda settings, approval: _fake_adapter(uidvalidity="99"),
+    )
+    client, state = _client(
+        tmp_path, monkeypatch, mode="live",
+        mutations_enabled=True, dry_run=False, allow=True,
+    )
+    approval_id = _create_verifiable_approval(state)
+    client.post(
+        f"/api/mail/approvals/{approval_id}/approve",
+        headers={"X-Api-Key": "secret"},
+        json={},
+    )
+    executed = client.post(
+        f"/api/mail/approvals/{approval_id}/execute",
+        headers={"X-Api-Key": "secret"},
+    )
+
+    body = executed.json()
+    assert executed.status_code == 200
+    assert body["status"] == "blocked"
+    assert body["execution_status"] == "final_verification_blocked"
+    assert body["execution_result"]["final_verification"]["blockers"][0]["code"] == "uidvalidity_mismatch"
+    with state._connect() as conn:
+        rows = conn.execute(
+            "SELECT status FROM mail_action_executions"
+        ).fetchall()
+        events = conn.execute(
+            "SELECT event_type FROM mail_action_execution_events ORDER BY id"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["blocked"]
+    assert [event[0] for event in events] == ["final_verification_blocked"]
+
+
+def test_bulk_execution_endpoint_does_not_exist(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/mail/approvals/bulk-execute",
+        headers={"X-Api-Key": "secret"},
+        json={"approval_ids": []},
+    )
+
+    assert response.status_code in {404, 405}
 
 
 def test_unsupported_and_dangerous_actions_are_blocked_or_rejected(tmp_path, monkeypatch):
@@ -670,6 +823,143 @@ def test_pending_preview_is_read_only_and_explains_dry_run_block(tmp_path, monke
     assert body["would_execute_now"] is False
     assert body["would_be_blocked_now"] is True
     assert body["risk_level"] == "safe_reversible"
+    plan = body["current_gate_preview"]["dry_run_plan"]
+    assert plan["action_type"] == "mark_read"
+    assert plan["operation"] == r"STORE +FLAGS.SILENT (\Seen)"
+    assert plan["would_mutate"] is False
+    assert plan["rollback_hint"] == r"mark_unread using STORE -FLAGS.SILENT (\Seen)"
+
+
+def test_config_defaults_keep_imap_mutations_conservative(tmp_path, monkeypatch):
+    client, state = _client(tmp_path, monkeypatch)
+    approval_id = _create_approval(state, action_type="mark_read")
+
+    body = client.get(
+        f"/api/mail/approvals/{approval_id}",
+        headers={"X-Api-Key": "secret"},
+    ).json()
+    gates = body["current_gate_preview"]["dry_run_plan"]["safety_gates"]
+
+    assert body["current_gate_preview"]["mutation_enabled"] is False
+    assert body["current_gate_preview"]["dry_run_default"] is True
+    assert body["current_gate_preview"]["allow_mark_read"] is False
+    assert body["current_gate_preview"]["allow_mark_unread"] is False
+    assert body["current_gate_preview"]["allow_add_label"] is False
+    assert body["current_gate_preview"]["allow_move_to_folder"] is False
+    assert {"gate": "imap_mutations_enabled", "status": "blocked", "reason": "false"} in gates
+
+
+def test_reversible_action_previews_return_dry_run_plans(tmp_path, monkeypatch):
+    for action_type, target, operation in [
+        ("mark_read", None, r"STORE +FLAGS.SILENT (\Seen)"),
+        ("mark_unread", None, r"STORE -FLAGS.SILENT (\Seen)"),
+        ("add_label", "Receipts", "STORE +X-GM-LABELS.SILENT (Receipts)"),
+        ("move_to_folder", "Archive", "UID MOVE/COPY to Archive"),
+    ]:
+        client, state = _client(tmp_path / action_type, monkeypatch)
+        approval_id = _create_approval(
+            state,
+            action_type=action_type,
+            target=target,
+            message_key=action_type,
+            source_id=action_type,
+        )
+        body = client.get(
+            f"/api/mail/approvals/{approval_id}",
+            headers={"X-Api-Key": "secret"},
+        ).json()
+        plan = body["current_gate_preview"]["dry_run_plan"]
+        assert plan["action_type"] == action_type
+        assert plan["operation"] == operation
+        assert plan["dry_run"] is True
+        assert plan["would_mutate"] is False
+        assert plan["reversible"] is True
+        assert body["would_execute_now"] is False
+
+
+def test_preview_blocks_missing_uid_and_uidvalidity(tmp_path, monkeypatch):
+    for kwargs, expected_gate in [
+        ({"imap_uid": None}, "identity_incomplete"),
+        ({"uidvalidity": None}, "identity_incomplete"),
+    ]:
+        client, state = _client(
+            tmp_path / expected_gate / str(kwargs),
+            monkeypatch,
+            mode="live",
+            mutations_enabled=True,
+            dry_run=False,
+            allow=True,
+            require_capability_cache=False,
+        )
+        state.set_imap_folder_state("acct", "INBOX", 42, 7)
+        approval_id = _create_approval(
+            state,
+            message_key=str(kwargs),
+            source_id=str(kwargs),
+            **kwargs,
+        )
+        body = client.get(
+            f"/api/mail/approvals/{approval_id}",
+            headers={"X-Api-Key": "secret"},
+        ).json()
+        assert body["current_gate_preview"]["gate"] == expected_gate
+        assert body["would_execute_now"] is False
+
+
+def test_preview_blocks_uidvalidity_mismatch(tmp_path, monkeypatch):
+    client, state = _client(
+        tmp_path,
+        monkeypatch,
+        mode="live",
+        mutations_enabled=True,
+        dry_run=False,
+        allow=True,
+        require_capability_cache=False,
+    )
+    state.set_imap_folder_state("acct", "INBOX", 42, 99)
+    approval_id = _create_approval(state, action_type="mark_read", uidvalidity=7)
+
+    body = client.get(
+        f"/api/mail/approvals/{approval_id}",
+        headers={"X-Api-Key": "secret"},
+    ).json()
+
+    assert body["current_gate_preview"]["gate"] == "uidvalidity_mismatch"
+    assert "cached=99 approval=7" == body["current_gate_preview"]["reason"]
+
+
+def test_capability_cache_store_read_is_idempotent(tmp_path, monkeypatch):
+    _, state = _client(tmp_path, monkeypatch)
+
+    first = state.upsert_imap_capability_cache(
+        account_id="acct",
+        folder="INBOX",
+        uidvalidity=7,
+        capabilities=["IMAP4REV1", "MOVE"],
+        supports_store_flags=True,
+        supports_move=True,
+        supports_create_folder=False,
+        supports_gmail_labels=None,
+        source="test",
+    )
+    second = state.upsert_imap_capability_cache(
+        account_id="acct",
+        folder="INBOX",
+        uidvalidity=7,
+        capabilities=["IMAP4REV1", "MOVE"],
+        supports_store_flags=True,
+        supports_move=True,
+        supports_create_folder=False,
+        supports_gmail_labels=None,
+        source="test",
+    )
+
+    assert first["capabilities"] == ["IMAP4REV1", "MOVE"]
+    assert second["supports_store_flags"] is True
+    with state._connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM imap_capability_cache"
+        ).fetchone()[0] == 1
 
 
 def test_preview_explains_imap_mutation_disabled_block(tmp_path, monkeypatch):
@@ -688,9 +978,43 @@ def test_preview_explains_imap_mutation_disabled_block(tmp_path, monkeypatch):
     assert body["would_be_blocked_now"] is True
 
 
-def test_preview_explains_ready_static_gate_with_unknown_capability(tmp_path, monkeypatch):
+def test_preview_blocks_missing_capability_cache_when_required(tmp_path, monkeypatch):
     client, state = _client(
-        tmp_path, monkeypatch, mode="live", mutations_enabled=True, dry_run=False
+        tmp_path, monkeypatch, mode="live", mutations_enabled=True, dry_run=False, allow=True
+    )
+    state.set_imap_folder_state("acct", "INBOX", 42, 7)
+    approval_id = _create_approval(state, action_type="mark_read")
+
+    body = client.get(
+        f"/api/mail/approvals/{approval_id}",
+        headers={"X-Api-Key": "secret"},
+    ).json()
+
+    assert body["current_gate_preview"]["gate"] == "capability_cache_missing"
+    assert body["current_gate_preview"]["capability"] == "missing"
+    assert body["current_gate_preview"]["dry_run_plan"]["would_mutate"] is False
+    assert body["would_execute_now"] is False
+
+
+def test_preview_readiness_can_reach_ready_but_still_says_live_disabled(tmp_path, monkeypatch):
+    client, state = _client(
+        tmp_path,
+        monkeypatch,
+        mode="live",
+        mutations_enabled=True,
+        dry_run=False,
+        allow=True,
+    )
+    state.set_imap_folder_state("acct", "INBOX", 42, 7)
+    state.upsert_imap_capability_cache(
+        account_id="acct",
+        folder="INBOX",
+        uidvalidity=7,
+        capabilities=["IMAP4REV1"],
+        supports_store_flags=True,
+        supports_move=True,
+        supports_gmail_labels=None,
+        source="test",
     )
     approval_id = _create_approval(state, action_type="mark_read")
 
@@ -700,10 +1024,9 @@ def test_preview_explains_ready_static_gate_with_unknown_capability(tmp_path, mo
     ).json()
 
     assert body["current_gate_preview"]["gate"] == "ready"
-    assert body["current_gate_preview"]["capability"] == "unknown"
-    assert body["would_execute_now"] is True
-    assert body["risk_reasons"][-1] == (
-        "Mailbox capability is unknown because preview does not open IMAP transactions.")
+    assert body["current_gate_preview"]["capability"] == "known"
+    assert body["would_execute_now"] is False
+    assert "Live mutation disabled" in " ".join(body["current_gate_preview"]["notes"])
 
 
 def test_preview_blocks_unsupported_and_dangerous_aliases(tmp_path, monkeypatch):
@@ -844,14 +1167,21 @@ def test_blocked_execution_detail_records_gate_reason(tmp_path, monkeypatch):
     assert body["gate_result"]["status"] == "dry_run"
 
 
-def test_failed_execution_detail_records_error(tmp_path, monkeypatch):
+def test_live_executor_failure_path_is_not_reachable_from_approval(tmp_path, monkeypatch):
     def raise_executor(settings):
         def run(*args, **kwargs):
             raise RuntimeError("simulated IMAP failure")
         return run
 
     monkeypatch.setattr(api_mail, "_mutation_executor", raise_executor)
-    client, state = _client(tmp_path, monkeypatch, mode="live", mutations_enabled=True, dry_run=False)
+    client, state = _client(
+        tmp_path,
+        monkeypatch,
+        mode="live",
+        mutations_enabled=True,
+        dry_run=False,
+        allow=True,
+    )
     approval_id = _create_approval(state, action_type="mark_read")
     client.post(
         f"/api/mail/approvals/{approval_id}/approve",
@@ -864,9 +1194,10 @@ def test_failed_execution_detail_records_error(tmp_path, monkeypatch):
     )
 
     assert executed.status_code == 200
-    assert executed.json()["status"] == "failed"
-    assert executed.json()["execution_state"] == "failed"
-    assert executed.json()["execution_error"] == "simulated IMAP failure"
+    assert executed.json()["status"] == "blocked"
+    assert executed.json()["execution_state"] == "blocked"
+    assert executed.json()["execution_status"] == "folder_state_missing"
+    assert executed.json()["execution_error"] is None
 
 
 def test_started_approval_stuck_detection_and_mark_failed(tmp_path, monkeypatch):
