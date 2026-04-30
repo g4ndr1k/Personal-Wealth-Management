@@ -2,6 +2,12 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-04-30 — Phase 4A-4C.3A Release Stabilization
+
+- Confirmed the release boundary across docs: deterministic Phase 4A rules, read-only Phase 4B AI enrichment, gated rule-managed Phase 4C.1/4C.2 mailbox mutations, and preview-only Phase 4C.3A AI triggers.
+- Added an operator checklist for preflight, authenticated status, AI settings, AI classification test, deterministic rule preview, AI trigger preview, and conservative config defaults.
+- Reaffirmed that live AI-triggered actions remain intentionally disabled for this checkpoint.
+
 ## 2026-04-30 — Phase 4C.3A Preview-Only AI Triggers
 
 - Added deterministic AI trigger rules over validated AI classification fields: category, urgency score, confidence, needs-reply, summary, and reason.

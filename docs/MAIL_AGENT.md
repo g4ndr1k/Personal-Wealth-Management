@@ -544,6 +544,50 @@ Expected provider baseline:
 rule_based must be accepted as a supported classifier provider.
 ```
 
+## Phase 4 Release Operator Checklist
+
+Use this checklist before a Phase 4A through Phase 4C.3A checkpoint:
+
+```bash
+# 1. Read-only inventory and environment sanity
+python3 scripts/mailagent_preflight.py
+
+# 2. Authenticated API status without triggering a scan
+python3 scripts/mailagent_status.py --no-run
+
+# 3. Verify AI settings through the dashboard API
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
+  http://127.0.0.1:8090/api/mail/ai/settings | python3 -m json.tool
+
+# 4. Test AI classification without queueing or mutating mail
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -X POST http://127.0.0.1:8090/api/mail/ai/test \
+  -d '{"sender":"alerts@example.com","subject":"Payment due reminder","body":"Your payment is due tomorrow."}' \
+  | python3 -m json.tool
+
+# 5. Preview deterministic rules; this endpoint is side-effect-free
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -X POST http://127.0.0.1:8090/api/mail/rules/preview \
+  -d '{"sender":"alerts@example.com","subject":"Payment due reminder","body":"Your payment is due tomorrow."}' \
+  | python3 -m json.tool
+
+# 6. Preview AI triggers; planned actions must remain dry-run
+curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -X POST http://127.0.0.1:8090/api/mail/ai/triggers/preview \
+  -d '{"category":"payment_due","urgency_score":8,"confidence":0.9,"needs_reply":false,"summary":"Payment due tomorrow","reason":"Due date detected"}' \
+  | python3 -m json.tool
+```
+
+Default release posture:
+
+- Keep `[mail.ai].enabled=false` unless deliberately validating read-only AI enrichment.
+- Keep `[mail.imap_mutations].enabled=false` for the release checkpoint.
+- Keep `[mail.imap_mutations].dry_run_default=true`; deterministic rule-managed mailbox actions should preview/audit unless intentionally promoted in `live`.
+- Treat AI triggers as preview-only. They may write `ai_trigger_matched` audit events with dry-run planned actions, but live AI-triggered actions are not enabled in Phase 4C.3A.
+
 ---
 
 ## Troubleshooting

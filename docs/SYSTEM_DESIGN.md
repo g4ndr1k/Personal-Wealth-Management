@@ -220,7 +220,7 @@ Current production provider order is `["rule_based"]`. `rule_based` is a support
 |---|---|
 | `output/xls/ALL_TRANSACTIONS.xlsx` | Immutable parser output used to rebuild SQLite. |
 | `data/finance.db` | Authoritative edited finance/PWM store. |
-| `data/agent.db` | Mail-agent runtime state, including Phase 4A mail rules, rule actions, rule audit events, needs-reply rows, and future AI queue/classification tables. |
+| `data/agent.db` | Mail-agent runtime state, including Phase 4A mail rules, rule actions, rule audit events, needs-reply rows, Phase 4B AI queue/classification tables, and Phase 4C.3A preview-only AI trigger rules. |
 | `transactions` | Raw imported transaction rows keyed by hash. |
 | `category_overrides` | User edits that survive re-import. |
 | `transactions_resolved` | View merging base rows with overrides. |
