@@ -2,6 +2,27 @@
 
 Lightweight ADR-style notes. Keep entries short and link to operational details instead of repeating them.
 
+## Continue Local-First Rule Drafting With Schema-Constrained Qwen
+
+### Decision
+
+Use local Ollama with `qwen2.5:7b-instruct-q4_K_M` as the recommended model for the narrow Phase 4F natural-language alert-rule drafting flow. Keep cloud LLM integration deferred.
+
+### Context
+
+Gemma failed the first local schema probe, and Qwen initially produced invalid shape before schema hardening. After adding Ollama JSON schema output and deterministic post-validation, Qwen passed 5/5 manual alert-rule prompts.
+
+### Rationale
+
+The narrow rule-drafting task is sufficiently handled locally when schema-constrained. Keeping the flow local-first preserves privacy, avoids cloud dependency, and keeps the safety model simple.
+
+### Consequences
+
+- `[mail.rule_ai].enabled` should remain `false` by default unless actively testing.
+- The rule AI path must keep Ollama JSON schema output and deterministic post-validation.
+- Cloud provider abstraction is deferred until local quality becomes insufficient for broader rule-drafting scope.
+- The draft endpoint remains non-mutating and human-save-only.
+
 ## Use AI For Rule Drafting, Not Rule Execution
 
 ### Decision

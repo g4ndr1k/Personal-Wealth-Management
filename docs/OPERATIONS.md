@@ -474,20 +474,24 @@ curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
   | python3 -m json.tool
 ```
 
-Phase 4F.1b local rule drafting probe:
+Phase 4F local rule drafting probe:
 
 ```toml
 [mail.rule_ai]
 enabled = false
 provider = "ollama"
 base_url = "http://host.docker.internal:11434"
-model = "gemma3:4b"
+model = "qwen2.5:7b-instruct-q4_K_M"
 timeout_seconds = 30
 temperature = 0.0
 max_request_chars = 1000
 ```
 
-Keep this disabled unless you are explicitly testing local Ollama rule drafting. The probe drafts only safe local alert rules, uses structured Ollama JSON schema output where supported, post-validates model output, and never saves rules automatically. The draft endpoint does not send iMessage, mutate Gmail/IMAP, call mailbox execution code, or write rule rows; Save Rule remains the separate human-triggered `POST /api/mail/rules` path. Deterministic validation remains authoritative; cloud LLM support remains deferred.
+Keep this disabled unless you are explicitly testing local Ollama rule drafting. The current recommended local model for the narrow Phase 4F alert-rule flow is `qwen2.5:7b-instruct-q4_K_M`; Gemma failed the initial schema probe, and Qwen only became reliable after schema hardening. Phase 4F.1c expands deterministic bank/domain hints and Indonesian/English intent normalization, but the probe still drafts only safe local alert rules, uses structured Ollama JSON schema output where supported, post-validates model output, and never saves rules automatically. The draft endpoint does not send iMessage, mutate Gmail/IMAP, call mailbox execution code, or write rule rows; Save Rule remains the separate human-triggered `POST /api/mail/rules` path. Deterministic validation remains authoritative; cloud LLM support remains deferred.
+
+Phase 4F.1c supported deterministic bank hints include Permata, BCA, KlikBCA, CIMB Niaga, Maybank, Mandiri/Livin, BNI, BRI, OCBC NISP, UOB, HSBC, DBS, Jenius, and BSI. Supported intent normalization covers credit-card clarification/confirmation, suspicious/security/login alerts, payment due/billing, OTP/verification-code, and failed/declined transactions. Unsupported or overbroad requests return `status=unsupported`, `saveable=false`, and no rule; no rule is saved by the draft endpoint.
+
+Rebuild `finance-api` after changing Python code or config that affects this path. The safe default posture remains `[mail.rule_ai].enabled=false` until an operator intentionally tests AI rule drafting.
 
 ## Existing Specialized Docs
 

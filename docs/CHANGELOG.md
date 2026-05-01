@@ -2,6 +2,26 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-05-01 — Phase 4F.1c Alert Rule Draft Hardening / Bank Intent Coverage
+
+- Expanded deterministic bank-domain hints for Indonesian financial senders: Permata, BCA, KlikBCA, CIMB Niaga, Maybank, Mandiri/Livin, BNI, BRI, OCBC NISP, UOB, HSBC, DBS, Jenius, and BSI.
+- Expanded deterministic bilingual intent normalization for credit-card clarification/confirmation, suspicious/security/login alerts, payment due/billing, OTP/verification-code, and failed/declined transaction prompts.
+- Hardened alert-rule post-processing so known bank names override model domains, explicit sender/domain evidence is required, missing intent keywords can be added conservatively, and condition sprawl is capped at six conditions.
+- Tightened saveable alert drafts to `mark_pending_alert` with target `imessage` only; `notify_dashboard`, direct `send_imessage`, read/unread, labels, moves, deletes, forwards, replies, unsubscribe, webhooks, and stop-processing remain blocked.
+- Added golden fake-LLM tests for the expanded bank/domain map, Indonesian/English intent keywords, overbroad requests, unsafe requested actions, low confidence, non-iMessage targets, and condition trimming.
+- Preserved the safety model: no cloud LLM, no rule rows written by the draft endpoint, no iMessage sent at draft time, no Gmail mutation, no IMAP mutation, and human Save Rule remains required.
+- Local Qwen (`qwen2.5:7b-instruct-q4_K_M`) remains the recommended model for narrow alert-rule drafting, and `[mail.rule_ai].enabled=false` remains the safe default unless actively testing.
+
+## 2026-05-01 — Phase 4F.1b Local Model Validation
+
+- Validated the local-Ollama alert-rule draft probe after JSON schema hardening.
+- Gemma failed the initial schema probe and Qwen failed before schema hardening.
+- After using Ollama JSON schema output plus deterministic post-validation, `qwen2.5:7b-instruct-q4_K_M` passed 5/5 manual alert-rule drafting prompts.
+- The passed prompts covered BCA suspicious transaction alerts, CIMB Niaga credit card confirmation, Maybank security alerts, Permata kartu-kredit confirmation, and klikbca login/security alerts.
+- Cloud LLM integration remains deferred; local Qwen is sufficient for the current narrow Phase 4F.1b rule-drafting scope.
+- `[mail.rule_ai].enabled` remains `false` by default unless an operator is intentionally testing local rule drafting.
+- The draft endpoint remains non-mutating: it saves no rule rows, sends no iMessage, and performs no Gmail/IMAP mutation.
+
 ## 2026-05-01 — Phase 4F.1b Local LLM Drafted Alert Rule Probe
 
 - Added a local Ollama-only alert-rule draft path to `POST /api/mail/rules/ai/draft` with modes `auto`, `sender_suppression`, and `alert_rule`.

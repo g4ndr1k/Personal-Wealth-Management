@@ -101,7 +101,7 @@ The MVP blocks/returns unsupported for explicit live mailbox requests including:
 
 ## Implemented 4F.1b Local LLM Alert Probe
 
-Phase 4F.1b adds a local Ollama-only capability probe behind `[mail.rule_ai]`. It is disabled by default. The probe drafts alert rules only and is meant to help inspect whether the local model can reliably convert a narrow natural-language request into a safe rule draft.
+Phase 4F.1b adds a local Ollama-only capability probe behind `[mail.rule_ai]`. It is disabled by default. The probe drafts alert rules only and is meant to help inspect whether the local model can reliably convert a narrow natural-language request into a safe rule draft. Phase 4F.1c hardens that same path with expanded deterministic Indonesian bank/domain hints and bilingual alert-intent normalization; it does not add mailbox mutation, autonomous execution, cloud LLMs, or automatic saving.
 
 `POST /api/mail/rules/ai/draft` now accepts:
 
@@ -118,7 +118,7 @@ The only saveable Phase 4F.1b alert shape is:
 - `match_type`: `ALL`
 - conditions: `from_domain contains <domain>` or `from_email equals <email>`
 - content condition: at least one `subject contains <keyword>` or `body contains <keyword>`
-- action: `mark_pending_alert`, target `imessage` or another local target, `stop_processing=false`
+- action: `mark_pending_alert`, target `imessage`, `stop_processing=false`
 - `safety_status`: `safe_local_alert_draft`
 - `requires_user_confirmation`: `true`
 
@@ -130,20 +130,96 @@ BANK_DOMAIN_HINTS = {
     "permata bank": "permatabank.co.id",
     "bca": "bca.co.id",
     "klikbca": "klikbca.com",
+    "klik bca": "klikbca.com",
     "cimb": "cimbniaga.co.id",
     "cimb niaga": "cimbniaga.co.id",
     "maybank": "maybank.co.id",
+    "mandiri": "bankmandiri.co.id",
+    "bank mandiri": "bankmandiri.co.id",
+    "livin": "bankmandiri.co.id",
+    "livin mandiri": "bankmandiri.co.id",
+    "bni": "bni.co.id",
+    "bank negara indonesia": "bni.co.id",
+    "bri": "bri.co.id",
+    "bank rakyat indonesia": "bri.co.id",
+    "ocbc": "ocbc.id",
+    "ocbc nisp": "ocbc.id",
+    "uob": "uob.co.id",
+    "hsbc": "hsbc.co.id",
+    "dbs": "dbs.id",
+    "jenius": "jenius.com",
+    "bsi": "bankbsi.co.id",
+    "bank syariah indonesia": "bankbsi.co.id",
 }
 ```
 
-For “Permata Bank”, post-validation normalizes the draft domain to `permatabank.co.id`.
+For known bank names, post-validation normalizes the draft domain to the deterministic hint and overrides model-supplied domains. If a request does not name a supported bank and does not include one explicit sender email or domain, the alert draft is unsupported rather than trusting a model-guessed sender.
 
-For credit-card transaction clarification requests, post-processing ensures at least one content condition includes one of `clarification`, `klarifikasi`, `credit card`, `kartu kredit`, `transaction`, or `transaksi`.
+Phase 4F.1c expands content keyword normalization. For common Indonesian/English alert intents, post-processing ensures at least one relevant content condition exists and may add one or two conservative subject keywords:
 
-The LLM output is post-validated deterministically. Unsupported or unsafe outputs return `status=unsupported`, `saveable=false`, no rule, and short sanitized error text when relevant. The endpoint does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`; it does not call IMAP, call mailbox execution code, mutate Gmail, call the bridge, send iMessage, auto-save, or auto-execute. If local model quality is insufficient, cloud provider integration may be considered in a separate future phase.
-- forward
-- reply
-- unsubscribe
+- credit-card clarification/confirmation: `clarification`, `klarifikasi`, `confirmation`, `konfirmasi`, `credit card`, `kartu kredit`, `transaction`, `transaksi`, `verification`, `verifikasi`
+- suspicious/security/login alerts: `security`, `keamanan`, `suspicious`, `mencurigakan`, `login`, `activity`, `aktivitas`, `transaction`, `transaksi`, `alert`, `peringatan`
+- payment due/billing: `payment`, `pembayaran`, `due`, `jatuh tempo`, `bill`, `billing`, `tagihan`, `statement`, `e-statement`, `kartu kredit`
+- OTP/verification-code: `otp`, `one time password`, `verification code`, `kode verifikasi`, `authentication`, `autentikasi`
+- failed/declined transactions: `declined`, `ditolak`, `failed`, `gagal`, `transaction`, `transaksi`
+
+Alert drafts are capped at six conditions. They must still include at least one sender condition and at least one content condition, and they must use `match_type=ALL`.
+
+The LLM output is post-validated deterministically. Unsupported or unsafe outputs return `status=unsupported`, `saveable=false`, no rule, and short sanitized error text when relevant. Useful unsupported reason codes include `missing_sender_condition`, `missing_content_condition`, `unsupported_action`, `ambiguous_bank_domain`, `low_confidence`, and `invalid_model_schema`. The endpoint does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`; it does not call IMAP, call mailbox execution code, mutate Gmail, call the bridge, send iMessage, auto-save, or auto-execute. Cloud LLM integration remains deferred.
+
+## Phase 4F.1c Golden Prompt Fixtures
+
+These prompts are useful for manual local-Qwen checks. Normal automated tests use fake LLM clients and do not call Ollama.
+
+1. If BCA emails me about suspicious transaction, notify me.
+2. If CIMB Niaga asks for credit card transaction confirmation, send me an iMessage notification.
+3. Notify me if Maybank sends a security alert.
+4. If Permata asks me to confirm a kartu kredit transaction, alert me.
+5. If the email is from klikbca about login/security, notify me.
+6. Notify me if Mandiri sends an OTP email.
+7. If BNI sends a failed transaction email, alert me.
+8. If BRI sends a payment due notice, notify me.
+9. If OCBC sends a suspicious login email, notify me.
+10. If Jenius sends an account security alert, alert me.
+
+## 2026-05-01 Validation Checkpoint
+
+Manual validation after schema hardening established the current local-model recommendation for this narrow flow:
+
+- Gemma failed the initial local alert-rule schema probe.
+- Qwen initially failed before schema hardening.
+- After enabling structured Ollama JSON schema output and keeping deterministic post-validation mandatory, `qwen2.5:7b-instruct-q4_K_M` passed 5/5 manual alert-rule prompts.
+- No cloud LLM provider is needed yet for the current narrow Phase 4F.1b scope.
+
+The five manual prompts that passed were:
+
+1. If BCA emails me about suspicious transaction, notify me.
+2. If CIMB Niaga asks for credit card transaction confirmation, send me an iMessage notification.
+3. Notify me if Maybank sends a security alert.
+4. If Permata asks me to confirm a kartu kredit transaction, alert me.
+5. If the email is from klikbca about login/security, notify me.
+
+For each passed prompt:
+
+- the endpoint returned HTTP 200
+- `status=draft`
+- `saveable=true`
+- `safety_status=safe_local_alert_draft`
+- the rule used only safe condition fields/operators
+- the only action was `mark_pending_alert`
+- the action target was `imessage`
+- no iMessage was sent at draft time
+- no Gmail mutation occurred
+- no IMAP mutation occurred
+- no rule row was saved by the draft endpoint
+
+Decision preserved from this checkpoint:
+
+- continue local-first with `qwen2.5:7b-instruct-q4_K_M` for narrow Phase 4F rule drafting
+- keep structured Ollama JSON schema output mandatory where supported
+- keep deterministic post-validation mandatory
+- keep `[mail.rule_ai].enabled=false` by default unless actively testing
+- keep cloud provider integration deferred
 
 Phase 4F.1a does not implement iMessage alert drafting, body/subject matching, `contains_any`, real-mailbox preview, conflict detection, auto-save, or Gmail spam behavior.
 

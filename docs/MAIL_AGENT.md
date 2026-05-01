@@ -547,14 +547,18 @@ User natural-language request
 
 AI drafts proposed rules only. It does not save rules, execute actions, call IMAP, call the bridge, send iMessage, or mutate Gmail/IMAP. Phase 4F.1a supports requests such as “Add abcd@efcf.com to the spam list”, “Block alerts from abcd@efcf.com”, and “Stop processing email from abcd@efcf.com”. It returns only `from_email equals <sender>` with `skip_ai_inference` and `stop_processing`.
 
-Phase 4F.1b adds a local LLM/Ollama capability probe for alert-rule drafts. The endpoint accepts `mode=auto`, `mode=sender_suppression`, or `mode=alert_rule`. Alert-rule drafting is controlled by `[mail.rule_ai]` and is disabled by default. When enabled, the only saveable alert draft shape is:
+Phase 4F.1b adds a local LLM/Ollama capability probe for alert-rule drafts. Phase 4F.1c hardens that path with expanded deterministic Indonesian bank-domain hints and bilingual intent normalization for common bank/security/credit-card alert scenarios. The endpoint accepts `mode=auto`, `mode=sender_suppression`, or `mode=alert_rule`. Alert-rule drafting is controlled by `[mail.rule_ai]` and is disabled by default. When enabled, the only saveable alert draft shape is:
 
 - conditions: `from_domain contains <domain>` or `from_email equals <email>`, plus at least one `subject contains <keyword>` or `body contains <keyword>`
-- action: `mark_pending_alert` with local target such as `imessage`, `stop_processing=false`
+- action: `mark_pending_alert` with target `imessage`, `stop_processing=false`
 - `safety_status`: `safe_local_alert_draft`
 - `requires_user_confirmation`: `true`
 
-The local model output is never trusted directly. Deterministic post-validation blocks overbroad drafts, missing sender/domain, missing content conditions, mutation actions, direct `send_imessage`, forwarding, auto-reply, unsubscribe, external webhooks, labels, moves, read/unread, and Gmail spam behavior. “Send me an iMessage notification” is represented only as a saved-rule candidate that can later queue a local pending alert; the draft endpoint does not send anything.
+The local model output is never trusted directly. Deterministic post-validation blocks overbroad drafts, missing sender/domain, missing content conditions, mutation actions, direct `send_imessage`, forwarding, auto-reply, unsubscribe, external webhooks, labels, moves, read/unread, and Gmail spam behavior. Known bank names override model-supplied domains; unsupported or ambiguous sender domains require an explicit sender/domain instead of trusting a model guess. “Send me an iMessage notification” is represented only as a saved-rule candidate that can later queue a local pending alert; the draft endpoint does not send anything.
+
+Phase 4F.1c recognizes deterministic hints for Permata, BCA, KlikBCA, CIMB Niaga, Maybank, Mandiri/Livin, BNI, BRI, OCBC NISP, UOB, HSBC, DBS, Jenius, and BSI. It normalizes common Indonesian/English alert intents including credit-card clarification/confirmation, suspicious/security/login alerts, payment due/billing, OTP/verification-code, and failed/declined transactions. Saveable drafts are still capped to narrow `ALL` rules and use no action other than `mark_pending_alert` to `imessage`.
+
+Manual validation checkpoint on 2026-05-01 established the current local-first recommendation for this narrow flow. Gemma failed the initial schema probe, and Qwen failed before schema hardening. After adding structured Ollama JSON schema output and keeping deterministic post-validation mandatory, `qwen2.5:7b-instruct-q4_K_M` passed 5/5 manual alert-rule prompts. Phase 4F.1c did not add cloud LLM support; local Qwen remains the recommended model for narrow rule drafting, cloud LLM integration remains deferred, and `[mail.rule_ai].enabled` should remain `false` by default unless an operator is actively testing local rule drafting.
 
 The implemented endpoint is:
 

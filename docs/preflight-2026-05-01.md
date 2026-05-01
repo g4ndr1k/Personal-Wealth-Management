@@ -1,8 +1,8 @@
 # Mail-Agent Preflight Report
 
-**Generated:** 2026-05-01T04:10:03Z
-**Repo:** `/Users/g4ndr1k/agentic-ai`
-**Python:** 3.14.4
+**Generated:** 2026-05-01T08:45:19Z  
+**Repo:** `/Users/g4ndr1k/agentic-ai`  
+**Python:** 3.14.4  
 
 
 ## Docker — docker-compose.yml
@@ -169,7 +169,7 @@
   - ✅ ThrottleInterval=30s
 
 **Live probe:** GET http://127.0.0.1:9100/health
-✅ Bridge responded: {"http": "ok", "applescript": "ok", "messages_app": "fail", "chat_db": "fail", "overall": "degraded", "service": "bridge", "mail_available": true, "timestamp": "2026-05-01T04:10:04.600972+00:00"}
+✅ Bridge responded: {"http": "ok", "applescript": "ok", "messages_app": "fail", "chat_db": "fail", "overall": "degraded", "service": "bridge", "mail_available": true, "timestamp": "2026-05-01T08:45:20.897084+00:00"}
 
 
 ## SQLite — agent state + pdf_jobs.db
@@ -211,7 +211,7 @@
   - `summary` TEXT
   - `status` TEXT
   - `source` TEXT
-  → 394 rows
+  → 406 rows
 
   **`alerts`** columns:
   - `id` INTEGER PK
@@ -256,7 +256,8 @@
   - `max_batch` = 25
   - `max_body_text_bytes` = 200000
   - `initial_lookback_days` = 15
-  - `ai` = {'enabled': False, 'provider': 'ollama', 'base_url': 'http://host.docker.internal:11434', 'model': 'gemma3:4b', 'temperature': 0.1, 'timeout_seconds': 45, 'max_body_chars': 12000, 'urgency_threshold': 8}
+  - `ai` = {'enabled': True, 'provider': 'ollama', 'base_url': 'http://host.docker.internal:11434', 'model': 'gemma3:4b', 'temperature': 0.1, 'timeout_seconds': 45, 'max_body_chars': 12000, 'urgency_threshold': 8}
+  - `rule_ai` = {'enabled': True, 'provider': 'ollama', 'base_url': 'http://host.docker.internal:11434', 'model': 'qwen2.5:7b-instruct-q4_K_M', 'timeout_seconds': 120, 'temperature': 0.0, 'max_request_chars': 1000}
   - `imap_mutations` = {'enabled': False, 'dry_run_default': True, 'allow_mark_read': False, 'allow_mark_unread': False, 'allow_add_label': False, 'allow_move_to_folder': False, 'require_uidvalidity_match': True, 'require_capability_cache': True, 'allow_create_folder': False, 'allow_copy_delete_fallback': False}
   - `approvals` = {'enabled': True, 'require_approval_for_ai_actions': True, 'approval_expiry_hours': 72, 'default_expiry_minutes': 1440, 'started_stale_after_minutes': 30, 'allow_bulk_approve': False, 'auto_expire_pending_after_hours': 24, 'archive_terminal_after_days': 30, 'retain_audit_days': 365, 'cleanup_enabled': False}
   - `imap` = {'accounts': [{'email': 'g4ndr1k@gmail.com', 'provider': 'gmail', 'id': 'gmail_g4ndr1k', 'name': 'g4ndr1k', 'host': 'imap.gmail.com', 'port': 993, 'ssl': True, 'auth_type': 'app_password', 'folders': ['INBOX'], 'lookback_days': 14, 'max_message_mb': 25, 'max_attachment_mb': 20, 'enabled': True, 'auth_source': 'keychain', 'keychain_service': 'agentic-ai-mail-imap'}, {'email': 'dianpratiwi@gmail.com', 'provider': 'gmail', 'id': 'gmail_dianpratiwi', 'name': 'Dian Pratiwi', 'host': 'imap.gmail.com', 'port': 993, 'ssl': True, 'auth_type': 'app_password', 'folders': ['INBOX'], 'lookback_days': 14, 'max_message_mb': 25, 'max_attachment_mb': 20, 'enabled': True, 'auth_source': 'keychain', 'keychain_service': 'agentic-ai-mail-imap'}], 'max_message_mb': 25, 'max_attachment_mb': 20}
@@ -308,11 +309,11 @@
   - `verify_model` = 'gemma3:4b'
 
 ### Phase 4F.1b rule AI probe
-✅ mail.rule_ai.enabled=false or unset
+⚠️  mail.rule_ai.enabled=true
   - `provider` = 'ollama'
-  - `model` = 'gemma3:4b'
+  - `model` = 'qwen2.5:7b-instruct-q4_K_M'
   - `base_url` = 'http://host.docker.internal:11434'
-  - `timeout_seconds` = 30
+  - `timeout_seconds` = 120
 
 ### Phase 4E.2 execution safety
 ✅ Final read-only verification module present

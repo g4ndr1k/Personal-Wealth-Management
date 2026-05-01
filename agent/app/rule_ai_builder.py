@@ -29,6 +29,14 @@ BLOCKED_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+ALERT_UNSAFE_REQUEST_RE = re.compile(
+    r"\b(delete|archive|forward|reply|unsubscribe|webhook)\b"
+    r"|\bmove\b.{0,80}\b(?:folder|spam|inbox|mailbox)\b"
+    r"|\bmark\b.{0,80}\b(?:read|unread)\b"
+    r"|\blabel\b|\badd\b.{0,40}\blabel\b",
+    re.IGNORECASE,
+)
+
 BLOCKED_ACTION_TYPES = {
     "move_to_folder",
     "add_label",
@@ -49,7 +57,8 @@ BLOCKED_ACTION_TYPES = {
 
 ALERT_ALLOWED_FIELDS = {"from_domain", "from_email", "subject", "body"}
 ALERT_ALLOWED_OPERATORS = {"contains", "equals"}
-ALERT_ALLOWED_ACTIONS = {"mark_pending_alert", "notify_dashboard"}
+ALERT_ALLOWED_ACTIONS = {"mark_pending_alert"}
+ALERT_MAX_CONDITIONS = 6
 ALERT_BLOCKED_ACTIONS = {
     "delete",
     "move_to_folder",
@@ -74,10 +83,143 @@ BANK_DOMAIN_HINTS = {
     "permata bank": "permatabank.co.id",
     "bca": "bca.co.id",
     "klikbca": "klikbca.com",
+    "klik bca": "klikbca.com",
     "cimb": "cimbniaga.co.id",
     "cimb niaga": "cimbniaga.co.id",
     "maybank": "maybank.co.id",
+    "mandiri": "bankmandiri.co.id",
+    "bank mandiri": "bankmandiri.co.id",
+    "livin": "bankmandiri.co.id",
+    "livin mandiri": "bankmandiri.co.id",
+    "bni": "bni.co.id",
+    "bank negara indonesia": "bni.co.id",
+    "bri": "bri.co.id",
+    "bank rakyat indonesia": "bri.co.id",
+    "ocbc": "ocbc.id",
+    "ocbc nisp": "ocbc.id",
+    "uob": "uob.co.id",
+    "hsbc": "hsbc.co.id",
+    "dbs": "dbs.id",
+    "jenius": "jenius.com",
+    "bsi": "bankbsi.co.id",
+    "bank syariah indonesia": "bankbsi.co.id",
 }
+
+DOMAIN_RE = re.compile(
+    r"(?<![A-Z0-9.-])([A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z]{2,})+)(?![A-Z0-9.-])",
+    re.IGNORECASE,
+)
+
+ALERT_INTENT_KEYWORD_BUCKETS = [
+    {
+        "name": "credit_card_clarification",
+        "triggers": (
+            "credit card transaction clarification",
+            "credit card confirmation",
+            "kartu kredit",
+            "konfirmasi transaksi",
+            "klarifikasi transaksi",
+            "transaksi kartu kredit",
+            "card transaction verification",
+        ),
+        "keywords": (
+            "clarification",
+            "klarifikasi",
+            "confirmation",
+            "konfirmasi",
+            "credit card",
+            "kartu kredit",
+            "transaction",
+            "transaksi",
+            "verification",
+            "verifikasi",
+        ),
+    },
+    {
+        "name": "security_alert",
+        "triggers": (
+            "suspicious transaction",
+            "security alert",
+            "login alert",
+            "suspicious login",
+            "transaksi mencurigakan",
+            "aktivitas mencurigakan",
+            "keamanan",
+            "login",
+        ),
+        "keywords": (
+            "security",
+            "keamanan",
+            "suspicious",
+            "mencurigakan",
+            "login",
+            "activity",
+            "aktivitas",
+            "transaction",
+            "transaksi",
+            "alert",
+            "peringatan",
+        ),
+    },
+    {
+        "name": "payment_due",
+        "triggers": (
+            "payment due",
+            "bill due",
+            "tagihan",
+            "jatuh tempo",
+            "pembayaran kartu kredit",
+            "statement available",
+        ),
+        "keywords": (
+            "payment",
+            "pembayaran",
+            "due",
+            "jatuh tempo",
+            "bill",
+            "billing",
+            "tagihan",
+            "statement",
+            "e-statement",
+            "kartu kredit",
+        ),
+    },
+    {
+        "name": "otp",
+        "triggers": (
+            "otp",
+            "one time password",
+            "kode verifikasi",
+            "verification code",
+            "authentication code",
+        ),
+        "keywords": (
+            "otp",
+            "one time password",
+            "verification code",
+            "kode verifikasi",
+            "authentication",
+            "autentikasi",
+        ),
+    },
+    {
+        "name": "failed_declined_transaction",
+        "triggers": (
+            "transaction declined",
+            "failed transaction",
+            "transaksi gagal",
+            "transaksi ditolak",
+        ),
+        "keywords": (
+            "declined",
+            "ditolak",
+            "failed",
+            "gagal",
+            "transaction",
+            "transaksi",
+        ),
+    },
+]
 
 DEFAULT_RULE_AI_SETTINGS = {
     "enabled": False,
@@ -439,19 +581,33 @@ def validate_alert_rule_draft(
             ],
             provider=result.provider,
             model=result.model,
+            raw_model_error=_unsupported_reason_code(blocked),
         )
     normalized_conditions = []
     hint_domain = _domain_hint_for_text(request_text)
+    explicit_email = _explicit_sender_email_for_text(request_text)
+    explicit_domain = _explicit_sender_domain_for_text(request_text)
     for condition in rule.conditions:
+        field = condition.field
+        operator = condition.operator
         value = str(condition.value or "").strip().lower()
-        if condition.field == "from_domain" and hint_domain:
+        if condition.field in {"from_domain", "from_email"} and hint_domain:
+            field = "from_domain"
+            operator = "contains"
             value = hint_domain
+        elif condition.field == "from_domain" and explicit_domain:
+            operator = "contains"
+            value = explicit_domain
+        elif condition.field == "from_email" and explicit_email:
+            operator = "equals"
+            value = explicit_email
         elif condition.field in {"subject", "body"}:
+            operator = "contains"
             value = str(condition.value or "").strip()
         normalized_conditions.append(
             RuleConditionDraft(
-                field=condition.field,
-                operator=condition.operator,
+                field=field,
+                operator=operator,
                 value=value,
             )
         )
@@ -460,17 +616,20 @@ def validate_alert_rule_draft(
         normalized_conditions,
         required_keywords,
     ):
-        normalized_conditions.append(
-            RuleConditionDraft(
-                field="subject",
-                operator="contains",
-                value=required_keywords[0],
+        for keyword in required_keywords[:2]:
+            normalized_conditions.append(
+                RuleConditionDraft(
+                    field="subject",
+                    operator="contains",
+                    value=keyword,
+                )
             )
-        )
+    normalized_conditions = _dedupe_conditions(normalized_conditions)
+    normalized_conditions = _cap_alert_conditions(normalized_conditions)
     normalized_actions = [
         RuleActionDraft(
             action_type=action.action_type,
-            target=action.target,
+            target="imessage",
             value_json=action.value_json if isinstance(action.value_json, dict) else None,
             stop_processing=False,
         )
@@ -517,8 +676,16 @@ def _first_blocked_alert_reason(
         return "Alert drafts must use match_type ALL."
     if result.confidence < low_confidence_threshold:
         return "The local model confidence was too low."
+    if ALERT_UNSAFE_REQUEST_RE.search(request_text):
+        return "The request asks for an unsupported mailbox or external action."
     if not rule.conditions:
         return "Alert drafts must include conditions."
+    if not (
+        _domain_hint_for_text(request_text)
+        or _explicit_sender_email_for_text(request_text)
+        or _explicit_sender_domain_for_text(request_text)
+    ):
+        return "Alert drafts must include from_domain or from_email from an explicit supported bank, sender email, or sender domain."
     if not any(c.field in {"from_domain", "from_email"} for c in rule.conditions):
         return "Alert drafts must include from_domain or from_email."
     if not any(c.field in {"subject", "body"} for c in rule.conditions):
@@ -546,12 +713,10 @@ def _first_blocked_alert_reason(
             return f"Blocked action type: {action.action_type}."
         if action.action_type not in ALERT_ALLOWED_ACTIONS:
             return f"Unsupported action type: {action.action_type}."
-        if action.action_type == "notify_dashboard":
-            return "notify_dashboard is not enabled for Phase 4F.1b saveable drafts."
         if action.stop_processing is not False:
             return "Alert drafts must not stop processing."
-        if action.action_type == "mark_pending_alert" and action.target not in ("imessage", "dashboard", None, ""):
-            return "mark_pending_alert target must be local."
+        if action.action_type == "mark_pending_alert" and action.target not in ("imessage", None, ""):
+            return "mark_pending_alert target must be imessage."
         if isinstance(action.value_json, dict):
             for value in action.value_json.values():
                 if isinstance(value, str) and re.search(r"https?://|webhook", value, re.I):
@@ -707,6 +872,7 @@ def _alert_rule_schema() -> dict[str, Any]:
                     "conditions": {
                         "type": "array",
                         "minItems": 2,
+                        "maxItems": ALERT_MAX_CONDITIONS,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
@@ -793,6 +959,7 @@ def _alert_system_prompt() -> str:
 Transform one request into one draft local alert rule.
 Choose a sender domain or sender email, choose narrow subject/body keywords, and produce exactly one mark_pending_alert action.
 Use bank_domain_hints for bank domains. Do not invent domains.
+Use Indonesian or English keywords from the user's intent, such as suspicious/mencurigakan, security/keamanan, login, payment/tagihan/jatuh tempo, OTP/kode verifikasi, declined/ditolak, failed/gagal, clarification/klarifikasi, confirmation/konfirmasi, credit card/kartu kredit, and transaction/transaksi.
 Example for "If the mail is from Permata Bank asking for clarification on credit card transaction, send me an iMessage notification.":
 {"intent_summary":"Notify me for Permata credit card clarification emails","confidence":0.9,"rule":{"name":"Permata credit card clarification alert","account_id":null,"match_type":"ALL","conditions":[{"field":"from_domain","operator":"contains","value":"permatabank.co.id"},{"field":"subject","operator":"contains","value":"clarification"},{"field":"body","operator":"contains","value":"credit card"}],"actions":[{"action_type":"mark_pending_alert","target":"imessage","value_json":{"template":"Permata credit card clarification email detected."},"stop_processing":false}]},"explanation":["This rule matches messages from Permata Bank.","It looks for clarification and credit card wording.","It queues a local Mail Agent alert only after the rule is saved."],"warnings":["This is a draft only.","This does not send an iMessage now.","This does not mutate Gmail."],"safety_status":"safe_local_alert_draft","requires_user_confirmation":true}"""
 
@@ -828,6 +995,28 @@ def _domain_hint_for_text(text: str) -> str | None:
     return None
 
 
+def _explicit_sender_email_for_text(text: str) -> str | None:
+    matches = [match.group(1).lower() for match in EMAIL_RE.finditer(text or "")]
+    valid = [email for email in matches if _is_valid_email(email)]
+    if len(set(valid)) == 1:
+        return valid[0]
+    return None
+
+
+def _explicit_sender_domain_for_text(text: str) -> str | None:
+    scrubbed = EMAIL_RE.sub(" ", text or "")
+    matches = [match.group(1).lower() for match in DOMAIN_RE.finditer(scrubbed)]
+    valid = [
+        domain
+        for domain in matches
+        if _is_valid_domain(domain) and not domain.startswith(("http.", "https."))
+    ]
+    unique = list(dict.fromkeys(valid))
+    if len(unique) == 1:
+        return unique[0]
+    return None
+
+
 def _required_content_keywords_for_text(text: str) -> list[str]:
     lowered = text.lower()
     clarification = any(word in lowered for word in ("clarification", "klarifikasi"))
@@ -837,16 +1026,62 @@ def _required_content_keywords_for_text(text: str) -> list[str]:
         or ("card" in lowered and "transaction" in lowered)
     )
     transaction = any(word in lowered for word in ("transaction", "transaksi"))
-    if not (clarification and (credit_card or transaction)):
-        return []
-    return [
-        "clarification",
-        "klarifikasi",
-        "credit card",
-        "kartu kredit",
-        "transaction",
-        "transaksi",
-    ]
+    if clarification and (credit_card or transaction):
+        keywords = [
+            "clarification",
+            "klarifikasi",
+            "credit card",
+            "kartu kredit",
+            "transaction",
+            "transaksi",
+        ]
+        present = [keyword for keyword in keywords if keyword in lowered]
+        missing = [keyword for keyword in keywords if keyword not in present]
+        return present + missing
+    for bucket in ALERT_INTENT_KEYWORD_BUCKETS:
+        if any(trigger in lowered for trigger in bucket["triggers"]):
+            keywords = list(bucket["keywords"])
+            present = [keyword for keyword in keywords if keyword in lowered]
+            missing = [keyword for keyword in keywords if keyword not in present]
+            return present + missing
+    return []
+
+
+def _dedupe_conditions(conditions: list[RuleConditionDraft]) -> list[RuleConditionDraft]:
+    seen = set()
+    deduped = []
+    for condition in conditions:
+        key = (
+            condition.field,
+            condition.operator,
+            str(condition.value or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(condition)
+    return deduped
+
+
+def _cap_alert_conditions(conditions: list[RuleConditionDraft]) -> list[RuleConditionDraft]:
+    if len(conditions) <= ALERT_MAX_CONDITIONS:
+        return conditions
+    senders = [c for c in conditions if c.field in {"from_domain", "from_email"}]
+    contents = [c for c in conditions if c.field in {"subject", "body"}]
+    capped: list[RuleConditionDraft] = []
+    if senders:
+        capped.append(senders[0])
+    for condition in contents:
+        if len(capped) >= ALERT_MAX_CONDITIONS:
+            break
+        capped.append(condition)
+    for condition in conditions:
+        if len(capped) >= ALERT_MAX_CONDITIONS:
+            break
+        if condition in capped:
+            continue
+        capped.append(condition)
+    return capped
 
 
 def _has_required_content_keyword(
@@ -876,6 +1111,23 @@ def _is_valid_domain(domain: str) -> bool:
         and re.fullmatch(r"[a-z0-9-]+", label, flags=re.IGNORECASE)
         for label in labels
     )
+
+
+def _unsupported_reason_code(reason: str) -> str:
+    lowered = reason.lower()
+    if "confidence" in lowered:
+        return "low_confidence"
+    if "action" in lowered or "target" in lowered or "stop processing" in lowered or "webhook" in lowered:
+        return "unsupported_action"
+    if "sender" in lowered or "from_domain" in lowered or "from_email" in lowered:
+        return "missing_sender_condition"
+    if "subject or body" in lowered or "content condition" in lowered:
+        return "missing_content_condition"
+    if "domain" in lowered:
+        return "ambiguous_bank_domain"
+    if "schema" in lowered:
+        return "invalid_model_schema"
+    return "llm_draft_failed"
 
 
 def _string_list(value: Any) -> list[str]:

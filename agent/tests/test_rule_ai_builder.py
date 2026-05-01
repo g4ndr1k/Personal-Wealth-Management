@@ -131,6 +131,31 @@ def _assert_suppression_draft(payload, email):
     ]
 
 
+def _assert_safe_alert_draft(payload, domain=None):
+    assert payload["status"] == "draft"
+    assert payload["saveable"] is True
+    assert payload["safety_status"] == "safe_local_alert_draft"
+    assert payload["requires_user_confirmation"] is True
+    assert payload["rule"]["match_type"] == "ALL"
+    conditions = payload["rule"]["conditions"]
+    assert any(c["field"] in {"from_domain", "from_email"} for c in conditions)
+    assert any(c["field"] in {"subject", "body"} for c in conditions)
+    if domain:
+        assert {
+            "field": "from_domain",
+            "operator": "contains",
+            "value": domain,
+        } in conditions
+    assert payload["rule"]["actions"] == [
+        {
+            "action_type": "mark_pending_alert",
+            "target": "imessage",
+            "value_json": {"template": "Permata credit card clarification email detected."},
+            "stop_processing": False,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -310,6 +335,7 @@ def test_alert_ollama_payload_uses_structured_schema():
     assert "explanation" in schema["required"]
     assert schema["properties"]["warnings"]["type"] == "array"
     assert "warnings" in schema["required"]
+    assert rule_schema["properties"]["actions"]["items"]["properties"]["action_type"]["enum"] == ["mark_pending_alert"]
 
 
 def test_alert_post_processing_adds_known_keyword_condition_for_known_request():
@@ -340,7 +366,103 @@ def test_alert_post_processing_adds_known_keyword_condition_for_known_request():
     )
 
 
-@pytest.mark.parametrize("action_type", ["delete", "move_to_folder", "send_imessage"])
+@pytest.mark.parametrize(
+    "request_text,expected_domain",
+    [
+        ("If Permata Bank sends a security alert, notify me.", "permatabank.co.id"),
+        ("If BCA emails me about suspicious transaction, notify me.", "bca.co.id"),
+        ("If KlikBCA emails me about login alert, notify me.", "klikbca.com"),
+        ("If CIMB Niaga asks for credit card transaction confirmation, send me an iMessage notification.", "cimbniaga.co.id"),
+        ("Notify me if Maybank sends a security alert.", "maybank.co.id"),
+        ("Notify me if Mandiri sends an OTP email.", "bankmandiri.co.id"),
+        ("Notify me if BNI sends a failed transaction email.", "bni.co.id"),
+        ("Notify me if BRI sends a payment due notice.", "bri.co.id"),
+        ("If OCBC NISP sends a suspicious login email, notify me.", "ocbc.id"),
+        ("Notify me if UOB sends a security alert.", "uob.co.id"),
+        ("Notify me if HSBC sends an OTP email.", "hsbc.co.id"),
+        ("Notify me if DBS sends a transaction declined email.", "dbs.id"),
+        ("If Jenius sends an account security alert, alert me.", "jenius.com"),
+        ("Notify me if BSI sends a kode verifikasi email.", "bankbsi.co.id"),
+    ],
+)
+def test_alert_post_processing_enforces_bank_domain_hints(request_text, expected_domain):
+    result = draft_alert_rule_with_local_llm(
+        request_text,
+        settings=_alert_settings(),
+        client=lambda request: _fake_alert_payload(),
+    ).to_dict()
+    _assert_safe_alert_draft(result, expected_domain)
+
+
+def test_alert_post_processing_replaces_hallucinated_sender_email_for_known_bank():
+    payload = _fake_alert_payload(rule={
+        **_fake_alert_payload()["rule"],
+        "conditions": [
+            {"field": "from_email", "operator": "equals", "value": "alerts@not-bca.example"},
+            {"field": "subject", "operator": "contains", "value": "security"},
+        ],
+    })
+    result = draft_alert_rule_with_local_llm(
+        "Notify me if BCA sends a security alert.",
+        settings=_alert_settings(),
+        client=lambda request: payload,
+    ).to_dict()
+
+    _assert_safe_alert_draft(result, "bca.co.id")
+    assert not any(
+        condition["field"] == "from_email"
+        and condition["value"] == "alerts@not-bca.example"
+        for condition in result["rule"]["conditions"]
+    )
+
+
+@pytest.mark.parametrize(
+    "request_text,expected_keywords",
+    [
+        ("If BCA sends credit card transaction clarification, notify me.", ("clarification", "klarifikasi", "credit card", "kartu kredit", "transaction", "transaksi")),
+        ("If Permata sends kartu kredit confirmation, alert me.", ("confirmation", "konfirmasi", "kartu kredit")),
+        ("If BCA emails me about suspicious transaction, notify me.", ("suspicious", "mencurigakan", "transaction", "transaksi")),
+        ("Notify me if BCA sends transaksi mencurigakan.", ("suspicious", "mencurigakan", "transaction", "transaksi")),
+        ("Notify me if BCA sends a security alert.", ("security", "keamanan", "alert", "peringatan")),
+        ("Notify me if BCA sends a login alert.", ("login", "security", "keamanan")),
+        ("Notify me if BCA sends a payment due email.", ("payment", "pembayaran", "due", "jatuh tempo")),
+        ("Notify me if BCA sends tagihan jatuh tempo.", ("tagihan", "jatuh tempo", "payment")),
+        ("Notify me if BCA sends OTP or kode verifikasi.", ("otp", "kode verifikasi", "verification code")),
+        ("Notify me if BCA sends a transaction declined email.", ("declined", "ditolak", "transaction", "transaksi")),
+        ("Notify me if BCA sends transaksi gagal.", ("failed", "gagal", "transaction", "transaksi")),
+    ],
+)
+def test_alert_post_processing_normalizes_intent_keywords(request_text, expected_keywords):
+    payload = _fake_alert_payload(rule={
+        **_fake_alert_payload()["rule"],
+        "conditions": [
+            {"field": "from_domain", "operator": "contains", "value": "example.com"},
+            {"field": "subject", "operator": "contains", "value": "please review"},
+        ],
+    })
+    result = draft_alert_rule_with_local_llm(
+        request_text,
+        settings=_alert_settings(),
+        client=lambda request: payload,
+    ).to_dict()
+
+    _assert_safe_alert_draft(result, "bca.co.id" if "bca" in request_text.lower() else "permatabank.co.id")
+    content_values = [
+        condition["value"].lower()
+        for condition in result["rule"]["conditions"]
+        if condition["field"] in {"subject", "body"}
+    ]
+    assert any(
+        keyword in value
+        for value in content_values
+        for keyword in expected_keywords
+    )
+
+
+@pytest.mark.parametrize(
+    "action_type",
+    ["delete", "move_to_folder", "send_imessage", "notify_dashboard", "mark_read", "move_to_folder"],
+)
 def test_alert_validation_blocks_dangerous_actions(action_type):
     payload = _fake_alert_payload(rule={
         **_fake_alert_payload()["rule"],
@@ -354,6 +476,100 @@ def test_alert_validation_blocks_dangerous_actions(action_type):
     assert result["rule"] is None
     assert result["saveable"] is False
     assert result["safety_status"] == "llm_draft_failed"
+
+
+def test_alert_validation_blocks_stop_processing_on_alert_action():
+    payload = _fake_alert_payload(rule={
+        **_fake_alert_payload()["rule"],
+        "actions": [{
+            "action_type": "mark_pending_alert",
+            "target": "imessage",
+            "value_json": {"template": "x"},
+            "stop_processing": True,
+        }],
+    })
+    result = draft_alert_rule_with_local_llm(
+        "BCA security alert notification",
+        settings=_alert_settings(),
+        client=lambda request: payload,
+    ).to_dict()
+    assert result["rule"] is None
+    assert result["raw_model_error"] == "unsupported_action"
+
+
+def test_alert_validation_blocks_non_imessage_target():
+    payload = _fake_alert_payload(rule={
+        **_fake_alert_payload()["rule"],
+        "actions": [{
+            "action_type": "mark_pending_alert",
+            "target": "dashboard",
+            "value_json": {"template": "x"},
+            "stop_processing": False,
+        }],
+    })
+    result = draft_alert_rule_with_local_llm(
+        "BCA security alert notification",
+        settings=_alert_settings(),
+        client=lambda request: payload,
+    ).to_dict()
+    assert result["rule"] is None
+    assert result["raw_model_error"] == "unsupported_action"
+
+
+def test_alert_validation_blocks_low_confidence():
+    result = draft_alert_rule_with_local_llm(
+        "BCA security alert notification",
+        settings=_alert_settings(),
+        client=lambda request: _fake_alert_payload(confidence=0.2),
+    ).to_dict()
+    assert result["rule"] is None
+    assert result["raw_model_error"] == "low_confidence"
+
+
+def test_alert_post_processing_trims_excess_conditions_conservatively():
+    many_conditions = [
+        {"field": "from_domain", "operator": "contains", "value": "example.com"},
+        {"field": "subject", "operator": "contains", "value": "security"},
+        {"field": "body", "operator": "contains", "value": "login"},
+        {"field": "subject", "operator": "contains", "value": "alert"},
+        {"field": "body", "operator": "contains", "value": "activity"},
+        {"field": "subject", "operator": "contains", "value": "transaction"},
+        {"field": "body", "operator": "contains", "value": "extra"},
+    ]
+    result = draft_alert_rule_with_local_llm(
+        "BCA security alert notification",
+        settings=_alert_settings(),
+        client=lambda request: _fake_alert_payload(rule={
+            **_fake_alert_payload()["rule"],
+            "conditions": many_conditions,
+        }),
+    ).to_dict()
+    _assert_safe_alert_draft(result, "bca.co.id")
+    assert len(result["rule"]["conditions"]) == 6
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Notify me for all credit card emails.",
+        "Notify me for every bank email.",
+        "Send me all emails as iMessage.",
+        "Alert me about transactions.",
+        "Forward BCA security emails to someone.",
+        "Move BCA alerts to folder.",
+        "Mark Permata clarification emails as read.",
+        "Delete suspicious emails from BCA.",
+    ],
+)
+def test_alert_validation_blocks_overbroad_or_unsafe_requests(request_text):
+    result = draft_alert_rule_with_local_llm(
+        request_text,
+        settings=_alert_settings(),
+        client=lambda request: _fake_alert_payload(),
+    ).to_dict()
+    assert result["status"] == "unsupported"
+    assert result["saveable"] is False
+    assert result["rule"] is None
 
 
 def test_alert_validation_blocks_missing_sender_domain():
