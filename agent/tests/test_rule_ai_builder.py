@@ -1,10 +1,11 @@
 import sqlite3
+import json
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent.app import api_mail
+from agent.app import api_mail, rule_ai_builder
 from agent.app.rule_ai_builder import (
     MAX_RULE_AI_REQUEST_CHARS,
     RuleActionDraft,
@@ -81,6 +82,27 @@ def _fake_alert_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _assert_malformed_alert_result(result, error_fragment):
+    payload = result.to_dict() if hasattr(result, "to_dict") else result
+    assert payload["intent_summary"] == "Cannot draft a safe local alert rule"
+    assert payload["confidence"] == 0.0
+    assert payload["rule"] is None
+    assert payload["explanation"] == ["No saveable rule was created."]
+    assert payload["warnings"] == [
+        "The local model did not produce a safe rule draft.",
+        "No rule was saved.",
+    ]
+    assert payload["safety_status"] == "llm_draft_failed"
+    assert payload["requires_user_confirmation"] is True
+    assert payload["status"] == "unsupported"
+    assert payload["saveable"] is False
+    assert payload["provider"] == "ollama"
+    assert payload["model"] == "fake-local"
+    assert error_fragment in payload["raw_model_error"]
+    assert len(payload["raw_model_error"]) <= 240
+    assert "\n" not in payload["raw_model_error"]
 
 
 def _assert_suppression_draft(payload, email):
@@ -262,6 +284,62 @@ def test_alert_mode_calls_fake_llm_and_returns_safe_alert_draft():
     ]
 
 
+def test_alert_ollama_payload_uses_structured_schema():
+    captured = {}
+
+    def fake_client(request):
+        captured.update(request)
+        return _fake_alert_payload()
+
+    result = draft_alert_rule_with_local_llm(
+        "If the mail is from Permata Bank asking for clarification on credit card transaction, send me an iMessage notification",
+        settings=_alert_settings(),
+        client=fake_client,
+    )
+
+    assert result.saveable is True
+    schema = captured["format"]
+    assert schema["type"] == "object"
+    assert "rule" in schema["required"]
+    rule_schema = schema["properties"]["rule"]
+    assert rule_schema["properties"]["conditions"]["type"] == "array"
+    assert "conditions" in rule_schema["required"]
+    assert rule_schema["properties"]["actions"]["type"] == "array"
+    assert "actions" in rule_schema["required"]
+    assert schema["properties"]["explanation"]["type"] == "array"
+    assert "explanation" in schema["required"]
+    assert schema["properties"]["warnings"]["type"] == "array"
+    assert "warnings" in schema["required"]
+
+
+def test_alert_post_processing_adds_known_keyword_condition_for_known_request():
+    payload = _fake_alert_payload(rule={
+        **_fake_alert_payload()["rule"],
+        "conditions": [
+            {"field": "from_domain", "operator": "contains", "value": "example.com"},
+            {"field": "subject", "operator": "contains", "value": "please respond"},
+        ],
+    })
+    result = draft_alert_rule_with_local_llm(
+        "If the mail is from Permata Bank asking for clarification on credit card transaction, send me an iMessage notification",
+        settings=_alert_settings(),
+        client=lambda request: payload,
+    ).to_dict()
+
+    assert result["saveable"] is True
+    assert {"field": "from_domain", "operator": "contains", "value": "permatabank.co.id"} in result["rule"]["conditions"]
+    content_values = [
+        condition["value"].lower()
+        for condition in result["rule"]["conditions"]
+        if condition["field"] in {"subject", "body"}
+    ]
+    assert any(
+        keyword in value
+        for value in content_values
+        for keyword in ("clarification", "klarifikasi", "credit card", "kartu kredit", "transaction", "transaksi")
+    )
+
+
 @pytest.mark.parametrize("action_type", ["delete", "move_to_folder", "send_imessage"])
 def test_alert_validation_blocks_dangerous_actions(action_type):
     payload = _fake_alert_payload(rule={
@@ -339,6 +417,44 @@ def test_alert_llm_disabled_returns_unsupported():
     ).to_dict()
     assert result["rule"] is None
     assert result["safety_status"] == "local_llm_disabled"
+
+
+@pytest.mark.parametrize(
+    "model_response,error_fragment",
+    [
+        ({"message": {"content": json.dumps("not an object")}}, "model JSON root must be an object"),
+        (_fake_alert_payload(rule="not an object"), "invalid_model_schema: rule must be object"),
+        (_fake_alert_payload(rule=None), "invalid_model_schema: rule must be object"),
+        (_fake_alert_payload(rule={**_fake_alert_payload()["rule"], "conditions": {"field": "subject"}}), "invalid_model_schema: rule.conditions must be list"),
+        (_fake_alert_payload(rule={**_fake_alert_payload()["rule"], "conditions": "not a list"}), "invalid_model_schema: rule.conditions must be list"),
+        (_fake_alert_payload(rule={**_fake_alert_payload()["rule"], "conditions": ["not an object"]}), "invalid_model_schema: rule.conditions items must be objects"),
+        (_fake_alert_payload(rule={**_fake_alert_payload()["rule"], "actions": {"action_type": "mark_pending_alert"}}), "invalid_model_schema: rule.actions must be list"),
+        (_fake_alert_payload(rule={**_fake_alert_payload()["rule"], "actions": "not a list"}), "invalid_model_schema: rule.actions must be list"),
+        (_fake_alert_payload(rule={**_fake_alert_payload()["rule"], "actions": ["not an object"]}), "invalid_model_schema: rule.actions items must be objects"),
+        (_fake_alert_payload(explanation="not a list"), "invalid_model_schema: explanation must be list"),
+        (_fake_alert_payload(warnings="not a list"), "invalid_model_schema: warnings must be list"),
+    ],
+)
+def test_alert_malformed_model_schema_returns_unsupported(model_response, error_fragment):
+    result = draft_alert_rule_with_local_llm(
+        "Permata Bank clarification credit card notification",
+        settings=_alert_settings(),
+        client=lambda request: model_response,
+    )
+    _assert_malformed_alert_result(result, error_fragment)
+
+
+def test_alert_unexpected_coercion_exception_returns_unsupported(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("unexpected coercion failure\nwith details")
+
+    monkeypatch.setattr(rule_ai_builder, "_coerce_alert_result", boom)
+    result = rule_ai_builder.draft_alert_rule_with_local_llm(
+        "Permata Bank clarification credit card notification",
+        settings=_alert_settings(),
+        client=lambda request: _fake_alert_payload(),
+    )
+    _assert_malformed_alert_result(result, "unexpected coercion failure")
 
 
 @pytest.mark.parametrize(
@@ -506,6 +622,40 @@ def test_api_alert_rule_mode_with_fake_enabled_llm_returns_safe_draft(tmp_path, 
     assert payload["saveable"] is True
     assert {"field": "from_domain", "operator": "contains", "value": "permatabank.co.id"} in payload["rule"]["conditions"]
     assert [action["action_type"] for action in payload["rule"]["actions"]] == ["mark_pending_alert"]
+    assert _rule_table_counts(db_path) == before
+
+
+def test_api_alert_rule_mode_with_malformed_fake_llm_returns_unsupported_not_500(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    before = _rule_table_counts(db_path)
+    monkeypatch.setattr(api_mail, "_get_settings", lambda: {"mail": {"rule_ai": _alert_settings()}})
+    monkeypatch.setattr(
+        api_mail,
+        "draft_alert_rule_with_local_llm",
+        lambda request_text, account_id=None, settings=None: draft_alert_rule_with_local_llm(
+            request_text,
+            account_id=account_id,
+            settings=settings,
+            client=lambda request: _fake_alert_payload(rule="not an object"),
+        ),
+    )
+
+    response = client.post(
+        "/api/mail/rules/ai/draft",
+        headers={"X-Api-Key": "secret"},
+        json={
+            "request_text": "If the mail is from Permata Bank asking for clarification on credit card transaction, send me an iMessage notification",
+            "mode": "alert_rule",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["status"] == "unsupported"
+    assert payload["saveable"] is False
+    assert payload["rule"] is None
+    assert payload["safety_status"] == "llm_draft_failed"
+    assert "invalid_model_schema: rule must be object" in payload["raw_model_error"]
     assert _rule_table_counts(db_path) == before
 
 

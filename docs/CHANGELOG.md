@@ -6,8 +6,11 @@ Human-readable project history. Reverse chronological order.
 
 - Added a local Ollama-only alert-rule draft path to `POST /api/mail/rules/ai/draft` with modes `auto`, `sender_suppression`, and `alert_rule`.
 - Kept `[mail.rule_ai]` disabled by default; when disabled, alert-rule mode returns an unsupported draft response and saves nothing.
+- Hardened the local Ollama request to use structured JSON schema output where supported, requiring array-shaped `rule.conditions`, `rule.actions`, `explanation`, and `warnings`.
+- Simplified the prompt around the single local-alert transformation and included an exact valid Permata example.
 - Added deterministic post-validation for LLM output: alert drafts must use `match_type=ALL`, include `from_domain` or `from_email`, include a `subject` or `body` content condition, and use only `mark_pending_alert` with no stop-processing behavior.
 - Added local bank-domain hints for known banks, including mapping “Permata Bank” to `permatabank.co.id`; the validator prefers these hints over model-supplied domains.
+- Added deterministic content-keyword normalization for credit-card transaction clarification requests.
 - Blocked unsafe LLM outputs such as delete, move, label, read/unread, direct `send_imessage`, forward, auto-reply, unsubscribe, webhook, route-to-PDF, suppression actions, and overbroad drafts.
 - Updated the dashboard AI Rule Builder to expose alert-rule probe mode, show provider/model/confidence, and label drafts as non-mutating, not sending iMessage now, and requiring Save Rule.
 - The draft endpoint remains read-only for rule tables, does not call IMAP, does not call the bridge, and does not send iMessage.

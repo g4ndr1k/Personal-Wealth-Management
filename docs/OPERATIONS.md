@@ -487,7 +487,7 @@ temperature = 0.0
 max_request_chars = 1000
 ```
 
-Keep this disabled unless you are explicitly testing local Ollama rule drafting. The probe drafts only safe local alert rules, post-validates model output, and never saves rules automatically. The draft endpoint does not send iMessage, mutate Gmail/IMAP, call mailbox execution code, or write rule rows; Save Rule remains the separate human-triggered `POST /api/mail/rules` path.
+Keep this disabled unless you are explicitly testing local Ollama rule drafting. The probe drafts only safe local alert rules, uses structured Ollama JSON schema output where supported, post-validates model output, and never saves rules automatically. The draft endpoint does not send iMessage, mutate Gmail/IMAP, call mailbox execution code, or write rule rows; Save Rule remains the separate human-triggered `POST /api/mail/rules` path. Deterministic validation remains authoritative; cloud LLM support remains deferred.
 
 ## Existing Specialized Docs
 

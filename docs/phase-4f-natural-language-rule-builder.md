@@ -111,6 +111,8 @@ Phase 4F.1b adds a local Ollama-only capability probe behind `[mail.rule_ai]`. I
 
 Backwards-compatible requests without `mode` still support deterministic 4F.1a sender suppression. `alert_rule` uses the local LLM only when `[mail.rule_ai].enabled=true`; otherwise it returns an unsupported response and no saveable rule.
 
+The Ollama `/api/chat` call uses structured JSON schema output where supported. The schema requires object-shaped `rule`, array-shaped `rule.conditions`, array-shaped `rule.actions`, and array-shaped `explanation` / `warnings`. This is a model-guidance layer only; deterministic post-validation remains authoritative.
+
 The only saveable Phase 4F.1b alert shape is:
 
 - `match_type`: `ALL`
@@ -135,6 +137,8 @@ BANK_DOMAIN_HINTS = {
 ```
 
 For “Permata Bank”, post-validation normalizes the draft domain to `permatabank.co.id`.
+
+For credit-card transaction clarification requests, post-processing ensures at least one content condition includes one of `clarification`, `klarifikasi`, `credit card`, `kartu kredit`, `transaction`, or `transaksi`.
 
 The LLM output is post-validated deterministically. Unsupported or unsafe outputs return `status=unsupported`, `saveable=false`, no rule, and short sanitized error text when relevant. The endpoint does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`; it does not call IMAP, call mailbox execution code, mutate Gmail, call the bridge, send iMessage, auto-save, or auto-execute. If local model quality is insufficient, cloud provider integration may be considered in a separate future phase.
 - forward

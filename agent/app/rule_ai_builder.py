@@ -401,6 +401,12 @@ def draft_alert_rule_with_local_llm(
     try:
         model_payload = _call_rule_draft_ollama(text, cfg, client)
         parsed = _parse_model_payload(model_payload)
+        draft = _coerce_alert_result(parsed, account_id, cfg)
+        return validate_alert_rule_draft(
+            draft,
+            request_text=text,
+            low_confidence_threshold=cfg["low_confidence_threshold"],
+        )
     except Exception as exc:
         return _unsupported_alert_result(
             "llm_draft_failed",
@@ -412,12 +418,6 @@ def draft_alert_rule_with_local_llm(
             model=cfg["model"],
             raw_model_error=_sanitize_error(exc),
         )
-
-    return validate_alert_rule_draft(
-        _coerce_alert_result(parsed, account_id, cfg),
-        request_text=text,
-        low_confidence_threshold=cfg["low_confidence_threshold"],
-    )
 
 
 def validate_alert_rule_draft(
@@ -453,6 +453,18 @@ def validate_alert_rule_draft(
                 field=condition.field,
                 operator=condition.operator,
                 value=value,
+            )
+        )
+    required_keywords = _required_content_keywords_for_text(request_text)
+    if required_keywords and not _has_required_content_keyword(
+        normalized_conditions,
+        required_keywords,
+    ):
+        normalized_conditions.append(
+            RuleConditionDraft(
+                field="subject",
+                operator="contains",
+                value=required_keywords[0],
             )
         )
     normalized_actions = [
@@ -550,15 +562,33 @@ def _first_blocked_alert_reason(
 
 
 def _coerce_alert_result(data: dict[str, Any], account_id: str | None, cfg: dict[str, Any]) -> RuleDraftResult:
-    rule_data = data.get("rule") or {}
+    if not isinstance(data, dict):
+        raise ValueError("invalid_model_schema: response must be object")
+    rule_data = data.get("rule")
+    if not isinstance(rule_data, dict):
+        raise ValueError("invalid_model_schema: rule must be object")
+    condition_items = rule_data.get("conditions")
+    if not isinstance(condition_items, list):
+        raise ValueError("invalid_model_schema: rule.conditions must be list")
+    action_items = rule_data.get("actions")
+    if not isinstance(action_items, list):
+        raise ValueError("invalid_model_schema: rule.actions must be list")
+    if not isinstance(data.get("explanation"), list):
+        raise ValueError("invalid_model_schema: explanation must be list")
+    if not isinstance(data.get("warnings"), list):
+        raise ValueError("invalid_model_schema: warnings must be list")
+    if not all(isinstance(item, dict) for item in condition_items):
+        raise ValueError("invalid_model_schema: rule.conditions items must be objects")
+    if not all(isinstance(item, dict) for item in action_items):
+        raise ValueError("invalid_model_schema: rule.actions items must be objects")
+
     conditions = [
         RuleConditionDraft(
             field=str(item.get("field", "")).strip(),
             operator=str(item.get("operator", "")).strip(),
             value=str(item.get("value", "")).strip(),
         )
-        for item in rule_data.get("conditions") or []
-        if isinstance(item, dict)
+        for item in condition_items
     ]
     actions = [
         RuleActionDraft(
@@ -567,8 +597,7 @@ def _coerce_alert_result(data: dict[str, Any], account_id: str | None, cfg: dict
             value_json=item.get("value_json"),
             stop_processing=bool(item.get("stop_processing", False)),
         )
-        for item in rule_data.get("actions") or []
-        if isinstance(item, dict)
+        for item in action_items
     ]
     rule = RuleDraft(
         name=str(rule_data.get("name") or "Local alert draft").strip(),
@@ -598,7 +627,7 @@ def _call_rule_draft_ollama(
     payload = {
         "model": cfg["model"],
         "stream": False,
-        "format": "json",
+        "format": _alert_rule_schema(),
         "messages": [
             {"role": "system", "content": _alert_system_prompt()},
             {
@@ -645,14 +674,127 @@ def _parse_model_payload(payload: Any) -> dict[str, Any]:
     return parsed
 
 
+def _alert_rule_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "intent_summary",
+            "confidence",
+            "rule",
+            "explanation",
+            "warnings",
+            "safety_status",
+            "requires_user_confirmation",
+        ],
+        "properties": {
+            "intent_summary": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "rule": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "name",
+                    "account_id",
+                    "match_type",
+                    "conditions",
+                    "actions",
+                ],
+                "properties": {
+                    "name": {"type": "string"},
+                    "account_id": {"type": ["string", "null"]},
+                    "match_type": {"type": "string", "enum": ["ALL"]},
+                    "conditions": {
+                        "type": "array",
+                        "minItems": 2,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["field", "operator", "value"],
+                            "properties": {
+                                "field": {
+                                    "type": "string",
+                                    "enum": [
+                                        "from_domain",
+                                        "from_email",
+                                        "subject",
+                                        "body",
+                                    ],
+                                },
+                                "operator": {
+                                    "type": "string",
+                                    "enum": ["contains", "equals"],
+                                },
+                                "value": {"type": "string"},
+                            },
+                        },
+                    },
+                    "actions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "action_type",
+                                "target",
+                                "value_json",
+                                "stop_processing",
+                            ],
+                            "properties": {
+                                "action_type": {
+                                    "type": "string",
+                                    "enum": ["mark_pending_alert"],
+                                },
+                                "target": {
+                                    "type": "string",
+                                    "enum": ["imessage"],
+                                },
+                                "value_json": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["template"],
+                                    "properties": {
+                                        "template": {"type": "string"},
+                                    },
+                                },
+                                "stop_processing": {
+                                    "type": "boolean",
+                                    "enum": [False],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            "explanation": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "warnings": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "safety_status": {
+                "type": "string",
+                "enum": ["safe_local_alert_draft"],
+            },
+            "requires_user_confirmation": {
+                "type": "boolean",
+                "enum": [True],
+            },
+        },
+    }
+
+
 def _alert_system_prompt() -> str:
-    return """Return strict JSON only. Draft rules only; do not execute, save, call IMAP, send iMessage, call a bridge, mutate Gmail, or call webhooks.
-Use only fields from_domain, from_email, subject, body with operators contains or equals.
-Use only the action mark_pending_alert with target imessage and stop_processing false.
-Do not use delete, move_to_folder, add_label, mark_read, mark_unread, move_to_spam, send_imessage, forward, auto_reply, unsubscribe, external_webhook, route_to_pdf_pipeline, skip_ai_inference, or stop_processing.
-If the request is ambiguous, blocked, lacks a sender/domain, or lacks subject/body content, return unsupported with rule null.
-For bank names, use only the supplied bank_domain_hints mapping; do not invent bank domains.
-Successful JSON must include intent_summary, confidence, rule, explanation, warnings, safety_status=safe_local_alert_draft, requires_user_confirmation=true."""
+    return """Return JSON only in the provided schema.
+Transform one request into one draft local alert rule.
+Choose a sender domain or sender email, choose narrow subject/body keywords, and produce exactly one mark_pending_alert action.
+Use bank_domain_hints for bank domains. Do not invent domains.
+Example for "If the mail is from Permata Bank asking for clarification on credit card transaction, send me an iMessage notification.":
+{"intent_summary":"Notify me for Permata credit card clarification emails","confidence":0.9,"rule":{"name":"Permata credit card clarification alert","account_id":null,"match_type":"ALL","conditions":[{"field":"from_domain","operator":"contains","value":"permatabank.co.id"},{"field":"subject","operator":"contains","value":"clarification"},{"field":"body","operator":"contains","value":"credit card"}],"actions":[{"action_type":"mark_pending_alert","target":"imessage","value_json":{"template":"Permata credit card clarification email detected."},"stop_processing":false}]},"explanation":["This rule matches messages from Permata Bank.","It looks for clarification and credit card wording.","It queues a local Mail Agent alert only after the rule is saved."],"warnings":["This is a draft only.","This does not send an iMessage now.","This does not mutate Gmail."],"safety_status":"safe_local_alert_draft","requires_user_confirmation":true}"""
 
 
 def _unsupported_alert_result(
@@ -684,6 +826,41 @@ def _domain_hint_for_text(text: str) -> str | None:
         if re.search(rf"\b{re.escape(name)}\b", lowered):
             return BANK_DOMAIN_HINTS[name]
     return None
+
+
+def _required_content_keywords_for_text(text: str) -> list[str]:
+    lowered = text.lower()
+    clarification = any(word in lowered for word in ("clarification", "klarifikasi"))
+    credit_card = (
+        "credit card" in lowered
+        or "kartu kredit" in lowered
+        or ("card" in lowered and "transaction" in lowered)
+    )
+    transaction = any(word in lowered for word in ("transaction", "transaksi"))
+    if not (clarification and (credit_card or transaction)):
+        return []
+    return [
+        "clarification",
+        "klarifikasi",
+        "credit card",
+        "kartu kredit",
+        "transaction",
+        "transaksi",
+    ]
+
+
+def _has_required_content_keyword(
+    conditions: list[RuleConditionDraft],
+    keywords: list[str],
+) -> bool:
+    lowered_keywords = [keyword.lower() for keyword in keywords]
+    for condition in conditions:
+        if condition.field not in {"subject", "body"}:
+            continue
+        value = condition.value.lower()
+        if any(keyword in value for keyword in lowered_keywords):
+            return True
+    return False
 
 
 def _is_valid_domain(domain: str) -> bool:
