@@ -223,6 +223,150 @@ The probe rejects blocked actions including `delete`, `move_to_folder`, `add_lab
 
 Run the smoke harness only after intentionally enabling `[mail.rule_ai].enabled=true` and confirming local Ollama is reachable. The recommended model remains `qwen2.5:7b-instruct-q4_K_M`. Keep `[mail.rule_ai].enabled=false` when not actively testing, and keep cloud LLM integration deferred.
 
+## Implemented 4F.1e Dashboard Golden Probe Panel
+
+Phase 4F.1e exposes the golden prompt smoke check in the dashboard as a manual operator panel. The implementation factors shared validation into:
+
+```text
+agent/app/rule_ai_golden_probe.py
+```
+
+Both the CLI and the dashboard endpoint use the same validation functions. The backend endpoint is:
+
+```text
+POST /api/mail/rules/ai/golden-probe
+```
+
+Request shape:
+
+```json
+{
+  "prompt_ids": null,
+  "fail_fast": false,
+  "timeout_seconds": 120
+}
+```
+
+Response shape includes `status` (`passed`, `failed`, or `disabled`), summary counts, current local Rule AI provider/model, per-prompt results, warnings, and explicit safety flags showing that no rule was saved, no iMessage was sent, and Gmail/IMAP were not mutated.
+
+If `[mail.rule_ai].enabled=false`, the endpoint returns `status=disabled`, skips all prompts, and warns that local Rule AI should be enabled only when intentionally testing. Disabled mode is a safe-default state.
+
+The dashboard panel lives in Settings next to the AI Rule Builder. It shows:
+
+- safety chips: does not save rules, does not send iMessage, does not mutate Gmail, does not call IMAP
+- a manual “Run Golden Probe” button
+- disabled/pass/fail summary with provider/model
+- a compact result table with prompt ID, expected domain, actual domain, status, and first error
+
+The panel does not expose Save Rule for probe results, does not populate the normal AI Rule Builder draft, and does not call the existing create-rule API. Preflight reports that the CLI and endpoint exist, but it does not run the probe, call Ollama, or call the endpoint. Normal automated tests use fake clients and do not call real Ollama.
+
+## Implemented 4F.1f Save/Preview Compatibility Hardening
+
+Phase 4F.1f verifies the complete safe operator workflow:
+
+```text
+AI draft -> human Save Rule -> saved deterministic rule -> local preview/evaluation
+```
+
+This phase does not add a new AI capability. It proves that every saveable draft shape from Phase 4F.1a through 4F.1c is compatible with the existing rule-save endpoint, the deterministic rule engine, and the dashboard save path.
+
+Backend compatibility guarantees:
+
+- Sender suppression drafts save through existing `POST /api/mail/rules`.
+- Alert-rule drafts save through existing `POST /api/mail/rules`.
+- Draft/probe endpoints do not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`.
+- Only explicit human Save Rule writes rule rows.
+- Saved drafts preview through existing `POST /api/mail/rules/preview`.
+- Preview uses synthetic/sample message data and remains local/non-mutating.
+- Save endpoint validation still rejects unsupported action types such as direct `send_imessage`.
+
+Field/operator/action compatibility:
+
+- `from_email` is supported as an alias for `sender_email`.
+- `from_domain` and `sender_domain` are supported deterministically by deriving the domain from `sender_email` when no explicit domain field exists.
+- AI-generated operators remain in the deterministic engine vocabulary (`contains`, `equals` for current drafts).
+- AI-generated action types remain in the deterministic engine vocabulary: `skip_ai_inference`, `stop_processing`, and `mark_pending_alert`.
+
+Dashboard save hardening:
+
+- `aiDraftToRuleInput()` emits only the existing `RuleCreate` payload fields: `name`, `account_id`, `match_type`, `conditions`, `actions`, `priority`, and `enabled`.
+- It strips draft metadata such as `status`, `saveable`, `safety_status`, `warnings`, `explanation`, `provider`, `model`, and raw model errors.
+- It requires `status=draft`, `saveable=true`, a safe local safety status, and human confirmation before returning a payload.
+- It avoids duplicate `stop_processing` actions.
+- Golden-probe results never expose Save Rule, and unsupported drafts remain unsaveable in the UI helper path.
+
+Safety boundary preserved: no cloud LLM, no auto-save, no bulk creation, no auto-execute, no iMessage at draft/probe/preview time, no bridge call, no Gmail mutation, and no IMAP mutation.
+
+## Implemented 4F.1g Draft Audit Trail And Quality Metrics
+
+Phase 4F.1g adds privacy-conscious local observability for Rule AI draft/probe attempts. It does not expand AI capability and does not change the human-save boundary.
+
+New tables:
+
+```text
+mail_rule_ai_draft_audit
+mail_rule_ai_golden_probe_runs
+```
+
+Draft audit rows are written best-effort after `POST /api/mail/rules/ai/draft` produces a response. The row records status, saveability, safety status, provider/model, request hash, short preview, normalized intent, rule name, condition/action counts, actual sender domain when present, warnings/explanations, and optional `saved_rule_id` linkage when a later human Save Rule request includes `source_draft_audit_id`.
+
+Golden probe runs record aggregate quality metrics: status, total/passed/failed/skipped, provider/model, duration, and compact per-prompt results. They do not store full prompt bodies or raw model output.
+
+Privacy constraints:
+
+- request text is normalized and SHA-256 hashed
+- request preview is sanitized and truncated to 160 characters
+- raw model responses are not stored
+- raw model errors are sanitized/truncated
+- API keys, app passwords, bridge tokens, raw email bodies, and mailbox mutation identifiers are not stored
+
+Read-only dashboard/API surface:
+
+```text
+GET /api/mail/rules/ai/audit/recent?limit=50&mode=&status=
+GET /api/mail/rules/ai/audit/summary
+GET /api/mail/rules/ai/golden-probe/runs?limit=20
+```
+
+The dashboard **Rule AI Quality** panel shows draft totals, saveable drafts, unsupported/failed counts, saveable rate, latest golden probe summary, and recent draft attempts. It intentionally has no Save Rule, rerun, execute, or mailbox mutation buttons.
+
+Safety boundary preserved: draft endpoint writes audit only and no rule rows; golden probe writes quality-run rows only and no rule rows; only human-triggered `POST /api/mail/rules` writes deterministic rule rows. No iMessage, bridge call, Gmail mutation, IMAP mutation, cloud LLM, bulk creation, or auto-execute is added.
+
+## Phase 4F.2a Deterministic Rule Explanation / Dry-Run Inspector
+
+Phase 4F.2a moves operator trust/debugging from “AI can draft rules safely” to “operator can understand why a saved rule did or did not match.” It does not add new AI drafting behavior.
+
+Endpoint:
+
+```http
+POST /api/mail/rules/explain
+```
+
+Request:
+
+```json
+{
+  "message": {
+    "sender_email": "alerts@bca.co.id",
+    "subject": "Suspicious transaction alert",
+    "body_text": "We detected suspicious transaction activity.",
+    "imap_account": "gmail_g4ndr1k",
+    "imap_folder": "INBOX",
+    "has_attachment": false
+  },
+  "rule_id": null,
+  "include_disabled": false
+}
+```
+
+The endpoint loads saved rules and calls the deterministic rules engine with `preview=True`. It returns per-rule match status, per-condition `field`, `operator`, `expected`, truncated `actual`, `matched`, `case_sensitive`, planned preview-only actions, and aggregate flags such as `would_skip_ai`, `enqueue_ai`, `stopped`, and `route_to_pdf_pipeline`.
+
+`from_domain` / `sender_domain` explanations derive the actual domain from `sender_email` when the payload does not include an explicit domain. For example, `alerts@bca.co.id` explains as actual `bca.co.id`.
+
+Safety boundary preserved: the inspector is read-only. It does not save rules, write draft audit rows, write processing events, write approval rows, call Ollama, call cloud LLMs, call IMAP, call the bridge, send iMessage, mutate Gmail, create labels, move mail, mark read/unread, archive, delete, forward, reply, unsubscribe, or run webhooks. Mutation actions already present on saved rules appear only as dry-run/blocked preview metadata.
+
+The dashboard **Explain Rule** panel accepts synthetic/sample message JSON and can generate a sample from an AI draft, such as `alerts@bca.co.id` for a `from_domain contains bca.co.id` condition. Explanation results intentionally do not show Save Rule or run the golden probe.
+
 ## 2026-05-01 Validation Checkpoint
 
 Manual validation after schema hardening established the current local-model recommendation for this narrow flow:

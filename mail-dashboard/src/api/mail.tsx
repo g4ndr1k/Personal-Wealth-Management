@@ -186,6 +186,64 @@ export interface RulePreviewResult {
   route_to_pdf_pipeline: boolean;
 }
 
+export interface RuleExplainRequest {
+  message: Record<string, any>;
+  rule_id?: number | null;
+  include_disabled?: boolean;
+}
+
+export interface RuleExplainResponse {
+  status: 'ok';
+  preview: boolean;
+  message_summary: {
+    sender_email?: string | null;
+    sender_domain?: string | null;
+    subject?: string | null;
+    account_id?: string | null;
+  };
+  matched_rule_count: number;
+  stopped: boolean;
+  would_skip_ai: boolean;
+  enqueue_ai: boolean;
+  continue_to_classifier: boolean;
+  route_to_pdf_pipeline: boolean;
+  planned_actions: Array<{
+    rule_id: number;
+    action_type: string;
+    target?: string | null;
+    value?: any;
+    mutation: boolean;
+    would_execute: boolean;
+    explanation: string;
+    gate_status?: string;
+    reason?: string;
+    dry_run?: boolean;
+  }>;
+  rules: Array<{
+    rule_id: number;
+    name: string;
+    matched: boolean;
+    conditions: Array<{
+      field: string;
+      operator: string;
+      expected: any;
+      actual: any;
+      matched: boolean;
+      case_sensitive: boolean;
+    }>;
+    planned_actions: RuleExplainResponse['planned_actions'];
+  }>;
+  safety: {
+    read_only: boolean;
+    sent_imessage: boolean;
+    called_bridge: boolean;
+    called_imap: boolean;
+    mutated_gmail: boolean;
+    mutated_imap: boolean;
+    wrote_events: boolean;
+  };
+}
+
 export interface RuleAiDraftResult {
   intent_summary: string;
   confidence: number;
@@ -199,6 +257,103 @@ export interface RuleAiDraftResult {
   provider?: string | null;
   model?: string | null;
   raw_model_error?: string | null;
+  draft_audit_id?: number | null;
+}
+
+export interface RuleAiGoldenProbeResult {
+  id: string;
+  prompt: string;
+  passed: boolean;
+  expected_domain: string;
+  actual_domain?: string | null;
+  safety_status?: string | null;
+  saveable?: boolean | null;
+  action_type?: string | null;
+  target?: string | null;
+  errors: string[];
+  warnings: string[];
+  response_status?: string | null;
+  status_code?: number | null;
+}
+
+export interface RuleAiGoldenProbeResponse {
+  status: 'passed' | 'failed' | 'disabled';
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+  };
+  rule_ai?: {
+    enabled: boolean;
+    provider: string;
+    model: string;
+  };
+  results: RuleAiGoldenProbeResult[];
+  warnings?: string[];
+  safety: {
+    saved_rules: boolean;
+    sent_imessage: boolean;
+    mutated_gmail: boolean;
+    mutated_imap: boolean;
+  };
+}
+
+export interface RuleAiAuditItem {
+  id: number;
+  created_at: string;
+  mode: string;
+  status: string;
+  saveable: boolean;
+  safety_status: string;
+  provider?: string | null;
+  model?: string | null;
+  account_id?: string | null;
+  request_hash: string;
+  request_preview?: string | null;
+  normalized_intent?: string | null;
+  rule_name?: string | null;
+  condition_count: number;
+  action_count: number;
+  actual_domain?: string | null;
+  raw_model_error?: string | null;
+  warnings?: string[];
+  explanation?: string[];
+  saved_rule_id?: number | null;
+  source: string;
+}
+
+export interface RuleAiGoldenProbeRun {
+  id: number;
+  created_at: string;
+  status: string;
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  provider?: string | null;
+  model?: string | null;
+  duration_ms?: number | null;
+  results: Array<{
+    id?: string | null;
+    passed: boolean;
+    expected_domain?: string | null;
+    actual_domain?: string | null;
+    error?: string | null;
+    safety_status?: string | null;
+    saveable?: boolean | null;
+  }>;
+}
+
+export interface RuleAiQualitySummary {
+  total_draft_attempts: number;
+  saveable_count: number;
+  unsupported_count: number;
+  failed_count: number;
+  saveable_rate: number;
+  by_mode: Record<string, number>;
+  by_safety_status: Record<string, number>;
+  latest_golden_probe?: RuleAiGoldenProbeRun | null;
 }
 
 export interface MailProcessingEvent {
@@ -349,7 +504,9 @@ export interface ApprovalListOptions {
   offset?: number;
 }
 
-export type MailRuleInput = Omit<MailRule, 'rule_id' | 'created_at' | 'updated_at'>;
+export type MailRuleInput = Omit<MailRule, 'rule_id' | 'created_at' | 'updated_at'> & {
+  source_draft_audit_id?: number | null;
+};
 
 interface ApiContextType {
   summary: Summary | null;
@@ -367,10 +524,15 @@ interface ApiContextType {
   listRules: () => Promise<MailRule[]>;
   createRule: (data: MailRuleInput) => Promise<MailRule>;
   draftRuleWithAi: (data: { request_text: string; account_id?: string | null; mode?: 'auto' | 'sender_suppression' | 'alert_rule' }) => Promise<RuleAiDraftResult>;
+  runRuleAiGoldenProbe: (data?: { prompt_ids?: string[] | null; fail_fast?: boolean; timeout_seconds?: number }) => Promise<RuleAiGoldenProbeResponse>;
+  listRuleAiAudit: (options?: { limit?: number; mode?: string; status?: string }) => Promise<RuleAiAuditItem[]>;
+  getRuleAiQualitySummary: () => Promise<RuleAiQualitySummary>;
+  listRuleAiGoldenProbeRuns: (limit?: number) => Promise<RuleAiGoldenProbeRun[]>;
   updateRule: (ruleId: number, data: Partial<MailRuleInput>) => Promise<MailRule>;
   deleteRule: (ruleId: number) => Promise<any>;
   reorderRules: (rules: Array<{ rule_id: number; priority: number }>) => Promise<any>;
   previewRules: (message: Record<string, any>) => Promise<RulePreviewResult>;
+  explainRule: (data: RuleExplainRequest) => Promise<RuleExplainResponse>;
   listProcessingEvents: (limit?: number) => Promise<MailProcessingEvent[]>;
   getAiSettings: () => Promise<AiSettings>;
   updateAiSettings: (data: Partial<AiSettings>) => Promise<AiSettings>;
@@ -560,6 +722,31 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     });
   }, [fetchWithAuth]);
 
+  const runRuleAiGoldenProbe = useCallback(async (data: { prompt_ids?: string[] | null; fail_fast?: boolean; timeout_seconds?: number } = {}) => {
+    return fetchWithAuth('/api/mail/rules/ai/golden-probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }, [fetchWithAuth]);
+
+  const listRuleAiAudit = useCallback(async (options: { limit?: number; mode?: string; status?: string } = {}) => {
+    const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.mode) params.set('mode', options.mode);
+    if (options.status) params.set('status', options.status);
+    const response = await fetchWithAuth(`/api/mail/rules/ai/audit/recent?${params.toString()}`);
+    return response.items || response;
+  }, [fetchWithAuth]);
+
+  const getRuleAiQualitySummary = useCallback(async () => {
+    return fetchWithAuth('/api/mail/rules/ai/audit/summary');
+  }, [fetchWithAuth]);
+
+  const listRuleAiGoldenProbeRuns = useCallback(async (limit = 20) => {
+    const response = await fetchWithAuth(`/api/mail/rules/ai/golden-probe/runs?limit=${limit}`);
+    return response.items || response;
+  }, [fetchWithAuth]);
+
   const updateRule = useCallback(async (ruleId: number, data: Partial<MailRuleInput>) => {
     return fetchWithAuth(`/api/mail/rules/${ruleId}`, {
       method: 'PATCH',
@@ -585,6 +772,14 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message }),
+    });
+  }, [fetchWithAuth]);
+
+  const explainRule = useCallback(async (data: RuleExplainRequest) => {
+    return fetchWithAuth('/api/mail/rules/explain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
     });
   }, [fetchWithAuth]);
 
@@ -755,8 +950,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       value={{ 
         summary, recent, accounts, loading, error, refresh, triggerRun,
         testAccount, addAccount, deleteAccount, reactivateAccount, reloadConfig,
-        listRules, createRule, draftRuleWithAi, updateRule, deleteRule, reorderRules,
-        previewRules, listProcessingEvents, getAiSettings, updateAiSettings,
+        listRules, createRule, draftRuleWithAi, runRuleAiGoldenProbe,
+        listRuleAiAudit, getRuleAiQualitySummary, listRuleAiGoldenProbeRuns,
+        updateRule, deleteRule, reorderRules,
+        previewRules, explainRule, listProcessingEvents, getAiSettings, updateAiSettings,
         testAi, reprocessMessage, listAiTriggers, createAiTrigger,
         updateAiTrigger, deleteAiTrigger, previewAiTriggers,
         listApprovals, getApproval, approveApproval, rejectApproval,

@@ -76,10 +76,17 @@ def message_audit_id(message: dict[str, Any]) -> str:
 
 def evaluate_message(state, message: dict[str, Any],
                      preview: bool = False,
-                     mutation_context: dict[str, Any] | None = None
+                     mutation_context: dict[str, Any] | None = None,
+                     rule_id: int | None = None,
+                     include_disabled: bool = False,
                      ) -> RuleEvaluation:
     result = RuleEvaluation()
-    rules = _load_rules(state, message.get("imap_account"))
+    rules = _load_rules(
+        state,
+        message.get("imap_account"),
+        rule_id=rule_id,
+        include_disabled=include_disabled,
+    )
 
     for rule in rules:
         conditions = rule["conditions"]
@@ -190,16 +197,28 @@ def validate_operator(operator: str) -> str:
     return operator
 
 
-def _load_rules(state, account_id: str | None) -> list[dict[str, Any]]:
+def _load_rules(
+        state,
+        account_id: str | None,
+        *,
+        rule_id: int | None = None,
+        include_disabled: bool = False,
+        ) -> list[dict[str, Any]]:
     with state._connect() as conn:
         conn.row_factory = None
-        rows = conn.execute("""
+        clauses = ["(account_id IS NULL OR account_id = ?)"]
+        params: list[Any] = [account_id]
+        if not include_disabled:
+            clauses.insert(0, "enabled = 1")
+        if rule_id is not None:
+            clauses.append("rule_id = ?")
+            params.append(rule_id)
+        rows = conn.execute(f"""
             SELECT rule_id, account_id, name, priority, enabled, match_type
             FROM mail_rules
-            WHERE enabled = 1
-              AND (account_id IS NULL OR account_id = ?)
+            WHERE {' AND '.join(clauses)}
             ORDER BY priority ASC, rule_id ASC
-        """, (account_id,)).fetchall()
+        """, params).fetchall()
 
         rules = []
         for row in rows:
@@ -291,6 +310,22 @@ def _condition_matches(condition: dict[str, Any],
     return False
 
 
+def explain_condition_match(
+        condition: dict[str, Any],
+        message: dict[str, Any],
+        ) -> dict[str, Any]:
+    field = condition.get("field")
+    actual = _field_value(message, str(field or ""))
+    return {
+        "field": field,
+        "operator": condition.get("operator"),
+        "expected": _explain_expected(condition),
+        "actual": _truncate_actual(field, actual),
+        "matched": _condition_matches(condition, message),
+        "case_sensitive": bool(condition.get("case_sensitive")),
+    }
+
+
 def _field_value(message: dict[str, Any], field_name: str) -> Any:
     aliases = {
         "from_email": "sender_email",
@@ -301,11 +336,40 @@ def _field_value(message: dict[str, Any], field_name: str) -> Any:
         "account": "imap_account",
         "has_attachment": "attachments",
     }
+    if field_name in {"from_domain", "sender_domain"}:
+        explicit_domain = message.get(field_name) or message.get("sender_domain")
+        if explicit_domain:
+            return explicit_domain
+        sender_email = str(message.get("sender_email") or "").strip()
+        return sender_email.rsplit("@", 1)[1] if "@" in sender_email else None
     key = aliases.get(field_name, field_name)
     value = message.get(key)
     if field_name == "has_attachment":
         return "true" if value else "false"
     return value
+
+
+def _explain_expected(condition: dict[str, Any]) -> Any:
+    expected_json = _decode_json(condition.get("value_json"))
+    if condition.get("operator") == "in" and expected_json is not None:
+        return expected_json
+    return condition.get("value")
+
+
+def _truncate_actual(field_name: Any, value: Any) -> Any:
+    if value is None or isinstance(value, bool):
+        return value
+    text = str(value)
+    field = str(field_name or "")
+    if field in {"subject"}:
+        limit = 180
+    elif field in {"body", "body_text"}:
+        limit = 240
+    elif field in {"sender_email", "from_email", "from", "sender"}:
+        limit = 160
+    else:
+        limit = 160
+    return _truncate(text, limit)
 
 
 def _execute_action(state, message: dict[str, Any],

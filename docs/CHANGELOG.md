@@ -2,6 +2,33 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-05-01 — Phase 4F.1g Rule AI Draft Audit Trail And Quality Metrics
+
+- Added local `mail_rule_ai_draft_audit` and `mail_rule_ai_golden_probe_runs` tables for privacy-conscious Rule AI observability.
+- Draft attempts now record best-effort audit rows with request hashes, short sanitized previews, status/saveability, safety status, provider/model, rule shape counts, and actual sender domain when present.
+- Golden probe endpoint now records aggregate quality runs with compact per-prompt outcomes and no full prompt/model output storage.
+- Added read-only audit APIs: `GET /api/mail/rules/ai/audit/recent`, `GET /api/mail/rules/ai/audit/summary`, and `GET /api/mail/rules/ai/golden-probe/runs`.
+- Added a dashboard “Rule AI Quality” panel showing draft attempt totals, saveable rate, latest golden probe summary, and recent audit rows without any rerun/save controls.
+- Updated preflight to report the new audit tables/counts without calling Ollama, running probes, or mutating runtime state.
+
+## 2026-05-01 — Phase 4F.1f Rule AI Save/Preview Compatibility Hardening
+
+- Added compatibility coverage for the safe workflow: AI draft -> human Save Rule -> deterministic saved rule -> local preview/evaluation.
+- Confirmed sender suppression drafts save through the existing `POST /api/mail/rules` endpoint and preview as `skip_ai_inference` plus `stop_processing` without mailbox mutation.
+- Confirmed alert-rule drafts save through the same endpoint and preview as local `mark_pending_alert` plans only; no iMessage is sent at draft, save-compatibility, or preview time.
+- Hardened deterministic field compatibility by deriving `from_domain` / `sender_domain` from `sender_email` when a message does not already carry an explicit domain field.
+- Hardened the dashboard AI-draft save adapter so it sends only the existing `RuleCreate` payload fields, strips draft metadata, requires `status=draft` and `saveable=true`, and avoids duplicate `stop_processing` actions.
+- Added regression tests proving draft/probe endpoints do not write rule rows and that unsupported action types remain blocked by the Save Rule endpoint.
+
+## 2026-05-01 — Phase 4F.1e Dashboard Rule AI Golden Probe Panel
+
+- Added shared backend probe logic in `agent/app/rule_ai_golden_probe.py` so the CLI, API endpoint, and tests use the same golden prompt validation.
+- Added authenticated `POST /api/mail/rules/ai/golden-probe`, which runs selected golden prompts through the existing local draft builder and returns pass/fail/disabled summaries without saving rules.
+- Added a dashboard “Rule AI Golden Probe” panel in Settings for manual operator checks, with safety chips, disabled-mode messaging, provider/model summary, and compact per-prompt results.
+- Updated the dashboard API client with `runRuleAiGoldenProbe()` and tests confirming the panel uses `/api/mail/rules/ai/golden-probe`, does not expose Save Rule, and does not call create-rule behavior.
+- Updated preflight to report both the CLI script and endpoint availability without running the probe, calling Ollama, or calling the API endpoint.
+- Preserved the boundary: no cloud LLM, no iMessage at probe time, no bridge/IMAP call, no Gmail mutation, no automatic save, and `[mail.rule_ai].enabled=false` remains the safe default unless intentionally testing.
+
 ## 2026-05-01 — Phase 4F.1d Local Rule AI Golden Prompt Smoke Harness
 
 - Added `agent/tests/fixtures/rule_ai_golden_prompts.json` with 10 operator smoke prompts covering BCA, CIMB Niaga, Maybank, Permata, KlikBCA, Mandiri, BNI, BRI, OCBC, and Jenius alert-rule scenarios.
@@ -260,6 +287,13 @@ Human-readable project history. Reverse chronological order.
 - Added dry-run mutation plans, safety gates, UID/UIDVALIDITY identity checks, and rollback hints for future reversible action candidates.
 - Updated Control Center detail to show readiness-only mutation plans without offering live enablement.
 - Preserved dangerous action blocking, no bulk approval, no auto-retry, and no live mailbox mutation by default.
+
+## 2026-05-02 — Phase 4F.2a Rule Explanation / Dry-Run Inspector
+
+- Added `POST /api/mail/rules/explain` for deterministic saved-rule explanations against synthetic/sample message payloads.
+- The inspector uses `evaluate_message(..., preview=True)` and reports matched rules, per-condition expected vs actual values, derived `from_domain`/`sender_domain`, planned actions, skip-AI/stop-processing/PDF-route flags, and explicit safety flags.
+- Dashboard Settings -> Rules now includes an Explain Rule dry-run panel with sample message JSON, condition details, planned local actions, and safety copy.
+- The inspector is read-only: it does not write rule rows, processing events, approvals, audit rows, or action execution rows; it does not call IMAP, the bridge, iMessage, Gmail mutation code, Ollama, or a cloud LLM.
 
 ## 2026-04-25 — PDF Preflight And Silent Failure Hardening
 

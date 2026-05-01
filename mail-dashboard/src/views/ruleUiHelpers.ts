@@ -135,17 +135,74 @@ export function aiDraftToRuleInput(
   if (!isSaveableAiDraft(draft)) {
     return null;
   }
+  const rule = draft.rule!;
+  const actions = rule.actions.reduce<MailRuleInput['actions']>((items, action) => {
+    if (
+      action.action_type === 'stop_processing'
+      && items.some((item) => item.action_type === 'stop_processing')
+    ) {
+      return items;
+    }
+    items.push({
+      action_type: action.action_type,
+      target: action.target ?? null,
+      value_json: action.value_json ?? null,
+      stop_processing: Boolean(action.stop_processing),
+    });
+    return items;
+  }, []);
   return {
-    ...draft.rule!,
+    name: rule.name,
+    account_id: rule.account_id ?? null,
+    match_type: rule.match_type,
+    conditions: rule.conditions.map((condition) => ({
+      field: condition.field,
+      operator: condition.operator,
+      value: condition.value ?? null,
+      value_json: condition.value_json ?? null,
+      case_sensitive: Boolean(condition.case_sensitive),
+    })),
+    actions,
     priority,
     enabled: true,
+    source_draft_audit_id: draft.draft_audit_id ?? null,
   };
 }
 
 export function isSaveableAiDraft(draft: RuleAiDraftResult | null) {
   return Boolean(
     draft?.rule
+    && draft.status === 'draft'
+    && draft.saveable === true
     && (draft.safety_status === 'safe_local_suppression' || draft.safety_status === 'safe_local_alert_draft')
     && draft.requires_user_confirmation === true,
   );
+}
+
+export function syntheticMessageFromAiDraft(draft: RuleAiDraftResult | null) {
+  const rule = draft?.rule;
+  const message: Record<string, any> = {
+    sender_email: 'sender@example.com',
+    subject: 'Sample message',
+    body_text: 'Sample body',
+    imap_account: rule?.account_id ?? 'gmail_g4ndr1k',
+    imap_folder: 'INBOX',
+    has_attachment: false,
+  };
+  if (!rule) return message;
+
+  for (const condition of rule.conditions) {
+    const value = String(condition.value ?? '').trim();
+    if (!value) continue;
+    if (condition.field === 'from_domain' || condition.field === 'sender_domain') {
+      message.sender_email = `alerts@${value.replace(/^@/, '')}`;
+    } else if (condition.field === 'from_email' || condition.field === 'sender_email' || condition.field === 'from') {
+      message.sender_email = value;
+    } else if (condition.field === 'subject') {
+      message.subject = value;
+    } else if (condition.field === 'body' || condition.field === 'body_text') {
+      message.body_text = value;
+    }
+  }
+  return message;
 }

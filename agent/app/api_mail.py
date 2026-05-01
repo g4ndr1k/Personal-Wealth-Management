@@ -9,6 +9,7 @@ import logging
 import hmac
 import imaplib
 import json
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 import httpx
@@ -33,6 +34,7 @@ from .rules import (
     MUTATION_ACTIONS,
     build_dry_run_mutation_plan,
     evaluate_message,
+    explain_condition_match,
     validate_action_type,
     validate_operator,
     _execute_action,
@@ -53,6 +55,14 @@ from .rule_ai_builder import (
     MAX_RULE_AI_REQUEST_CHARS,
     draft_alert_rule_with_local_llm,
     draft_sender_suppression_rule,
+)
+from .rule_ai_golden_probe import (
+    DEFAULT_GOLDEN_FIXTURE,
+    disabled_probe_response,
+    load_golden_prompts,
+    run_golden_probe,
+    safety_flags,
+    select_golden_prompts,
 )
 
 logger = logging.getLogger("agent.api_mail")
@@ -187,6 +197,7 @@ class RuleCreate(BaseModel):
     match_type: str = Field("ALL", pattern=r"^(ALL|ANY)$")
     conditions: list[RuleConditionIn] = Field(default_factory=list)
     actions: list[RuleActionIn] = Field(default_factory=list)
+    source_draft_audit_id: Optional[int] = Field(None, ge=1)
 
 class RulePatch(BaseModel):
     account_id: Optional[str] = Field(None, max_length=200)
@@ -207,6 +218,11 @@ class RuleReorder(BaseModel):
 class RulePreview(BaseModel):
     message: dict[str, Any]
 
+class RuleExplain(BaseModel):
+    message: dict[str, Any]
+    rule_id: Optional[int] = None
+    include_disabled: bool = False
+
 class RuleAiDraftRequest(BaseModel):
     request_text: StrictStr = Field(
         ...,
@@ -215,6 +231,11 @@ class RuleAiDraftRequest(BaseModel):
     )
     account_id: Optional[str] = Field(None, max_length=200)
     mode: Optional[str] = Field("auto", pattern=r"^(auto|sender_suppression|alert_rule)$")
+
+class RuleAiGoldenProbeRequest(BaseModel):
+    prompt_ids: Optional[list[str]] = None
+    fail_fast: bool = False
+    timeout_seconds: int = Field(120, ge=1, le=300)
 
 class MutationPreview(BaseModel):
     action_type: str = Field(..., min_length=1, max_length=100)
@@ -344,6 +365,54 @@ def _fetch_rule(conn: sqlite3.Connection, rule_id: int) -> dict | None:
     ).fetchone()
     return _row_to_rule(row, conn) if row else None
 
+def _sender_domain_from_message(message: dict[str, Any]) -> str | None:
+    explicit = message.get("sender_domain") or message.get("from_domain")
+    if explicit:
+        return str(explicit)
+    sender_email = str(message.get("sender_email") or "").strip()
+    if "@" not in sender_email:
+        return None
+    return sender_email.rsplit("@", 1)[1]
+
+def _explain_action(action: dict[str, Any]) -> dict[str, Any]:
+    action_type = action.get("action_type")
+    mutation = bool(action.get("mutation") or action_type in MUTATION_ACTIONS)
+    explained = {
+        **action,
+        "mutation": mutation,
+        "would_execute": False,
+        "explanation": _action_explanation(action_type, mutation),
+    }
+    if mutation:
+        explained["dry_run"] = True
+        explained["gate_status"] = (
+            action.get("gate_status")
+            or action.get("status")
+            or "preview_only"
+        )
+    return explained
+
+def _action_explanation(action_type: str | None, mutation: bool) -> str:
+    if action_type == "mark_pending_alert":
+        return (
+            "Would queue a local pending alert only after the saved rule runs "
+            "in normal processing."
+        )
+    if action_type == "skip_ai_inference":
+        return "Would skip local AI inference for this message during normal processing."
+    if action_type == "stop_processing":
+        return "Would stop evaluating later rules during normal processing."
+    if action_type == "route_to_pdf_pipeline":
+        return "Would route the message to the local PDF pipeline during normal processing."
+    if action_type == "add_to_needs_reply":
+        return "Would add the message to the local needs-reply queue during normal processing."
+    if mutation:
+        return (
+            "Mailbox mutation action is shown as preview-only here and remains "
+            "blocked by dry-run safety gates."
+        )
+    return "Would be planned by the saved rule during normal processing."
+
 def _validate_rule_payload(conditions: list[RuleConditionIn],
                            actions: list[RuleActionIn]) -> None:
     for condition in conditions:
@@ -357,6 +426,33 @@ def _validate_rule_payload(conditions: list[RuleConditionIn],
             raise ValueError("add_label requires a non-empty target")
         if action.action_type in MUTATION_ACTIONS - {"move_to_folder", "add_label"} and target:
             raise ValueError(f"{action.action_type} does not accept a target")
+
+def _record_rule_ai_draft_audit_best_effort(
+        request_text: str, mode: str, draft: dict[str, Any]) -> int | None:
+    try:
+        return AgentState(_db_path()).record_rule_ai_draft_audit(
+            request_text=request_text,
+            mode=mode,
+            result=draft,
+            source="draft_endpoint",
+        )
+    except Exception as exc:
+        logger.warning("rule_ai_draft_audit_failed error=%s", exc)
+        return None
+
+def _record_rule_ai_golden_probe_best_effort(
+        summary: dict[str, Any], rule_ai: dict[str, Any],
+        duration_ms: int | None) -> int | None:
+    try:
+        return AgentState(_db_path()).record_rule_ai_golden_probe_run(
+            summary=summary,
+            provider=rule_ai.get("provider"),
+            model=rule_ai.get("model"),
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        logger.warning("rule_ai_golden_probe_audit_failed error=%s", exc)
+        return None
 
 def _classification_for_trigger_preview(
         state: AgentState, data: AiTriggerPreview) -> dict[str, Any]:
@@ -1636,6 +1732,19 @@ async def create_rule(data: RuleCreate):
             rule_id = int(cur.lastrowid)
             _replace_rule_children(conn, rule_id, data.conditions, data.actions)
             conn.commit()
+            if data.source_draft_audit_id:
+                try:
+                    AgentState(_db_path()).link_rule_ai_draft_audit_to_rule(
+                        data.source_draft_audit_id,
+                        rule_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "rule_ai_draft_audit_link_failed audit_id=%s rule_id=%s error=%s",
+                        data.source_draft_audit_id,
+                        rule_id,
+                        exc,
+                    )
             return _fetch_rule(conn, rule_id)
         finally:
             conn.close()
@@ -1681,7 +1790,90 @@ async def draft_rule_from_natural_language(data: RuleAiDraftRequest):
                 )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return draft.to_dict()
+    payload = draft.to_dict()
+    audit_id = _record_rule_ai_draft_audit_best_effort(
+        data.request_text,
+        mode,
+        payload,
+    )
+    if audit_id is not None:
+        payload["draft_audit_id"] = audit_id
+    return payload
+
+@router.post("/rules/ai/golden-probe", dependencies=[Depends(require_api_key)])
+async def run_rule_ai_golden_probe(data: RuleAiGoldenProbeRequest):
+    started = time.monotonic()
+    try:
+        settings = _get_settings().get("mail", {}).get("rule_ai", {})
+        rule_ai = {
+            "enabled": bool(settings.get("enabled", False)),
+            "provider": settings.get("provider", "ollama"),
+            "model": settings.get("model", "qwen2.5:7b-instruct-q4_K_M"),
+        }
+        prompts = select_golden_prompts(
+            load_golden_prompts(DEFAULT_GOLDEN_FIXTURE),
+            data.prompt_ids,
+        )
+        if not rule_ai["enabled"]:
+            summary = disabled_probe_response(prompts, rule_ai)
+            _record_rule_ai_golden_probe_best_effort(
+                summary,
+                rule_ai,
+                int((time.monotonic() - started) * 1000),
+            )
+            return summary
+        probe_settings = dict(settings)
+        probe_settings["timeout_seconds"] = data.timeout_seconds
+
+        def draft_fn(prompt):
+            draft = draft_alert_rule_with_local_llm(
+                prompt.prompt,
+                account_id=None,
+                settings=probe_settings,
+            )
+            return draft.to_dict()
+
+        summary = run_golden_probe(
+            prompts,
+            draft_fn=draft_fn,
+            fail_fast=data.fail_fast,
+        )
+        payload = {
+            **summary,
+            "rule_ai": rule_ai,
+            "safety": safety_flags(),
+        }
+        _record_rule_ai_golden_probe_best_effort(
+            payload,
+            rule_ai,
+            int((time.monotonic() - started) * 1000),
+        )
+        return payload
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+@router.get("/rules/ai/audit/recent", dependencies=[Depends(require_api_key)])
+async def list_rule_ai_audit_recent(
+        limit: int = Query(50, ge=1, le=200),
+        mode: Optional[str] = Query(None, max_length=50),
+        status: Optional[str] = Query(None, max_length=50)):
+    return {
+        "items": AgentState(_db_path()).list_rule_ai_draft_audit(
+            limit=limit,
+            mode=mode,
+            status=status,
+        )
+    }
+
+@router.get("/rules/ai/audit/summary", dependencies=[Depends(require_api_key)])
+async def get_rule_ai_audit_summary():
+    return AgentState(_db_path()).rule_ai_quality_summary()
+
+@router.get("/rules/ai/golden-probe/runs", dependencies=[Depends(require_api_key)])
+async def list_rule_ai_golden_probe_runs(limit: int = Query(20, ge=1, le=100)):
+    return {
+        "items": AgentState(_db_path()).list_rule_ai_golden_probe_runs(limit=limit)
+    }
 
 @router.get("/rules/{rule_id}", dependencies=[Depends(require_api_key)])
 async def get_rule(rule_id: int):
@@ -1813,6 +2005,75 @@ async def preview_rules(data: RulePreview):
         "route_to_pdf_pipeline": result.route_to_pdf_pipeline,
         "active_actions": sorted(ACTIVE_ACTIONS),
         "allowed_operators": sorted(ALLOWED_OPERATORS),
+    }
+
+@router.post("/rules/explain", dependencies=[Depends(require_api_key)])
+async def explain_rules(data: RuleExplain):
+    state = _ensure_state()
+    settings = _get_settings()
+    cfg = settings.get("mail", {}).get("imap_mutations", {})
+    result = evaluate_message(
+        state,
+        data.message,
+        preview=True,
+        mutation_context={
+            "mode": _resolve_mode(settings),
+            "config": cfg,
+            "dry_run": True,
+        },
+        rule_id=data.rule_id,
+        include_disabled=data.include_disabled,
+    )
+    explained_actions = [_explain_action(action) for action in result.planned_actions]
+    actions_by_rule: dict[int, list[dict[str, Any]]] = {}
+    for action in explained_actions:
+        actions_by_rule.setdefault(int(action["rule_id"]), []).append(action)
+
+    rules = []
+    for rule in result.matched_conditions:
+        conditions = [
+            explain_condition_match(condition, data.message)
+            for condition in rule.get("conditions", [])
+        ]
+        rule_id = int(rule["rule_id"])
+        rules.append({
+            "rule_id": rule_id,
+            "name": rule.get("name"),
+            "matched": bool(rule.get("matched")),
+            "conditions": conditions,
+            "planned_actions": actions_by_rule.get(rule_id, []),
+        })
+
+    return {
+        "status": "ok",
+        "preview": True,
+        "message_summary": {
+            "sender_email": _safe_preview_text(data.message.get("sender_email"), 160),
+            "sender_domain": _sender_domain_from_message(data.message),
+            "subject": _safe_preview_text(data.message.get("subject"), 180),
+            "account_id": _safe_preview_text(data.message.get("imap_account"), 160),
+        },
+        "matched_rule_count": sum(1 for rule in rules if rule["matched"]),
+        "stopped": result.stopped,
+        "would_skip_ai": result.would_skip_ai,
+        "enqueue_ai": result.enqueue_ai,
+        "continue_to_classifier": result.continue_to_classifier,
+        "route_to_pdf_pipeline": result.route_to_pdf_pipeline,
+        "planned_actions": explained_actions,
+        "rules": rules,
+        "safety": {
+            "read_only": True,
+            "sent_imessage": False,
+            "called_bridge": False,
+            "called_imap": False,
+            "mutated_gmail": False,
+            "mutated_imap": False,
+            "wrote_events": False,
+            "wrote_rule_rows": False,
+            "wrote_approval_rows": False,
+            "called_ollama": False,
+            "called_cloud_llm": False,
+        },
     }
 
 @router.get(

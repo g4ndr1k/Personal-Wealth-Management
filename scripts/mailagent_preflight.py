@@ -338,12 +338,21 @@ def inspect_sqlite() -> list[str]:
         if agent_db.exists():
             try:
                 conn = sqlite3.connect(f"file:{agent_db}?mode=ro", uri=True, timeout=5)
-                for tbl in ["processed_messages", "alerts", "agent_flags"]:
+                for tbl in [
+                    "processed_messages",
+                    "alerts",
+                    "agent_flags",
+                    "mail_rule_ai_draft_audit",
+                    "mail_rule_ai_golden_probe_runs",
+                ]:
                     col_lines = _describe_table(conn, tbl)
                     lines.append(f"\n  **`{tbl}`** columns:")
                     lines.extend(col_lines)
-                    cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
-                    lines.append(f"  → {cnt[0]} rows")
+                    try:
+                        cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+                        lines.append(f"  → {cnt[0]} rows")
+                    except sqlite3.OperationalError:
+                        lines.append("  → row count unavailable")
                 conn.close()
             except Exception as e:
                 lines.append(_warn(f"Cannot open agent DB: {e}"))
@@ -419,11 +428,17 @@ def inspect_config() -> list[str]:
     lines.append(f"  - `base_url` = {repr(rule_ai_cfg.get('base_url', 'http://host.docker.internal:11434'))}")
     lines.append(f"  - `timeout_seconds` = {repr(rule_ai_cfg.get('timeout_seconds', 30))}")
     golden_probe = REPO / "scripts" / "mail_rule_ai_golden_probe.py"
+    api_mail_path = REPO / "agent" / "app" / "api_mail.py"
     if golden_probe.exists():
         lines.append(_ok("Rule AI golden probe available at scripts/mail_rule_ai_golden_probe.py"))
         lines.append("  - Preflight does not run the golden probe, call Ollama, or call the draft endpoint.")
     else:
         lines.append(_warn("Rule AI golden probe script not found"))
+    if api_mail_path.exists() and "/rules/ai/golden-probe" in api_mail_path.read_text():
+        lines.append(_ok("Rule AI golden probe endpoint declared at POST /api/mail/rules/ai/golden-probe"))
+        lines.append("  - Preflight does not call the golden probe endpoint.")
+    else:
+        lines.append(_warn("Rule AI golden probe endpoint not found"))
     lines.append("")
 
     lines.append("### Phase 4E.2 execution safety")

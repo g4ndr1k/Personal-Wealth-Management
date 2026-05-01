@@ -373,6 +373,62 @@ class AgentState:
                 )
                 WHERE status = 'pending';
 
+            -- ── Phase 4F.1g Rule AI draft quality audit ─────────────
+            CREATE TABLE IF NOT EXISTS mail_rule_ai_draft_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                saveable INTEGER NOT NULL DEFAULT 0,
+                safety_status TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                account_id TEXT,
+                request_hash TEXT NOT NULL,
+                request_preview TEXT,
+                normalized_intent TEXT,
+                rule_name TEXT,
+                condition_count INTEGER NOT NULL DEFAULT 0,
+                action_count INTEGER NOT NULL DEFAULT 0,
+                expected_domain TEXT,
+                actual_domain TEXT,
+                raw_model_error TEXT,
+                warnings_json TEXT,
+                explanation_json TEXT,
+                saved_rule_id INTEGER,
+                source TEXT NOT NULL DEFAULT 'draft_endpoint',
+                FOREIGN KEY(saved_rule_id)
+                    REFERENCES mail_rules(rule_id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_ai_draft_audit_created_at
+                ON mail_rule_ai_draft_audit(created_at);
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_ai_draft_audit_status
+                ON mail_rule_ai_draft_audit(status);
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_ai_draft_audit_mode
+                ON mail_rule_ai_draft_audit(mode);
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_ai_draft_audit_request_hash
+                ON mail_rule_ai_draft_audit(request_hash);
+
+            CREATE TABLE IF NOT EXISTS mail_rule_ai_golden_probe_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                passed INTEGER NOT NULL,
+                failed INTEGER NOT NULL,
+                skipped INTEGER NOT NULL,
+                provider TEXT,
+                model TEXT,
+                duration_ms INTEGER,
+                results_json TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_ai_golden_probe_runs_created_at
+                ON mail_rule_ai_golden_probe_runs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_mail_rule_ai_golden_probe_runs_status
+                ON mail_rule_ai_golden_probe_runs(status);
+
             CREATE TABLE IF NOT EXISTS imap_capability_cache (
                 account_id TEXT NOT NULL,
                 folder TEXT NOT NULL,
@@ -496,6 +552,245 @@ class AgentState:
                     f"ALTER TABLE {table} "
                     f"ADD COLUMN {column} {definition}")
                 conn.commit()
+
+    def _request_hash(self, request_text: str) -> str:
+        normalized = " ".join(str(request_text or "").split()).lower()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _request_preview(self, request_text: str, limit: int = 160) -> str:
+        preview = " ".join(str(request_text or "").split())
+        redactions = (
+            ("api_key", "[redacted]"),
+            ("app_password", "[redacted]"),
+            ("bridge.token", "[redacted]"),
+            ("bearer ", "[redacted] "),
+        )
+        lowered = preview.lower()
+        for needle, replacement in redactions:
+            if needle in lowered:
+                preview = replacement
+                break
+        return preview[:limit]
+
+    def _json_array(self, value) -> str:
+        items = value if isinstance(value, list) else []
+        safe = [str(item)[:500] for item in items[:10]]
+        return json.dumps(safe, ensure_ascii=True)
+
+    def record_rule_ai_draft_audit(
+            self, *, request_text: str, mode: str, result: dict,
+            source: str = "draft_endpoint",
+            expected_domain: str | None = None) -> int:
+        rule = result.get("rule") if isinstance(result.get("rule"), dict) else None
+        conditions = rule.get("conditions", []) if rule else []
+        actions = rule.get("actions", []) if rule else []
+        actual_domain = None
+        for condition in conditions:
+            if condition.get("field") in {"from_domain", "sender_domain"}:
+                actual_domain = condition.get("value")
+                break
+        now = self._now()
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO mail_rule_ai_draft_audit
+                    (created_at, mode, status, saveable, safety_status,
+                     provider, model, account_id, request_hash,
+                     request_preview, normalized_intent, rule_name,
+                     condition_count, action_count, expected_domain,
+                     actual_domain, raw_model_error, warnings_json,
+                     explanation_json, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                now,
+                str(mode or "auto"),
+                str(result.get("status") or "unknown"),
+                int(bool(result.get("saveable"))),
+                str(result.get("safety_status") or "unknown"),
+                result.get("provider"),
+                result.get("model"),
+                rule.get("account_id") if rule else None,
+                self._request_hash(request_text),
+                self._request_preview(request_text),
+                result.get("intent_summary"),
+                rule.get("name") if rule else None,
+                len(conditions),
+                len(actions),
+                expected_domain,
+                actual_domain,
+                (str(result.get("raw_model_error"))[:240]
+                 if result.get("raw_model_error") is not None else None),
+                self._json_array(result.get("warnings")),
+                self._json_array(result.get("explanation")),
+                str(source or "draft_endpoint"),
+            ))
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def link_rule_ai_draft_audit_to_rule(
+            self, audit_id: int, rule_id: int) -> bool:
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM mail_rules WHERE rule_id = ?",
+                (rule_id,),
+            ).fetchone()
+            if not exists:
+                return False
+            cur = conn.execute("""
+                UPDATE mail_rule_ai_draft_audit
+                SET saved_rule_id = ?
+                WHERE id = ?
+            """, (rule_id, audit_id))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def record_rule_ai_golden_probe_run(
+            self, *, summary: dict, provider: str | None,
+            model: str | None, duration_ms: int | None) -> int:
+        compact = []
+        for item in summary.get("results", [])[:50]:
+            errors = item.get("errors") or []
+            compact.append({
+                "id": item.get("id"),
+                "passed": bool(item.get("passed")),
+                "expected_domain": item.get("expected_domain"),
+                "actual_domain": item.get("actual_domain"),
+                "error": errors[0] if errors else None,
+                "safety_status": item.get("safety_status"),
+                "saveable": item.get("saveable"),
+            })
+        counts = summary.get("summary", {})
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO mail_rule_ai_golden_probe_runs
+                    (created_at, status, total, passed, failed, skipped,
+                     provider, model, duration_ms, results_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                self._now(),
+                str(summary.get("status") or "unknown"),
+                int(counts.get("total", 0)),
+                int(counts.get("passed", 0)),
+                int(counts.get("failed", 0)),
+                int(counts.get("skipped", 0)),
+                provider,
+                model,
+                duration_ms,
+                json.dumps(compact, ensure_ascii=True),
+            ))
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def list_rule_ai_draft_audit(
+            self, limit: int = 50, status: str | None = None,
+            mode: str | None = None) -> list[dict]:
+        limit = max(1, min(int(limit), 200))
+        clauses = []
+        params: list = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if mode:
+            clauses.append("mode = ?")
+            params.append(mode)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(f"""
+                SELECT * FROM mail_rule_ai_draft_audit
+                {where}
+                ORDER BY id DESC
+                LIMIT ?
+            """, (*params, limit)).fetchall()
+            return [self._decode_rule_ai_draft_audit_row(dict(row)) for row in rows]
+
+    def list_rule_ai_golden_probe_runs(self, limit: int = 20) -> list[dict]:
+        limit = max(1, min(int(limit), 100))
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT * FROM mail_rule_ai_golden_probe_runs
+                ORDER BY id DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+            return [self._decode_golden_probe_run(dict(row)) for row in rows]
+
+    def rule_ai_quality_summary(self) -> dict:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            total = conn.execute(
+                "SELECT COUNT(*) AS count FROM mail_rule_ai_draft_audit"
+            ).fetchone()["count"]
+            saveable = conn.execute("""
+                SELECT COUNT(*) AS count FROM mail_rule_ai_draft_audit
+                WHERE saveable = 1
+            """).fetchone()["count"]
+            unsupported = conn.execute("""
+                SELECT COUNT(*) AS count FROM mail_rule_ai_draft_audit
+                WHERE status = 'unsupported'
+                   OR safety_status IN ('unsupported_intent',
+                                        'unsupported_live_mailbox_action',
+                                        'local_llm_disabled')
+            """).fetchone()["count"]
+            failed = conn.execute("""
+                SELECT COUNT(*) AS count FROM mail_rule_ai_draft_audit
+                WHERE status NOT IN ('draft', 'unsupported')
+                   OR safety_status IN ('llm_draft_failed',
+                                        'blocked',
+                                        'unknown')
+            """).fetchone()["count"]
+            by_mode = {
+                row["mode"]: row["count"]
+                for row in conn.execute("""
+                    SELECT mode, COUNT(*) AS count
+                    FROM mail_rule_ai_draft_audit
+                    GROUP BY mode ORDER BY mode
+                """)
+            }
+            by_safety_status = {
+                row["safety_status"]: row["count"]
+                for row in conn.execute("""
+                    SELECT safety_status, COUNT(*) AS count
+                    FROM mail_rule_ai_draft_audit
+                    GROUP BY safety_status ORDER BY safety_status
+                """)
+            }
+            latest = conn.execute("""
+                SELECT * FROM mail_rule_ai_golden_probe_runs
+                ORDER BY id DESC LIMIT 1
+            """).fetchone()
+            return {
+                "total_draft_attempts": int(total),
+                "saveable_count": int(saveable),
+                "unsupported_count": int(unsupported),
+                "failed_count": int(failed),
+                "saveable_rate": (
+                    round(float(saveable) / float(total), 4)
+                    if total else 0.0
+                ),
+                "by_mode": by_mode,
+                "by_safety_status": by_safety_status,
+                "latest_golden_probe": (
+                    self._decode_golden_probe_run(dict(latest))
+                    if latest else None
+                ),
+            }
+
+    def _decode_rule_ai_draft_audit_row(self, row: dict) -> dict:
+        row["saveable"] = bool(row.get("saveable"))
+        for key in ("warnings_json", "explanation_json"):
+            try:
+                row[key.removesuffix("_json")] = (
+                    json.loads(row.get(key) or "[]"))
+            except json.JSONDecodeError:
+                row[key.removesuffix("_json")] = []
+        return row
+
+    def _decode_golden_probe_run(self, row: dict) -> dict:
+        try:
+            row["results"] = json.loads(row.get("results_json") or "[]")
+        except json.JSONDecodeError:
+            row["results"] = []
+        return row
 
     def message_processed(self, bridge_id: str) -> bool:
         with self._connect() as conn:

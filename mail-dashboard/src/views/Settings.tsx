@@ -13,6 +13,10 @@ import {
   MailRuleCondition,
   MailRuleInput,
   RuleAiDraftResult,
+  RuleAiAuditItem,
+  RuleAiGoldenProbeResponse,
+  RuleAiQualitySummary,
+  RuleExplainResponse,
   RulePreviewResult,
   useApi,
 } from '../api/mail';
@@ -32,6 +36,7 @@ import {
   reorderPayloadForScope,
   ruleHasMutationAction,
   rulesInScope,
+  syntheticMessageFromAiDraft,
 } from './ruleUiHelpers';
 
 function normalizeAppPassword(value: string) {
@@ -131,10 +136,14 @@ export default function Settings() {
     listRules,
     createRule,
     draftRuleWithAi,
+    runRuleAiGoldenProbe,
+    listRuleAiAudit,
+    getRuleAiQualitySummary,
     updateRule,
     deleteRule,
     reorderRules,
     previewRules,
+    explainRule,
     listProcessingEvents,
     getAiSettings,
     updateAiSettings,
@@ -160,9 +169,18 @@ export default function Settings() {
   const [aiRuleMode, setAiRuleMode] = useState<'auto' | 'sender_suppression' | 'alert_rule'>('auto');
   const [aiRuleDraft, setAiRuleDraft] = useState<RuleAiDraftResult | null>(null);
   const [aiRuleBusy, setAiRuleBusy] = useState(false);
+  const [goldenProbeBusy, setGoldenProbeBusy] = useState(false);
+  const [goldenProbeResult, setGoldenProbeResult] = useState<RuleAiGoldenProbeResponse | null>(null);
+  const [goldenProbeError, setGoldenProbeError] = useState<string | null>(null);
+  const [ruleAiQuality, setRuleAiQuality] = useState<RuleAiQualitySummary | null>(null);
+  const [ruleAiAuditRecent, setRuleAiAuditRecent] = useState<RuleAiAuditItem[]>([]);
+  const [ruleAiQualityError, setRuleAiQualityError] = useState<string | null>(null);
   const [previewText, setPreviewText] = useState(JSON.stringify(samplePreview, null, 2));
   const [previewResult, setPreviewResult] = useState<RulePreviewResult | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [explainText, setExplainText] = useState(JSON.stringify(samplePreview, null, 2));
+  const [explainResult, setExplainResult] = useState<RuleExplainResponse | null>(null);
+  const [explainError, setExplainError] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<MailProcessingEvent[]>([]);
   const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
   const [aiStatus, setAiStatus] = useState<string | null>(null);
@@ -178,6 +196,7 @@ export default function Settings() {
 
   useEffect(() => {
     refreshRulesAndAudit();
+    refreshRuleAiQuality();
     refreshAiSettings();
     refreshAiTriggers();
   }, []);
@@ -206,6 +225,20 @@ export default function Settings() {
       }
     } catch (e: any) {
       setRuleError(e.message);
+    }
+  };
+
+  const refreshRuleAiQuality = async () => {
+    setRuleAiQualityError(null);
+    try {
+      const [summary, recent] = await Promise.all([
+        getRuleAiQualitySummary(),
+        listRuleAiAudit({ limit: 5 }),
+      ]);
+      setRuleAiQuality(summary);
+      setRuleAiAuditRecent(recent);
+    } catch (e: any) {
+      setRuleAiQualityError(e.message);
     }
   };
 
@@ -417,6 +450,7 @@ export default function Settings() {
         mode: aiRuleMode,
       });
       setAiRuleDraft(draft);
+      await refreshRuleAiQuality();
     } catch (e: any) {
       setRuleError(e.message);
     } finally {
@@ -442,11 +476,30 @@ export default function Settings() {
       setAiRuleRequest('');
       setAiRuleDraft(null);
       await refreshRulesAndAudit();
+      await refreshRuleAiQuality();
     } catch (e: any) {
       setRuleStatus(null);
       setRuleError(e.message);
     } finally {
       setAiRuleBusy(false);
+    }
+  };
+
+  const runGoldenProbe = async () => {
+    setGoldenProbeBusy(true);
+    setGoldenProbeError(null);
+    try {
+      const result = await runRuleAiGoldenProbe({
+        prompt_ids: null,
+        fail_fast: false,
+        timeout_seconds: 120,
+      });
+      setGoldenProbeResult(result);
+      await refreshRuleAiQuality();
+    } catch (e: any) {
+      setGoldenProbeError(e.message);
+    } finally {
+      setGoldenProbeBusy(false);
     }
   };
 
@@ -487,6 +540,28 @@ export default function Settings() {
     } catch (e: any) {
       setPreviewError(e.message);
     }
+  };
+
+  const runRuleExplanation = async () => {
+    setExplainError(null);
+    setExplainResult(null);
+    try {
+      const message = JSON.parse(explainText);
+      const result = await explainRule({
+        message,
+        rule_id: typeof selectedRuleId === 'number' ? selectedRuleId : null,
+        include_disabled: true,
+      });
+      setExplainResult(result);
+    } catch (e: any) {
+      setExplainError(e.message);
+    }
+  };
+
+  const loadAiDraftExplanationSample = () => {
+    setExplainText(JSON.stringify(syntheticMessageFromAiDraft(aiRuleDraft), null, 2));
+    setExplainResult(null);
+    setExplainError(null);
   };
 
   const updateCondition = (index: number, patch: Partial<MailRuleCondition>) => {
@@ -721,6 +796,19 @@ export default function Settings() {
           busy={aiRuleBusy}
           onDraft={draftAiRule}
           onSave={saveAiDraftRule}
+        />
+
+        <RuleAiGoldenProbeCard
+          result={goldenProbeResult}
+          busy={goldenProbeBusy}
+          error={goldenProbeError}
+          onRun={runGoldenProbe}
+        />
+
+        <RuleAiQualityCard
+          summary={ruleAiQuality}
+          recent={ruleAiAuditRecent}
+          error={ruleAiQualityError}
         />
 
         <div className="grid grid-cols-1 xl:grid-cols-[420px_1fr] gap-4">
@@ -994,6 +1082,16 @@ export default function Settings() {
                 previewError={previewError}
                 runPreview={runPreview}
               />
+              <RuleExplainPanel
+                selectedRuleId={typeof selectedRuleId === 'number' ? selectedRuleId : null}
+                explainText={explainText}
+                setExplainText={setExplainText}
+                explainResult={explainResult}
+                explainError={explainError}
+                runExplanation={runRuleExplanation}
+                loadAiDraftSample={loadAiDraftExplanationSample}
+                hasAiDraft={Boolean(aiRuleDraft?.rule)}
+              />
               <AuditPanel events={auditEvents} refresh={refreshRulesAndAudit} />
             </div>
           </div>
@@ -1237,8 +1335,218 @@ function AiRuleBuilderCard({
   );
 }
 
+function RuleAiGoldenProbeCard({
+  result,
+  busy,
+  error,
+  onRun,
+}: {
+  result: RuleAiGoldenProbeResponse | null;
+  busy: boolean;
+  error: string | null;
+  onRun: () => void;
+}) {
+  const disabled = result?.status === 'disabled';
+  const failed = result?.status === 'failed';
+  const passed = result?.status === 'passed';
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-white">Rule AI Golden Probe</h3>
+          <p className="mt-1 text-sm text-gray-400">Manual local-model quality check. Drafts only. Saves nothing.</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <ProbeChip>Does not save rules</ProbeChip>
+            <ProbeChip>Does not send iMessage</ProbeChip>
+            <ProbeChip>Does not mutate Gmail</ProbeChip>
+            <ProbeChip>Does not call IMAP</ProbeChip>
+          </div>
+        </div>
+        <button
+          onClick={onRun}
+          disabled={busy}
+          className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+        >
+          {busy ? 'Running...' : 'Run Golden Probe'}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mt-4 rounded-lg border border-red-900/50 bg-red-950/20 p-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-4 space-y-4">
+          <div className={`rounded-lg border p-3 text-sm ${
+            disabled
+              ? 'border-amber-900/50 bg-amber-950/20 text-amber-100'
+              : failed
+                ? 'border-red-900/50 bg-red-950/20 text-red-100'
+                : 'border-emerald-900/50 bg-emerald-950/20 text-emerald-100'
+          }`}>
+            <div className="font-semibold">
+              {disabled ? 'Rule AI golden probe disabled' : passed ? 'Rule AI golden probe passed' : 'Rule AI golden probe failed'}
+            </div>
+            <div className="mt-1 text-xs opacity-90">
+              {result.summary.passed} passed / {result.summary.failed} failed / {result.summary.total} total
+              {result.summary.skipped ? ` / ${result.summary.skipped} skipped` : ''}
+              {result.rule_ai ? ` · ${result.rule_ai.provider} / ${result.rule_ai.model}` : ''}
+            </div>
+            {disabled && (
+              <div className="mt-2 text-xs">
+                [mail.rule_ai].enabled is false. Enable only when intentionally testing local Ollama rule drafting.
+              </div>
+            )}
+            {result.warnings?.map((warning, index) => (
+              <div key={`${warning}-${index}`} className="mt-2 text-xs opacity-90">{warning}</div>
+            ))}
+          </div>
+
+          {result.results.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-gray-800">
+              <table className="min-w-full divide-y divide-gray-800 text-xs">
+                <thead className="bg-gray-950/60 text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">Prompt ID</th>
+                    <th className="px-3 py-2 text-left font-medium">Expected Domain</th>
+                    <th className="px-3 py-2 text-left font-medium">Actual Domain</th>
+                    <th className="px-3 py-2 text-left font-medium">Status</th>
+                    <th className="px-3 py-2 text-left font-medium">First Error</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800 bg-gray-950/30 text-gray-300">
+                  {result.results.map((item) => (
+                    <tr key={item.id}>
+                      <td className="px-3 py-2 font-medium text-gray-100">{item.id}</td>
+                      <td className="px-3 py-2">{item.expected_domain}</td>
+                      <td className="px-3 py-2">{item.actual_domain || 'n/a'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                          item.passed ? 'bg-emerald-950/50 text-emerald-300' : 'bg-red-950/50 text-red-300'
+                        }`}>
+                          {item.passed ? 'passed' : 'failed'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-gray-400">{item.errors?.[0] || 'none'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProbeChip({ children }: { children: ReactNode }) {
+  return (
+    <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px] font-medium">
+      {children}
+    </span>
+  );
+}
+
 function humanizeDraftStatus(value: string) {
   return value.replace(/_/g, ' ');
+}
+
+function RuleAiQualityCard({
+  summary,
+  recent,
+  error,
+}: {
+  summary: RuleAiQualitySummary | null;
+  recent: RuleAiAuditItem[];
+  error: string | null;
+}) {
+  const latest = summary?.latest_golden_probe;
+  const saveableRate = summary ? Math.round(summary.saveable_rate * 100) : 0;
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-white">Rule AI Quality</h3>
+          <p className="mt-1 text-sm text-gray-400">
+            Audit stores request hashes and short previews only. It does not store raw model output or save rules.
+          </p>
+        </div>
+        {latest && (
+          <span className={`rounded px-2 py-1 text-xs font-medium ${
+            latest.status === 'passed'
+              ? 'bg-emerald-950/50 text-emerald-300'
+              : latest.status === 'failed'
+                ? 'bg-red-950/50 text-red-300'
+                : 'bg-amber-950/50 text-amber-300'
+          }`}>
+            Latest probe: {latest.status}
+          </span>
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-4 rounded-lg border border-red-900/50 bg-red-950/20 p-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+        <QualityMetric label="Draft attempts" value={summary?.total_draft_attempts ?? 0} />
+        <QualityMetric label="Saveable drafts" value={summary?.saveable_count ?? 0} />
+        <QualityMetric label="Unsupported/failed" value={(summary?.unsupported_count ?? 0) + (summary?.failed_count ?? 0)} />
+        <QualityMetric label="Saveable rate" value={`${saveableRate}%`} />
+      </div>
+
+      {latest && (
+        <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-300">
+          Latest golden probe: {latest.passed} passed / {latest.failed} failed / {latest.total} total
+          {latest.skipped ? ` / ${latest.skipped} skipped` : ''}
+          {latest.model ? ` · ${latest.model}` : ''}
+        </div>
+      )}
+
+      <div className="mt-4 overflow-hidden rounded-lg border border-gray-800">
+        <div className="bg-gray-950/60 px-3 py-2 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+          Recent AI draft attempts
+        </div>
+        {recent.length === 0 ? (
+          <div className="px-3 py-5 text-sm text-gray-500">No draft audit rows yet.</div>
+        ) : (
+          <div className="divide-y divide-gray-800">
+            {recent.map((item) => (
+              <div key={item.id} className="px-3 py-3 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-gray-100">{item.mode}</span>
+                  <span className="text-gray-500">{item.status}</span>
+                  <span className="text-gray-500">{item.safety_status}</span>
+                  {item.model && <span className="text-gray-500">{item.model}</span>}
+                  <span className="ml-auto text-gray-600">{new Date(item.created_at).toLocaleString()}</span>
+                </div>
+                <div className="mt-1 text-gray-300">{item.request_preview || 'No preview'}</div>
+                <div className="mt-1 text-gray-500">
+                  {item.rule_name || item.raw_model_error || item.normalized_intent || 'No rule drafted'}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QualityMetric({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+      <div className="text-[10px] uppercase tracking-wider text-gray-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-white">{value}</div>
+    </div>
+  );
 }
 
 function DraftInfo({ label, value }: { label: string; value: string }) {
@@ -1846,6 +2154,153 @@ function PreviewPanel({
                 ))
               )}
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleExplainPanel({
+  selectedRuleId,
+  explainText,
+  setExplainText,
+  explainResult,
+  explainError,
+  runExplanation,
+  loadAiDraftSample,
+  hasAiDraft,
+}: {
+  selectedRuleId: number | null;
+  explainText: string;
+  setExplainText: (value: string) => void;
+  explainResult: RuleExplainResponse | null;
+  explainError: string | null;
+  runExplanation: () => void;
+  loadAiDraftSample: () => void;
+  hasAiDraft: boolean;
+}) {
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <h3 className="text-base font-semibold text-white">Explain Rule</h3>
+          <p className="text-xs text-gray-500 mt-1">Dry-run only. Does not send iMessage. Does not mutate Gmail. Does not call IMAP.</p>
+        </div>
+        <button
+          onClick={runExplanation}
+          className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-500 transition-colors"
+        >
+          Run Dry-Run Explanation
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-gray-500">
+        <span>Rule: {selectedRuleId ? `#${selectedRuleId}` : 'all enabled rules'}</span>
+        {hasAiDraft && (
+          <button
+            onClick={loadAiDraftSample}
+            className="px-2 py-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700"
+          >
+            Use AI draft sample
+          </button>
+        )}
+      </div>
+
+      <textarea
+        value={explainText}
+        onChange={(e) => setExplainText(e.target.value)}
+        rows={8}
+        className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+      />
+
+      {explainError && (
+        <div className="mt-3 bg-red-900/20 border border-red-900/50 p-3 rounded-lg text-red-400 text-sm">
+          {explainError}
+        </div>
+      )}
+
+      {explainResult && (
+        <div className="mt-4 space-y-4 text-sm">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+            <PreviewFlag label="matched" value={explainResult.matched_rule_count > 0} />
+            <PreviewFlag label="would_skip_ai" value={explainResult.would_skip_ai} />
+            <PreviewFlag label="stopped" value={explainResult.stopped} />
+            <PreviewFlag label="route_pdf" value={explainResult.route_to_pdf_pipeline} />
+          </div>
+
+          <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-400">
+            <div>Sender domain: <span className="text-gray-200">{explainResult.message_summary.sender_domain || 'none'}</span></div>
+            <div>Subject: <span className="text-gray-200">{explainResult.message_summary.subject || 'none'}</span></div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">Conditions</h4>
+            <div className="space-y-2">
+              {explainResult.rules.length === 0 ? (
+                <div className="text-gray-500">No saved rules were evaluated.</div>
+              ) : (
+                explainResult.rules.map((rule) => (
+                  <div key={rule.rule_id} className="border border-gray-800 rounded-lg p-3 bg-gray-950/40">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="font-medium text-gray-200">{rule.name}</span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
+                        rule.matched ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-500'
+                      }`}>
+                        {rule.matched ? 'matched' : 'not matched'}
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      {rule.conditions.map((condition, index) => (
+                        <div key={index} className="grid grid-cols-1 md:grid-cols-[80px_1fr_1fr] gap-2 text-xs">
+                          <span className={condition.matched ? 'text-green-400' : 'text-gray-500'}>
+                            {condition.matched ? 'match' : 'miss'}
+                          </span>
+                          <div className="text-gray-400">
+                            <code className="text-gray-300">{condition.field}</code> {condition.operator} <code className="text-gray-300">{String(condition.expected ?? '')}</code>
+                          </div>
+                          <div className="text-gray-500">
+                            actual: <code className="text-gray-300">{String(condition.actual ?? '')}</code>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">Planned Local Actions</h4>
+            <div className="space-y-2">
+              {explainResult.planned_actions.length === 0 ? (
+                <div className="text-gray-500">No actions planned.</div>
+              ) : (
+                explainResult.planned_actions.map((action, index) => (
+                  <div key={`${action.rule_id}-${action.action_type}-${index}`} className="border border-gray-800 rounded-lg p-3 bg-gray-950/40">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs text-gray-200">{actionLabel(action.action_type)}</span>
+                      <span className="text-[10px] uppercase tracking-wider text-gray-500">preview only</span>
+                    </div>
+                    {action.target && <div className="text-xs text-gray-500 mt-1">Target: {action.target}</div>}
+                    <div className="text-xs text-gray-500 mt-1">{action.explanation}</div>
+                    {action.mutation && (
+                      <div className="text-xs text-amber-300 mt-1">
+                        Mutation dry-run gate: {action.gate_status || 'preview_only'} · would execute: {String(action.would_execute)}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <PreviewFlag label="Dry-run only" value={explainResult.safety.read_only} />
+            <PreviewFlag label="No iMessage" value={!explainResult.safety.sent_imessage} />
+            <PreviewFlag label="No Gmail mutation" value={!explainResult.safety.mutated_gmail} />
+            <PreviewFlag label="No IMAP call" value={!explainResult.safety.called_imap} />
           </div>
         </div>
       )}

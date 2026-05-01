@@ -144,10 +144,13 @@ PATCH  /api/mail/rules/{rule_id}
 DELETE /api/mail/rules/{rule_id}
 PUT    /api/mail/rules/reorder
 POST   /api/mail/rules/preview
+POST   /api/mail/rules/explain
 GET    /api/mail/processing-events
 ```
 
 Phase 4F AI rule-builder endpoints are documented in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). The implemented 4F.1a endpoint is draft-only for local sender suppression; AI must not write directly to `mail_rules` or execute mailbox actions.
+
+`POST /api/mail/rules/explain` is the Phase 4F.2a deterministic rule explanation / dry-run inspector. It accepts a synthetic/sample message, optionally filters to one saved `rule_id`, runs the existing rule engine with `preview=True`, and returns per-condition expected/actual/matched details plus planned preview-only actions. `from_domain` / `sender_domain` actual values are derived from `sender_email` when needed. The endpoint is read-only: no rule rows, processing events, approval rows, audit rows, iMessage, bridge call, IMAP call, Gmail mutation, Ollama call, or cloud LLM call.
 
 ### Worker health/debug API
 
@@ -559,6 +562,40 @@ The local model output is never trusted directly. Deterministic post-validation 
 Phase 4F.1c recognizes deterministic hints for Permata, BCA, KlikBCA, CIMB Niaga, Maybank, Mandiri/Livin, BNI, BRI, OCBC NISP, UOB, HSBC, DBS, Jenius, and BSI. It normalizes common Indonesian/English alert intents including credit-card clarification/confirmation, suspicious/security/login alerts, payment due/billing, OTP/verification-code, and failed/declined transactions. Saveable drafts are still capped to narrow `ALL` rules and use no action other than `mark_pending_alert` to `imessage`.
 
 Phase 4F.1d adds an operator-run golden prompt smoke harness for local Qwen quality checks. The fixture lives at `agent/tests/fixtures/rule_ai_golden_prompts.json`, and the runner is `scripts/mail_rule_ai_golden_probe.py`. The harness sends known prompts to `POST /api/mail/rules/ai/draft` only, validates the returned safe alert draft shape, and prints a compact pass/fail report. It never calls `POST /api/mail/rules`, never saves rules, never sends iMessage, never calls the bridge, and never mutates Gmail or IMAP. Normal automated tests use mocked responses and do not require Ollama.
+
+Phase 4F.1e adds the same golden-probe quality gate to the dashboard through `POST /api/mail/rules/ai/golden-probe`. The Settings panel is manual/operator-run only and displays disabled, passed, or failed summaries plus per-prompt results. It uses the shared `agent/app/rule_ai_golden_probe.py` validation logic, does not create a normal AI Rule Builder draft, does not show Save Rule for probe results, and never calls the rule-save endpoint. Real probe runs require `[mail.rule_ai].enabled=true` and reachable local Ollama; keep `[mail.rule_ai].enabled=false` outside intentional testing.
+
+Phase 4F.1f proves that saveable AI drafts are compatible with the existing deterministic rule pipeline. Sender suppression and alert-rule drafts can be saved only through the human-triggered `POST /api/mail/rules` endpoint, produce normal `mail_rules`, `mail_rule_conditions`, and `mail_rule_actions` rows, and preview through `POST /api/mail/rules/preview` against synthetic/sample messages. The draft endpoint and golden-probe endpoint remain read-only for rule tables. Saved AI-drafted rules are deterministic rules; they are not AI-executed actions.
+
+Compatibility vocabulary:
+
+- `from_email` maps to normal message `sender_email`.
+- `from_domain` and `sender_domain` are deterministic domain aliases derived from `sender_email` when no explicit domain field exists.
+- Alert drafts use only `contains` / `equals` operators and `mark_pending_alert` to target `imessage`.
+- Sender suppression drafts use only `from_email equals`, `skip_ai_inference`, and `stop_processing`.
+
+The dashboard Save Rule path strips draft metadata (`status`, `saveable`, `safety_status`, warnings, explanation, provider/model, and raw model errors) before calling create-rule. Golden-probe results never expose Save Rule, unsupported drafts remain unsaveable, and preview/evaluation remains local and non-mutating.
+
+Phase 4F.2a adds the Rule Explanation / Dry-Run Inspector. This is not an AI expansion: it uses saved deterministic rules and synthetic/sample message payloads only. The dashboard **Explain Rule** panel shows matched vs not matched, each condition's expected and actual values, planned local actions, skip-AI and stop-processing flags, and safety copy. It helps verify AI-drafted rules after human save, but it does not expose Save Rule from the explanation result and does not run the golden probe.
+
+Phase 4F.1g adds local Rule AI draft/probe observability. `mail_rule_ai_draft_audit` records each successful draft endpoint response as a best-effort audit row, and `mail_rule_ai_golden_probe_runs` records aggregate golden probe results. These tables are quality metrics only: they do not save rules, do not execute actions, and do not change mailbox state.
+
+Audit privacy rules:
+
+- store request hash and short sanitized preview, not full raw prompt
+- store compact status/saveability/safety/model metadata and rule shape counts
+- store warnings/explanations after normal sanitization
+- never store raw model output, API keys, app passwords, bridge tokens, full email bodies, or mailbox mutation identifiers
+
+Read-only audit endpoints:
+
+```text
+GET /api/mail/rules/ai/audit/recent
+GET /api/mail/rules/ai/audit/summary
+GET /api/mail/rules/ai/golden-probe/runs
+```
+
+The dashboard “Rule AI Quality” panel displays summary metrics and recent attempts only. It has no Save Rule, rerun, execute, label, move, mark read/unread, delete, archive, forward, reply, unsubscribe, or webhook controls. Audit write failures are logged and should be visible through preflight/operator logs; draft generation remains usable because audit is best-effort observability.
 
 Manual validation checkpoint on 2026-05-01 established the current local-first recommendation for this narrow flow. Gemma failed the initial schema probe, and Qwen failed before schema hardening. After adding structured Ollama JSON schema output and keeping deterministic post-validation mandatory, `qwen2.5:7b-instruct-q4_K_M` passed 5/5 manual alert-rule prompts. Phase 4F.1c did not add cloud LLM support; local Qwen remains the recommended model for narrow rule drafting, cloud LLM integration remains deferred, and `[mail.rule_ai].enabled` should remain `false` by default unless an operator is actively testing local rule drafting.
 

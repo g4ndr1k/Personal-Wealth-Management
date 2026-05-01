@@ -10,6 +10,7 @@ import {
   accountScopeLabel,
   aiDraftToRuleInput,
   defaultRuleAccountId,
+  syntheticMessageFromAiDraft,
   hasPriorityConflict,
   isMutationAction,
   isSaveableAiDraft,
@@ -150,8 +151,13 @@ test('AI rule draft converts only safe local suppression drafts to save payloads
   const draft: any = {
     intent_summary: 'Suppress alerts from abcd@efcf.com',
     confidence: 0.95,
+    status: 'draft',
+    saveable: true,
     safety_status: 'safe_local_suppression',
     requires_user_confirmation: true,
+    provider: 'ollama',
+    model: 'qwen2.5:7b-instruct-q4_K_M',
+    draft_audit_id: 17,
     explanation: [],
     warnings: ['This does not mutate Gmail'],
     rule: {
@@ -166,11 +172,26 @@ test('AI rule draft converts only safe local suppression drafts to save payloads
     },
   };
   assert.deepEqual(aiDraftToRuleInput(draft, 30), {
-    ...draft.rule,
+    name: draft.rule.name,
+    account_id: draft.rule.account_id,
+    match_type: draft.rule.match_type,
+    conditions: [
+      {
+        field: 'from_email',
+        operator: 'equals',
+        value: 'abcd@efcf.com',
+        value_json: null,
+        case_sensitive: false,
+      },
+    ],
+    actions: draft.rule.actions,
     priority: 30,
     enabled: true,
+    source_draft_audit_id: 17,
   });
   assert.equal(aiDraftToRuleInput({ ...draft, safety_status: 'unsupported_live_mailbox_action' }, 30), null);
+  assert.equal(aiDraftToRuleInput({ ...draft, status: 'unsupported' }, 30), null);
+  assert.equal(aiDraftToRuleInput({ ...draft, saveable: false }, 30), null);
   assert.equal(aiDraftToRuleInput({ ...draft, rule: null }, 30), null);
   assert.equal(isSaveableAiDraft(draft), true);
   assert.equal(isSaveableAiDraft({ ...draft, rule: null }), false);
@@ -198,10 +219,60 @@ test('AI rule draft converts only safe local suppression drafts to save payloads
   };
   assert.equal(isSaveableAiDraft(alertDraft), true);
   assert.deepEqual(aiDraftToRuleInput(alertDraft, 40), {
-    ...alertDraft.rule,
+    name: alertDraft.rule.name,
+    account_id: alertDraft.rule.account_id,
+    match_type: alertDraft.rule.match_type,
+    conditions: [
+      {
+        field: 'from_domain',
+        operator: 'contains',
+        value: 'permatabank.co.id',
+        value_json: null,
+        case_sensitive: false,
+      },
+      {
+        field: 'subject',
+        operator: 'contains',
+        value: 'clarification',
+        value_json: null,
+        case_sensitive: false,
+      },
+    ],
+    actions: alertDraft.rule.actions,
     priority: 40,
     enabled: true,
+    source_draft_audit_id: 17,
   });
+
+  const noisyDraft: any = {
+    ...draft,
+    safety_status: 'safe_local_suppression',
+    status: 'draft',
+    saveable: true,
+    rule: {
+      ...draft.rule,
+      actions: [
+        ...draft.rule.actions,
+        { action_type: 'stop_processing', target: null, value_json: null, stop_processing: true },
+      ],
+    },
+  };
+  const payload = aiDraftToRuleInput(noisyDraft, 50) as any;
+  assert.deepEqual(Object.keys(payload).sort(), [
+    'account_id',
+    'actions',
+    'conditions',
+    'enabled',
+    'match_type',
+    'name',
+    'priority',
+    'source_draft_audit_id',
+  ]);
+  assert.equal('status' in payload, false);
+  assert.equal('saveable' in payload, false);
+  assert.equal('safety_status' in payload, false);
+  assert.equal('provider' in payload, false);
+  assert.equal(payload.actions.filter((action: any) => action.action_type === 'stop_processing').length, 1);
 });
 
 test('AI rule builder UI keeps save behind safe draft and existing create rule API', () => {
@@ -219,6 +290,106 @@ test('AI rule builder UI keeps save behind safe draft and existing create rule A
   assert.doesNotMatch(settingsSource, /draftRuleWithAi\(payload\)/);
   assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules\/ai\/draft'/);
   assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules'/);
+});
+
+test('Rule AI golden probe UI is manual and draft-only', () => {
+  const settingsSource = readFileSync(new URL('../src/views/Settings.tsx', import.meta.url), 'utf8');
+  const apiSource = readFileSync(new URL('../src/api/mail.tsx', import.meta.url), 'utf8');
+
+  assert.match(settingsSource, /Rule AI Golden Probe/);
+  assert.match(settingsSource, /Manual local-model quality check\. Drafts only\. Saves nothing\./);
+  assert.match(settingsSource, /Does not save rules/);
+  assert.match(settingsSource, /Does not send iMessage/);
+  assert.match(settingsSource, /Does not mutate Gmail/);
+  assert.match(settingsSource, /Does not call IMAP/);
+  assert.match(settingsSource, /Run Golden Probe/);
+  assert.match(settingsSource, /Rule AI golden probe disabled/);
+  assert.match(settingsSource, /\[mail\.rule_ai\]\.enabled is false/);
+  assert.match(settingsSource, /Rule AI golden probe passed/);
+  assert.match(settingsSource, /Rule AI golden probe failed/);
+  assert.match(settingsSource, /item\.errors\?\.\[0\]/);
+  assert.match(apiSource, /runRuleAiGoldenProbe/);
+  assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules\/ai\/golden-probe'/);
+
+  const panelSource = settingsSource.slice(settingsSource.indexOf('function RuleAiGoldenProbeCard'));
+  assert.doesNotMatch(panelSource, /Save Rule/);
+  assert.doesNotMatch(panelSource, /createRule/);
+});
+
+test('Rule AI quality panel is read-only and privacy-conscious', () => {
+  const settingsSource = readFileSync(new URL('../src/views/Settings.tsx', import.meta.url), 'utf8');
+  const apiSource = readFileSync(new URL('../src/api/mail.tsx', import.meta.url), 'utf8');
+
+  assert.match(settingsSource, /Rule AI Quality/);
+  assert.match(settingsSource, /Audit stores request hashes and short previews only/);
+  assert.match(settingsSource, /It does not store raw model output or save rules/);
+  assert.match(settingsSource, /Draft attempts/);
+  assert.match(settingsSource, /Saveable drafts/);
+  assert.match(settingsSource, /Unsupported\/failed/);
+  assert.match(settingsSource, /Recent AI draft attempts/);
+  assert.match(settingsSource, /Latest golden probe/);
+  assert.match(apiSource, /listRuleAiAudit/);
+  assert.match(apiSource, /getRuleAiQualitySummary/);
+  assert.match(apiSource, /fetchWithAuth\(`\/api\/mail\/rules\/ai\/audit\/recent/);
+  assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules\/ai\/audit\/summary'/);
+
+  const panelSource = settingsSource.slice(
+    settingsSource.indexOf('function RuleAiQualityCard'),
+    settingsSource.indexOf('function DraftInfo'),
+  );
+  assert.doesNotMatch(panelSource, /Save Rule/);
+  assert.doesNotMatch(panelSource, /createRule/);
+});
+
+test('Rule explanation UI is dry-run only and has no save control', () => {
+  const settingsSource = readFileSync(new URL('../src/views/Settings.tsx', import.meta.url), 'utf8');
+  const apiSource = readFileSync(new URL('../src/api/mail.tsx', import.meta.url), 'utf8');
+
+  assert.match(settingsSource, /Explain Rule/);
+  assert.match(settingsSource, /Run Dry-Run Explanation/);
+  assert.match(settingsSource, /Dry-run only/);
+  assert.match(settingsSource, /Does not send iMessage/);
+  assert.match(settingsSource, /Does not mutate Gmail/);
+  assert.match(settingsSource, /Does not call IMAP/);
+  assert.match(settingsSource, /condition\.expected/);
+  assert.match(settingsSource, /condition\.actual/);
+  assert.match(apiSource, /explainRule/);
+  assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules\/explain'/);
+
+  const panelSource = settingsSource.slice(
+    settingsSource.indexOf('function RuleExplainPanel'),
+    settingsSource.indexOf('function PreviewFlag'),
+  );
+  assert.doesNotMatch(panelSource, /Save Rule/);
+  assert.doesNotMatch(panelSource, /createRule/);
+});
+
+test('synthetic message builder creates explain samples from AI drafts', () => {
+  const draft: any = {
+    rule: {
+      account_id: 'acct1',
+      conditions: [
+        { field: 'from_domain', operator: 'contains', value: 'bca.co.id' },
+        { field: 'subject', operator: 'contains', value: 'suspicious' },
+        { field: 'body', operator: 'contains', value: 'transaction' },
+      ],
+    },
+  };
+  assert.deepEqual(syntheticMessageFromAiDraft(draft), {
+    sender_email: 'alerts@bca.co.id',
+    subject: 'suspicious',
+    body_text: 'transaction',
+    imap_account: 'acct1',
+    imap_folder: 'INBOX',
+    has_attachment: false,
+  });
+
+  assert.equal(syntheticMessageFromAiDraft({
+    rule: {
+      account_id: null,
+      conditions: [{ field: 'from_email', operator: 'equals', value: 'x@y.com' }],
+    },
+  } as any).sender_email, 'x@y.com');
 });
 
 const approvalBase: any = {

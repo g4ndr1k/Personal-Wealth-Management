@@ -512,6 +512,46 @@ PASS cimb_credit_card_confirmation -> cimbniaga.co.id
 
 Run this only when intentionally testing local rule AI with `[mail.rule_ai].enabled=true` and local Ollama reachable. The probe calls only `POST /api/mail/rules/ai/draft`; it never calls Save Rule, never sends iMessage, never mutates Gmail/IMAP, and never creates labels, moves mail, marks read/unread, deletes, archives, forwards, replies, unsubscribes, or calls webhooks. Keep `[mail.rule_ai].enabled=false` when not actively testing.
 
+Dashboard golden probe:
+
+```text
+Settings -> Rules -> Rule AI Golden Probe -> Run Golden Probe
+```
+
+The dashboard calls `POST /api/mail/rules/ai/golden-probe`, which uses the same shared validation logic as the CLI and returns a compact disabled/pass/fail report. The panel is manual only. It does not expose Save Rule for probe results, does not create normal AI Rule Builder drafts, does not save rules, does not send iMessage, does not call the bridge, and does not mutate Gmail or IMAP. Disabled mode is expected when `[mail.rule_ai].enabled=false`; treat it as a safe-default state, not an operational failure.
+
+Save/preview compatibility:
+
+```text
+AI draft -> human Save Rule -> saved deterministic rule -> local preview/evaluation
+```
+
+Phase 4F.1f verifies this workflow for both sender suppression drafts and local alert-rule drafts. The draft and golden-probe endpoints remain read-only for `mail_rules`, `mail_rule_conditions`, and `mail_rule_actions`; only an explicit human-triggered `POST /api/mail/rules` writes rule rows. Saved AI-drafted rules are normal deterministic rules. Preview uses `POST /api/mail/rules/preview` with synthetic/sample message data and must not inspect a real mailbox, call IMAP, call the bridge, mutate Gmail, or send iMessage.
+
+Field compatibility note: AI drafts may use `from_email` and `from_domain`. The deterministic engine maps `from_email` to `sender_email` and derives `from_domain` / `sender_domain` from `sender_email` when no explicit domain field is present. This keeps saved alert drafts match-compatible with normal IMAP message payloads.
+
+Rule explanation / dry-run inspector:
+
+```http
+POST /api/mail/rules/explain
+```
+
+Phase 4F.2a adds a deterministic inspector for saved rules. Operators provide a synthetic/sample message payload and optionally a `rule_id`; the endpoint evaluates saved rules with `preview=true` and returns why each condition matched or failed, expected vs actual values, planned local actions, and flags such as `would_skip_ai`, `stopped`, `enqueue_ai`, and `route_to_pdf_pipeline`.
+
+This is read-only operator debugging. It does not fetch real mailbox messages, call IMAP, call the bridge, send iMessage, mutate Gmail, create labels, move mail, mark read/unread, write processing events, write approval rows, write action execution rows, save rules, call Ollama, or call a cloud LLM. Mutation actions that already exist on saved rules are shown as dry-run/blocked preview metadata only. The dashboard **Explain Rule** panel uses this endpoint and can synthesize sample messages from AI drafts, including deriving `alerts@domain` samples for `from_domain` conditions.
+
+Rule AI audit and quality metrics:
+
+```text
+GET /api/mail/rules/ai/audit/recent?limit=50
+GET /api/mail/rules/ai/audit/summary
+GET /api/mail/rules/ai/golden-probe/runs?limit=20
+```
+
+Phase 4F.1g records local observability rows for draft/probe attempts. Draft audit stores a SHA-256 request hash, a sanitized/truncated preview, status/saveability, safety status, provider/model, rule shape counts, warnings/explanations, and optional saved-rule linkage when a human later saves the draft. It does not store full raw prompts, raw model output, API keys, app passwords, bridge tokens, email bodies, or mailbox identifiers. Audit writes are best-effort: a draft should still return even if audit persistence fails, and failures are logged for operator follow-up.
+
+The dashboard **Rule AI Quality** panel shows totals, saveable rate, latest golden probe result, and recent draft attempts. It has no rerun, save, execute, or mailbox action controls. Golden probe runs are quality metrics only; the endpoint still does not save rules, send iMessage, call the bridge, call IMAP, or mutate Gmail.
+
 Rebuild `finance-api` after changing Python code or config that affects this path. The safe default posture remains `[mail.rule_ai].enabled=false` until an operator intentionally tests AI rule drafting.
 
 ## Existing Specialized Docs
