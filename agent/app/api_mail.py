@@ -14,7 +14,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, EmailStr, ValidationError
+from pydantic import BaseModel, Field, EmailStr, StrictStr, ValidationError
 
 from .action_execution import (
     evaluate_execution_gate,
@@ -48,6 +48,11 @@ from .config_manager import (
 from .ai_worker import (
     MailAiClassification,
     classify_with_ollama,
+)
+from .rule_ai_builder import (
+    MAX_RULE_AI_REQUEST_CHARS,
+    draft_alert_rule_with_local_llm,
+    draft_sender_suppression_rule,
 )
 
 logger = logging.getLogger("agent.api_mail")
@@ -201,6 +206,15 @@ class RuleReorder(BaseModel):
 
 class RulePreview(BaseModel):
     message: dict[str, Any]
+
+class RuleAiDraftRequest(BaseModel):
+    request_text: StrictStr = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_RULE_AI_REQUEST_CHARS,
+    )
+    account_id: Optional[str] = Field(None, max_length=200)
+    mode: Optional[str] = Field("auto", pattern=r"^(auto|sender_suppression|alert_rule)$")
 
 class MutationPreview(BaseModel):
     action_type: str = Field(..., min_length=1, max_length=100)
@@ -1629,6 +1643,45 @@ async def create_rule(data: RuleCreate):
         raise HTTPException(status_code=400, detail=str(exc))
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+@router.post("/rules/ai/draft", dependencies=[Depends(require_api_key)])
+async def draft_rule_from_natural_language(data: RuleAiDraftRequest):
+    try:
+        mode = data.mode or "auto"
+        if mode == "sender_suppression":
+            draft = draft_sender_suppression_rule(
+                data.request_text,
+                account_id=data.account_id,
+            )
+        elif mode == "alert_rule":
+            draft = draft_alert_rule_with_local_llm(
+                data.request_text,
+                account_id=data.account_id,
+                settings=_get_settings().get("mail", {}).get("rule_ai", {}),
+            )
+        else:
+            try:
+                draft = draft_sender_suppression_rule(
+                    data.request_text,
+                    account_id=data.account_id,
+                )
+                if draft.safety_status == "unsupported_intent":
+                    draft = draft_alert_rule_with_local_llm(
+                        data.request_text,
+                        account_id=data.account_id,
+                        settings=_get_settings().get("mail", {}).get("rule_ai", {}),
+                    )
+            except ValueError as sender_exc:
+                if "sender email" not in str(sender_exc):
+                    raise
+                draft = draft_alert_rule_with_local_llm(
+                    data.request_text,
+                    account_id=data.account_id,
+                    settings=_get_settings().get("mail", {}).get("rule_ai", {}),
+                )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return draft.to_dict()
 
 @router.get("/rules/{rule_id}", dependencies=[Depends(require_api_key)])
 async def get_rule(rule_id: int):

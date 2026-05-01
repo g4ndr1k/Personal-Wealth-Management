@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -7,9 +8,11 @@ import {
   actionRequiresTarget,
   accountOptionLabel,
   accountScopeLabel,
+  aiDraftToRuleInput,
   defaultRuleAccountId,
   hasPriorityConflict,
   isMutationAction,
+  isSaveableAiDraft,
   reorderPayloadForScope,
   rulePayloadWithAccountScope,
 } from '../src/views/ruleUiHelpers.ts';
@@ -141,6 +144,81 @@ test('dangerous actions are not exposed', () => {
   for (const action of forbidden) {
     assert.equal(RULE_ACTIONS.includes(action as any), false, action);
   }
+});
+
+test('AI rule draft converts only safe local suppression drafts to save payloads', () => {
+  const draft: any = {
+    intent_summary: 'Suppress alerts from abcd@efcf.com',
+    confidence: 0.95,
+    safety_status: 'safe_local_suppression',
+    requires_user_confirmation: true,
+    explanation: [],
+    warnings: ['This does not mutate Gmail'],
+    rule: {
+      account_id: null,
+      name: 'Suppress sender abcd@efcf.com',
+      match_type: 'ALL',
+      conditions: [{ field: 'from_email', operator: 'equals', value: 'abcd@efcf.com' }],
+      actions: [
+        { action_type: 'skip_ai_inference', target: null, value_json: null, stop_processing: false },
+        { action_type: 'stop_processing', target: null, value_json: null, stop_processing: true },
+      ],
+    },
+  };
+  assert.deepEqual(aiDraftToRuleInput(draft, 30), {
+    ...draft.rule,
+    priority: 30,
+    enabled: true,
+  });
+  assert.equal(aiDraftToRuleInput({ ...draft, safety_status: 'unsupported_live_mailbox_action' }, 30), null);
+  assert.equal(aiDraftToRuleInput({ ...draft, rule: null }, 30), null);
+  assert.equal(isSaveableAiDraft(draft), true);
+  assert.equal(isSaveableAiDraft({ ...draft, rule: null }), false);
+
+  const alertDraft: any = {
+    ...draft,
+    safety_status: 'safe_local_alert_draft',
+    rule: {
+      account_id: null,
+      name: 'Permata credit card clarification alert',
+      match_type: 'ALL',
+      conditions: [
+        { field: 'from_domain', operator: 'contains', value: 'permatabank.co.id' },
+        { field: 'subject', operator: 'contains', value: 'clarification' },
+      ],
+      actions: [
+        {
+          action_type: 'mark_pending_alert',
+          target: 'imessage',
+          value_json: { template: 'Permata credit card clarification email detected.' },
+          stop_processing: false,
+        },
+      ],
+    },
+  };
+  assert.equal(isSaveableAiDraft(alertDraft), true);
+  assert.deepEqual(aiDraftToRuleInput(alertDraft, 40), {
+    ...alertDraft.rule,
+    priority: 40,
+    enabled: true,
+  });
+});
+
+test('AI rule builder UI keeps save behind safe draft and existing create rule API', () => {
+  const settingsSource = readFileSync(new URL('../src/views/Settings.tsx', import.meta.url), 'utf8');
+  const apiSource = readFileSync(new URL('../src/api/mail.tsx', import.meta.url), 'utf8');
+
+  assert.match(settingsSource, /AI Rule Draft/);
+  assert.match(settingsSource, /Safe Local Suppression/);
+  assert.match(settingsSource, /Safe Local Alert Draft/);
+  assert.match(settingsSource, /This does not mutate Gmail/);
+  assert.match(settingsSource, /This does not send an iMessage now/);
+  assert.match(settingsSource, /Local model could not create a safe draft/);
+  assert.match(settingsSource, /setAiRuleDraft\(null\)/);
+  assert.match(settingsSource, /createRule\(payload\)/);
+  assert.doesNotMatch(settingsSource, /draftRuleWithAi\(payload\)/);
+  assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules\/ai\/draft'/);
+  assert.match(apiSource, /fetchWithAuth\('\/api\/mail\/rules'/);
 });
 
 const approvalBase: any = {

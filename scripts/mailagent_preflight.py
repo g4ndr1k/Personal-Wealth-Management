@@ -408,6 +408,18 @@ def inspect_config() -> list[str]:
         lines.append("")
 
     mutation_cfg = cfg.get("mail", {}).get("imap_mutations", {})
+    rule_ai_cfg = cfg.get("mail", {}).get("rule_ai", {})
+    lines.append("### Phase 4F.1b rule AI probe")
+    if rule_ai_cfg.get("enabled") is True:
+        lines.append(_warn("mail.rule_ai.enabled=true"))
+    else:
+        lines.append(_ok("mail.rule_ai.enabled=false or unset"))
+    lines.append(f"  - `provider` = {repr(rule_ai_cfg.get('provider', 'ollama'))}")
+    lines.append(f"  - `model` = {repr(rule_ai_cfg.get('model', 'gemma3:4b'))}")
+    lines.append(f"  - `base_url` = {repr(rule_ai_cfg.get('base_url', 'http://host.docker.internal:11434'))}")
+    lines.append(f"  - `timeout_seconds` = {repr(rule_ai_cfg.get('timeout_seconds', 30))}")
+    lines.append("")
+
     lines.append("### Phase 4E.2 execution safety")
     verifier_path = REPO / "agent" / "app" / "action_verification.py"
     executor_path = REPO / "agent" / "app" / "action_execution.py"

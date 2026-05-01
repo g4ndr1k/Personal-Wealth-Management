@@ -1,4 +1,4 @@
-import type { AccountHealth, MailRule, MailRuleInput } from '../api/mail';
+import type { AccountHealth, MailRule, MailRuleInput, RuleAiDraftResult } from '../api/mail';
 
 export const PHASE_4A_SAFE_ACTIONS = [
   'mark_pending_alert',
@@ -126,4 +126,26 @@ export function rulePayloadWithAccountScope(rule: MailRuleInput, accountId: stri
     ...rule,
     account_id: accountId,
   };
+}
+
+export function aiDraftToRuleInput(
+  draft: RuleAiDraftResult,
+  priority: number,
+): MailRuleInput | null {
+  if (!isSaveableAiDraft(draft)) {
+    return null;
+  }
+  return {
+    ...draft.rule!,
+    priority,
+    enabled: true,
+  };
+}
+
+export function isSaveableAiDraft(draft: RuleAiDraftResult | null) {
+  return Boolean(
+    draft?.rule
+    && (draft.safety_status === 'safe_local_suppression' || draft.safety_status === 'safe_local_alert_draft')
+    && draft.requires_user_confirmation === true,
+  );
 }

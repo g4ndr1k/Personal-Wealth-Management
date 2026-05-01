@@ -25,6 +25,18 @@ timeout_seconds = 45
 max_body_chars = 12000
 urgency_threshold = 8
 
+[mail.rule_ai]
+# Phase 4F.1b local LLM rule-draft probe. Disabled by default.
+# When enabled, this can draft local alert rules only; it does not save rules,
+# mutate Gmail/IMAP, or send iMessages.
+enabled = false
+provider = "ollama"
+base_url = "http://host.docker.internal:11434"
+model = "gemma3:4b"
+timeout_seconds = 30
+temperature = 0.0
+max_request_chars = 1000
+
 [mail.imap_mutations]
 enabled = false
 dry_run_default = true

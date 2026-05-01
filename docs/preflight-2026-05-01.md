@@ -1,8 +1,8 @@
 # Mail-Agent Preflight Report
 
-**Generated:** 2026-04-30T22:56:41Z  
-**Repo:** `/Users/g4ndr1k/agentic-ai`  
-**Python:** 3.14.4  
+**Generated:** 2026-05-01T04:10:03Z
+**Repo:** `/Users/g4ndr1k/agentic-ai`
+**Python:** 3.14.4
 
 
 ## Docker — docker-compose.yml
@@ -169,7 +169,7 @@
   - ✅ ThrottleInterval=30s
 
 **Live probe:** GET http://127.0.0.1:9100/health
-✅ Bridge responded: {"http": "ok", "applescript": "ok", "messages_app": "fail", "chat_db": "fail", "overall": "degraded", "service": "bridge", "mail_available": true, "timestamp": "2026-04-30T22:56:43.834234+00:00"}
+✅ Bridge responded: {"http": "ok", "applescript": "ok", "messages_app": "fail", "chat_db": "fail", "overall": "degraded", "service": "bridge", "mail_available": true, "timestamp": "2026-05-01T04:10:04.600972+00:00"}
 
 
 ## SQLite — agent state + pdf_jobs.db
@@ -211,7 +211,7 @@
   - `summary` TEXT
   - `status` TEXT
   - `source` TEXT
-  → 391 rows
+  → 394 rows
 
   **`alerts`** columns:
   - `id` INTEGER PK
@@ -306,6 +306,13 @@
   - `verify_ollama_host` = 'http://localhost:11434'
   - `verify_timeout_seconds` = 120
   - `verify_model` = 'gemma3:4b'
+
+### Phase 4F.1b rule AI probe
+✅ mail.rule_ai.enabled=false or unset
+  - `provider` = 'ollama'
+  - `model` = 'gemma3:4b'
+  - `base_url` = 'http://host.docker.internal:11434'
+  - `timeout_seconds` = 30
 
 ### Phase 4E.2 execution safety
 ✅ Final read-only verification module present

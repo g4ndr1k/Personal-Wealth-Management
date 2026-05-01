@@ -25,7 +25,7 @@ Keep the high-level architecture summary in `SYSTEM_DESIGN.md`, keep command-onl
 | Phase 4C.1 IMAP mutation primitives | Implemented, gated/audited |
 | Phase 4C.3A AI trigger actions | Implemented, preview-only |
 | Phase 4E.2 final read-only verification + mock execution API | Implemented, non-mutating |
-| Phase 4F natural-language rule builder | Planned, docs-only |
+| Phase 4F.1a sender suppression rule drafts | Implemented, deterministic/local draft-only |
 | Unsafe actions such as auto-reply, forward, webhook, unsubscribe | Not exposed |
 
 Important database boundary:
@@ -138,6 +138,7 @@ Current rules endpoints:
 ```text
 GET    /api/mail/rules
 POST   /api/mail/rules
+POST   /api/mail/rules/ai/draft
 GET    /api/mail/rules/{rule_id}
 PATCH  /api/mail/rules/{rule_id}
 DELETE /api/mail/rules/{rule_id}
@@ -146,7 +147,7 @@ POST   /api/mail/rules/preview
 GET    /api/mail/processing-events
 ```
 
-Planned Phase 4F AI rule-builder endpoints are documented in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). They are draft/validate/preview/save-after-human-review surfaces only; AI must not write directly to `mail_rules` or execute mailbox actions.
+Phase 4F AI rule-builder endpoints are documented in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). The implemented 4F.1a endpoint is draft-only for local sender suppression; AI must not write directly to `mail_rules` or execute mailbox actions.
 
 ### Worker health/debug API
 
@@ -530,9 +531,9 @@ Phase 4D.5 readiness fields extend the same preview surface. For reversible cand
 
 ---
 
-## Phase 4F Natural Language Rule Builder — Planned
+## Phase 4F Natural Language Rule Builder
 
-Phase 4F will add AI-assisted rule authoring without changing the mailbox mutation boundary. The intended flow is:
+Phase 4F adds AI-assisted rule authoring without changing the mailbox mutation boundary. Phase 4F.1a is implemented as a deterministic/local MVP for sender suppression drafts only. The intended flow is:
 
 ```text
 User natural-language request
@@ -544,7 +545,26 @@ User natural-language request
   -> existing deterministic rules engine
 ```
 
-AI drafts proposed rules only. It does not save rules, execute actions, or mutate Gmail/IMAP. Phase 4F.1 is scoped to safe non-mutating rule actions such as `mark_pending_alert`, `skip_ai_inference`, `add_to_needs_reply`, `route_to_pdf_pipeline`, `notify_dashboard`, and `stop_processing`. Gmail spam/move/label/read/unread mutations remain blocked or deferred unless they later pass through the Phase 4E approval/execution gates.
+AI drafts proposed rules only. It does not save rules, execute actions, call IMAP, call the bridge, send iMessage, or mutate Gmail/IMAP. Phase 4F.1a supports requests such as “Add abcd@efcf.com to the spam list”, “Block alerts from abcd@efcf.com”, and “Stop processing email from abcd@efcf.com”. It returns only `from_email equals <sender>` with `skip_ai_inference` and `stop_processing`.
+
+Phase 4F.1b adds a local LLM/Ollama capability probe for alert-rule drafts. The endpoint accepts `mode=auto`, `mode=sender_suppression`, or `mode=alert_rule`. Alert-rule drafting is controlled by `[mail.rule_ai]` and is disabled by default. When enabled, the only saveable alert draft shape is:
+
+- conditions: `from_domain contains <domain>` or `from_email equals <email>`, plus at least one `subject contains <keyword>` or `body contains <keyword>`
+- action: `mark_pending_alert` with local target such as `imessage`, `stop_processing=false`
+- `safety_status`: `safe_local_alert_draft`
+- `requires_user_confirmation`: `true`
+
+The local model output is never trusted directly. Deterministic post-validation blocks overbroad drafts, missing sender/domain, missing content conditions, mutation actions, direct `send_imessage`, forwarding, auto-reply, unsubscribe, external webhooks, labels, moves, read/unread, and Gmail spam behavior. “Send me an iMessage notification” is represented only as a saved-rule candidate that can later queue a local pending alert; the draft endpoint does not send anything.
+
+The implemented endpoint is:
+
+```text
+POST /api/mail/rules/ai/draft
+```
+
+The endpoint is draft-only and does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`. User save remains a separate human-triggered `POST /api/mail/rules` call from the dashboard. “Spam list” currently means local Mail Agent suppression, not Gmail Spam.
+
+Phase 4F.1 remains scoped to safe non-mutating rule actions. Gmail spam/move/label/read/unread mutations remain blocked or deferred unless they later pass through the Phase 4E approval/execution gates.
 
 Detailed plan: [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md).
 

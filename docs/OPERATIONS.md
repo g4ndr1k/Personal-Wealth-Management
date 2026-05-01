@@ -64,7 +64,7 @@ npm run dev
 
 The dashboard is an Electron menu-bar app. It is a viewer/control surface only; mail processing continues when the dashboard is closed. For account setup, Gmail App Password handling, safe rule actions, and rules UI details, see [MAIL_AGENT.md](MAIL_AGENT.md).
 
-Phase 4F natural-language rule authoring is planned in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). Treat it as an AI draft/validate/preview/human-save workflow only. It must not save rules without review, execute actions, or mutate Gmail/IMAP.
+Phase 4F natural-language rule authoring is documented in [phase-4f-natural-language-rule-builder.md](phase-4f-natural-language-rule-builder.md). Phase 4F.1a is implemented for deterministic/local sender suppression drafts only. Treat it as an AI draft/validate/human-save workflow only. It must not save rules without review, execute actions, or mutate Gmail/IMAP. “Spam list” currently means local Mail Agent suppression, not Gmail Spam.
 
 #### Synthetic approval visual QA
 
@@ -473,6 +473,21 @@ curl -s -H "X-Api-Key: $FINANCE_API_KEY" \
   -d '{"sender":"alerts@example.com","subject":"Payment due reminder","body":"Your payment is due tomorrow."}' \
   | python3 -m json.tool
 ```
+
+Phase 4F.1b local rule drafting probe:
+
+```toml
+[mail.rule_ai]
+enabled = false
+provider = "ollama"
+base_url = "http://host.docker.internal:11434"
+model = "gemma3:4b"
+timeout_seconds = 30
+temperature = 0.0
+max_request_chars = 1000
+```
+
+Keep this disabled unless you are explicitly testing local Ollama rule drafting. The probe drafts only safe local alert rules, post-validates model output, and never saves rules automatically. The draft endpoint does not send iMessage, mutate Gmail/IMAP, call mailbox execution code, or write rule rows; Save Rule remains the separate human-triggered `POST /api/mail/rules` path.
 
 ## Existing Specialized Docs
 

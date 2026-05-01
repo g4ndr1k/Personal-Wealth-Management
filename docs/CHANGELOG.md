@@ -2,6 +2,26 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-05-01 — Phase 4F.1b Local LLM Drafted Alert Rule Probe
+
+- Added a local Ollama-only alert-rule draft path to `POST /api/mail/rules/ai/draft` with modes `auto`, `sender_suppression`, and `alert_rule`.
+- Kept `[mail.rule_ai]` disabled by default; when disabled, alert-rule mode returns an unsupported draft response and saves nothing.
+- Added deterministic post-validation for LLM output: alert drafts must use `match_type=ALL`, include `from_domain` or `from_email`, include a `subject` or `body` content condition, and use only `mark_pending_alert` with no stop-processing behavior.
+- Added local bank-domain hints for known banks, including mapping “Permata Bank” to `permatabank.co.id`; the validator prefers these hints over model-supplied domains.
+- Blocked unsafe LLM outputs such as delete, move, label, read/unread, direct `send_imessage`, forward, auto-reply, unsubscribe, webhook, route-to-PDF, suppression actions, and overbroad drafts.
+- Updated the dashboard AI Rule Builder to expose alert-rule probe mode, show provider/model/confidence, and label drafts as non-mutating, not sending iMessage now, and requiring Save Rule.
+- The draft endpoint remains read-only for rule tables, does not call IMAP, does not call the bridge, and does not send iMessage.
+
+## 2026-05-01 — Phase 4F.1a AI Drafted Sender Suppression Rules
+
+- Added deterministic/local `agent/app/rule_ai_builder.py` for single-sender suppression requests such as spam-list, block alerts, suppress, stop processing, ignore, and mute.
+- Hardened the builder with strict single-line/string/length validation, display-name extraction, malformed email rejection, multi-recipient rejection, and stale dashboard draft invalidation after request edits.
+- Added draft-only `POST /api/mail/rules/ai/draft`, which returns `from_email equals <sender>` plus `skip_ai_inference` and `stop_processing` only.
+- The draft endpoint does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`; human save still uses existing `POST /api/mail/rules`.
+- The dashboard Rules area now has an AI Rule Builder box labelled AI Rule Draft, Safe Local Suppression, and This does not mutate Gmail.
+- Explicit live mailbox requests such as delete, archive, mark read/unread, label, forward, reply, unsubscribe, and move-to-spam are blocked/unsupported.
+- “Spam list” currently means local Mail Agent suppression, not Gmail Spam. No live Gmail/IMAP mutation was added.
+
 ## 2026-05-01 — Planned Phase 4F Natural Language Rule Builder
 
 - Added roadmap/design documentation for AI-assisted rule authoring.

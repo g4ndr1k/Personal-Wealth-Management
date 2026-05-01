@@ -186,6 +186,21 @@ export interface RulePreviewResult {
   route_to_pdf_pipeline: boolean;
 }
 
+export interface RuleAiDraftResult {
+  intent_summary: string;
+  confidence: number;
+  rule: Omit<MailRuleInput, 'priority' | 'enabled'> | null;
+  explanation: string[];
+  warnings: string[];
+  safety_status: string;
+  requires_user_confirmation: boolean;
+  status?: string;
+  saveable?: boolean;
+  provider?: string | null;
+  model?: string | null;
+  raw_model_error?: string | null;
+}
+
 export interface MailProcessingEvent {
   id: number;
   message_id: string;
@@ -351,6 +366,7 @@ interface ApiContextType {
   reloadConfig: () => Promise<any>;
   listRules: () => Promise<MailRule[]>;
   createRule: (data: MailRuleInput) => Promise<MailRule>;
+  draftRuleWithAi: (data: { request_text: string; account_id?: string | null; mode?: 'auto' | 'sender_suppression' | 'alert_rule' }) => Promise<RuleAiDraftResult>;
   updateRule: (ruleId: number, data: Partial<MailRuleInput>) => Promise<MailRule>;
   deleteRule: (ruleId: number) => Promise<any>;
   reorderRules: (rules: Array<{ rule_id: number; priority: number }>) => Promise<any>;
@@ -530,6 +546,14 @@ export function ApiProvider({ children }: { children: ReactNode }) {
 
   const createRule = useCallback(async (data: MailRuleInput) => {
     return fetchWithAuth('/api/mail/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }, [fetchWithAuth]);
+
+  const draftRuleWithAi = useCallback(async (data: { request_text: string; account_id?: string | null; mode?: 'auto' | 'sender_suppression' | 'alert_rule' }) => {
+    return fetchWithAuth('/api/mail/rules/ai/draft', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -731,7 +755,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       value={{ 
         summary, recent, accounts, loading, error, refresh, triggerRun,
         testAccount, addAccount, deleteAccount, reactivateAccount, reloadConfig,
-        listRules, createRule, updateRule, deleteRule, reorderRules,
+        listRules, createRule, draftRuleWithAi, updateRule, deleteRule, reorderRules,
         previewRules, listProcessingEvents, getAiSettings, updateAiSettings,
         testAi, reprocessMessage, listAiTriggers, createAiTrigger,
         updateAiTrigger, deleteAiTrigger, previewAiTriggers,

@@ -108,7 +108,10 @@ def evaluate_message(state, message: dict[str, Any],
             continue
 
         actions = list(rule["actions"])
-        if rule.get("stop_processing"):
+        if rule.get("stop_processing") and not any(
+            action.get("action_type") == "stop_processing"
+            for action in actions
+        ):
             actions.append({
                 "id": None,
                 "rule_id": rule["rule_id"],
@@ -290,6 +293,7 @@ def _condition_matches(condition: dict[str, Any],
 
 def _field_value(message: dict[str, Any], field_name: str) -> Any:
     aliases = {
+        "from_email": "sender_email",
         "from": "sender_email",
         "sender": "sender_email",
         "body": "body_text",

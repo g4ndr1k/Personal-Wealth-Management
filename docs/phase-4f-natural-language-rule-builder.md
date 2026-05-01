@@ -1,6 +1,6 @@
 # Phase 4F Natural Language Rule Builder
 
-Design status: planned. This is a documentation-only roadmap for AI-assisted rule authoring. It does not enable live Gmail/IMAP mutation, autonomous execution, bulk approval, or auto-execute after approval.
+Design status: Phase 4F.1a implemented for deterministic sender suppression drafts only; later phases remain planned. It does not enable live Gmail/IMAP mutation, autonomous execution, bulk approval, or auto-execute after approval.
 
 Phase 4F lets the user type natural-language requests such as:
 
@@ -23,7 +23,8 @@ AI must not directly save rules, execute mailbox actions, or mutate email.
 
 | Phase | Scope |
 |---|---|
-| `4F.1` | AI rule drafting, deterministic validation, preview, and human save for safe non-mutating rule actions only. |
+| `4F.1a` | Implemented: deterministic/local single-sender suppression drafts only. |
+| `4F.1` | Planned remainder: broader AI rule drafting, deterministic validation, preview, and human save for safe non-mutating rule actions only. |
 | `4F.2` | Rule explanation and conflict detection for duplicates, priority collisions, shadowing, contradictions, and unsafe actions. |
 | `4F.3` | AI-assisted rule refinement from examples, such as "make this rule match these messages but not those." |
 
@@ -63,21 +64,105 @@ User natural-language request
 
 This is not autonomous AI execution. AI drafts only. Deterministic code validates and normalizes. The human saves. The deterministic rules engine applies saved rules later.
 
+## Implemented 4F.1a MVP
+
+`agent/app/rule_ai_builder.py` implements the first slice without an LLM path. The implementation is deterministic and local by default.
+
+Supported requests are limited to one sender email address and local suppression intent vocabulary:
+
+- `spam list`
+- `block` / `block alerts`
+- `suppress`
+- `stop processing`
+- `ignore`
+- `mute`
+
+The only saveable draft shape is:
+
+- condition: `from_email equals <normalized email>`
+- actions: `skip_ai_inference` and `stop_processing`
+- `safety_status`: `safe_local_suppression`
+- `requires_user_confirmation`: `true`
+
+`POST /api/mail/rules/ai/draft` returns the draft only. It does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`. Saving remains a separate human-triggered call to the existing `POST /api/mail/rules` endpoint.
+
+The phrase “spam list” currently means local Mail Agent suppression, not Gmail Spam. The builder does not mutate Gmail, does not call IMAP, and does not execute mailbox actions.
+
+The 4F.1a input is intentionally narrow: one single-line string up to 1000 characters, exactly one valid sender email address, optional `account_id` carried as draft metadata only, and no comma/semicolon-separated multi-recipient requests.
+
+The MVP blocks/returns unsupported for explicit live mailbox requests including:
+
+- move to spam
+- delete
+- archive
+- mark read
+- mark unread
+- label
+
+## Implemented 4F.1b Local LLM Alert Probe
+
+Phase 4F.1b adds a local Ollama-only capability probe behind `[mail.rule_ai]`. It is disabled by default. The probe drafts alert rules only and is meant to help inspect whether the local model can reliably convert a narrow natural-language request into a safe rule draft.
+
+`POST /api/mail/rules/ai/draft` now accepts:
+
+- `mode=auto`
+- `mode=sender_suppression`
+- `mode=alert_rule`
+
+Backwards-compatible requests without `mode` still support deterministic 4F.1a sender suppression. `alert_rule` uses the local LLM only when `[mail.rule_ai].enabled=true`; otherwise it returns an unsupported response and no saveable rule.
+
+The only saveable Phase 4F.1b alert shape is:
+
+- `match_type`: `ALL`
+- conditions: `from_domain contains <domain>` or `from_email equals <email>`
+- content condition: at least one `subject contains <keyword>` or `body contains <keyword>`
+- action: `mark_pending_alert`, target `imessage` or another local target, `stop_processing=false`
+- `safety_status`: `safe_local_alert_draft`
+- `requires_user_confirmation`: `true`
+
+Known bank-domain hints are deterministic and local:
+
+```python
+BANK_DOMAIN_HINTS = {
+    "permata": "permatabank.co.id",
+    "permata bank": "permatabank.co.id",
+    "bca": "bca.co.id",
+    "klikbca": "klikbca.com",
+    "cimb": "cimbniaga.co.id",
+    "cimb niaga": "cimbniaga.co.id",
+    "maybank": "maybank.co.id",
+}
+```
+
+For “Permata Bank”, post-validation normalizes the draft domain to `permatabank.co.id`.
+
+The LLM output is post-validated deterministically. Unsupported or unsafe outputs return `status=unsupported`, `saveable=false`, no rule, and short sanitized error text when relevant. The endpoint does not write `mail_rules`, `mail_rule_conditions`, or `mail_rule_actions`; it does not call IMAP, call mailbox execution code, mutate Gmail, call the bridge, send iMessage, auto-save, or auto-execute. If local model quality is insufficient, cloud provider integration may be considered in a separate future phase.
+- forward
+- reply
+- unsubscribe
+
+Phase 4F.1a does not implement iMessage alert drafting, body/subject matching, `contains_any`, real-mailbox preview, conflict detection, auto-save, or Gmail spam behavior.
+
 ## Proposed Backend Shape
 
-Future module:
+Implemented module:
 
 ```text
 agent/app/rule_ai_builder.py
 ```
 
-Possible API endpoints:
+API endpoints:
 
 ```text
 POST /api/mail/rules/ai/draft
+POST /api/mail/rules
+```
+
+Later planned endpoints:
+
+```text
 POST /api/mail/rules/ai/validate
 POST /api/mail/rules/ai/preview
-POST /api/mail/rules
 ```
 
 Endpoint contracts:

@@ -12,6 +12,7 @@ import {
   MailRuleAction,
   MailRuleCondition,
   MailRuleInput,
+  RuleAiDraftResult,
   RulePreviewResult,
   useApi,
 } from '../api/mail';
@@ -22,9 +23,11 @@ import {
   accountOptionLabel,
   accountScopeLabel,
   activeRuleAccounts,
+  aiDraftToRuleInput,
   defaultRuleAccountId,
   hasPriorityConflict,
   isMutationAction,
+  isSaveableAiDraft,
   nextPriorityForScope,
   reorderPayloadForScope,
   ruleHasMutationAction,
@@ -127,6 +130,7 @@ export default function Settings() {
     reloadConfig,
     listRules,
     createRule,
+    draftRuleWithAi,
     updateRule,
     deleteRule,
     reorderRules,
@@ -152,6 +156,10 @@ export default function Settings() {
   const [ruleDraft, setRuleDraft] = useState<MailRuleInput>(newRuleDraft(10, null));
   const [ruleStatus, setRuleStatus] = useState<string | null>(null);
   const [ruleError, setRuleError] = useState<string | null>(null);
+  const [aiRuleRequest, setAiRuleRequest] = useState('');
+  const [aiRuleMode, setAiRuleMode] = useState<'auto' | 'sender_suppression' | 'alert_rule'>('auto');
+  const [aiRuleDraft, setAiRuleDraft] = useState<RuleAiDraftResult | null>(null);
+  const [aiRuleBusy, setAiRuleBusy] = useState(false);
   const [previewText, setPreviewText] = useState(JSON.stringify(samplePreview, null, 2));
   const [previewResult, setPreviewResult] = useState<RulePreviewResult | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -394,6 +402,51 @@ export default function Settings() {
     } catch (e: any) {
       setRuleStatus(null);
       setRuleError(e.message);
+    }
+  };
+
+  const draftAiRule = async () => {
+    setAiRuleBusy(true);
+    setAiRuleDraft(null);
+    setRuleStatus(null);
+    setRuleError(null);
+    try {
+      const draft = await draftRuleWithAi({
+        request_text: aiRuleRequest,
+        account_id: ruleDraft.account_id,
+        mode: aiRuleMode,
+      });
+      setAiRuleDraft(draft);
+    } catch (e: any) {
+      setRuleError(e.message);
+    } finally {
+      setAiRuleBusy(false);
+    }
+  };
+
+  const saveAiDraftRule = async () => {
+    if (!aiRuleDraft?.rule) return;
+    setAiRuleBusy(true);
+    setRuleStatus('Saving rule...');
+    setRuleError(null);
+    try {
+      const priority = nextPriorityForScope(rules, aiRuleDraft.rule.account_id);
+      const payload = aiDraftToRuleInput(aiRuleDraft, priority);
+      if (!payload) {
+        throw new Error('Only safe local suppression or alert drafts can be saved.');
+      }
+      const created = await createRule(payload);
+      setSelectedRuleId(created.rule_id);
+      setRuleDraft(ruleToDraft(created));
+      setRuleStatus('Rule saved.');
+      setAiRuleRequest('');
+      setAiRuleDraft(null);
+      await refreshRulesAndAudit();
+    } catch (e: any) {
+      setRuleStatus(null);
+      setRuleError(e.message);
+    } finally {
+      setAiRuleBusy(false);
     }
   };
 
@@ -652,6 +705,23 @@ export default function Settings() {
             {ruleStatus}
           </div>
         )}
+
+        <AiRuleBuilderCard
+          requestText={aiRuleRequest}
+          setRequestText={(value) => {
+            setAiRuleRequest(value);
+            setAiRuleDraft(null);
+          }}
+          mode={aiRuleMode}
+          setMode={(value) => {
+            setAiRuleMode(value);
+            setAiRuleDraft(null);
+          }}
+          draft={aiRuleDraft}
+          busy={aiRuleBusy}
+          onDraft={draftAiRule}
+          onSave={saveAiDraftRule}
+        />
 
         <div className="grid grid-cols-1 xl:grid-cols-[420px_1fr] gap-4">
           <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
@@ -1023,6 +1093,181 @@ export default function Settings() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function AiRuleBuilderCard({
+  requestText,
+  setRequestText,
+  mode,
+  setMode,
+  draft,
+  busy,
+  onDraft,
+  onSave,
+}: {
+  requestText: string;
+  setRequestText: (value: string) => void;
+  mode: 'auto' | 'sender_suppression' | 'alert_rule';
+  setMode: (value: 'auto' | 'sender_suppression' | 'alert_rule') => void;
+  draft: RuleAiDraftResult | null;
+  busy: boolean;
+  onDraft: () => void;
+  onSave: () => void;
+}) {
+  const saveable = isSaveableAiDraft(draft);
+  const isAlertDraft = draft?.safety_status === 'safe_local_alert_draft';
+  const failedAlertDraft = draft && !draft.rule && (draft.safety_status === 'llm_draft_failed' || draft.safety_status === 'local_llm_disabled');
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 mb-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-white">AI Rule Builder</h3>
+          <div className="mt-1 flex flex-wrap gap-2">
+            <span className="px-2 py-0.5 rounded bg-emerald-950/50 text-emerald-300 text-[10px] font-medium">
+              AI Rule Draft
+            </span>
+            <span className="px-2 py-0.5 rounded bg-sky-950/50 text-sky-300 text-[10px] font-medium">
+              Safe Local Suppression
+            </span>
+            <span className="px-2 py-0.5 rounded bg-teal-950/50 text-teal-300 text-[10px] font-medium">
+              Safe Local Alert Draft
+            </span>
+            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px] font-medium">
+              This does not mutate Gmail
+            </span>
+            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px] font-medium">
+              This does not send an iMessage now
+            </span>
+            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-[10px] font-medium">
+              Requires Save Rule
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={onDraft}
+          disabled={busy || !requestText.trim()}
+          className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+        >
+          {busy ? 'Drafting...' : 'Draft Rule'}
+        </button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(340px,460px)] gap-4">
+        <textarea
+          value={requestText}
+          onChange={(e) => setRequestText(e.target.value)}
+          placeholder="If the mail is from Permata Bank asking for clarification on credit card transaction, send me an iMessage notification"
+          rows={4}
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        />
+        <div className="lg:col-start-1 -mt-2">
+          <select
+            value={mode}
+            onChange={(event) => setMode(event.target.value as 'auto' | 'sender_suppression' | 'alert_rule')}
+            className="w-full max-w-sm bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option value="auto">Auto</option>
+            <option value="sender_suppression">Sender suppression</option>
+            <option value="alert_rule">Alert rule probe</option>
+          </select>
+        </div>
+
+        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-4 min-h-32">
+          {!draft ? (
+            <div className="text-sm text-gray-500">Drafts are local Mail Agent proposals and require Save Rule.</div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-gray-500">AI Rule Draft</div>
+                <div className="text-sm font-semibold text-gray-100 mt-1">{draft.intent_summary}</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  {draft.safety_status === 'safe_local_suppression' ? 'Safe Local Suppression' : isAlertDraft ? 'Safe Local Alert Draft' : humanizeDraftStatus(draft.safety_status)}
+                  {' '}· confidence {Math.round(draft.confidence * 100)}%
+                </div>
+                {(draft.provider || draft.model) && (
+                  <div className="text-xs text-gray-500 mt-1">
+                    {[draft.provider, draft.model].filter(Boolean).join(' / ')}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-sky-900/50 bg-sky-950/20 p-3 text-xs text-sky-100">
+                This does not mutate Gmail. This does not send an iMessage now. Save Rule uses the existing human-triggered rule creation API.
+              </div>
+
+              {draft.rule ? (
+                <div className="space-y-2 text-xs">
+                  <DraftInfo label="Rule name" value={draft.rule.name} />
+                  <DraftInfo label="Account scope" value={draft.rule.account_id ?? 'Global'} />
+                  <DraftInfo
+                    label="Conditions"
+                    value={draft.rule.conditions.map((condition) => `${condition.field} ${condition.operator} ${condition.value}`).join(', ')}
+                  />
+                  <DraftInfo
+                    label="Actions"
+                    value={draft.rule.actions.map((action) => action.action_type).join(', ')}
+                  />
+                </div>
+              ) : (
+                <div className="rounded-lg border border-amber-900/50 bg-amber-950/20 p-3 text-xs text-amber-100">
+                  {failedAlertDraft ? 'Local model could not create a safe draft. No rule was saved.' : 'No saveable rule was drafted for this request.'}
+                </div>
+              )}
+
+              <DraftList title="Explanation" items={draft.explanation} />
+              <DraftList title="Warnings" items={draft.warnings} warning />
+
+              {saveable && (
+                <button
+                  onClick={onSave}
+                  disabled={busy}
+                  className="w-full px-4 py-2 bg-emerald-700 text-white rounded-lg text-sm font-medium hover:bg-emerald-600 disabled:opacity-50 transition-colors"
+                >
+                  {busy ? 'Saving...' : 'Save Rule'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function humanizeDraftStatus(value: string) {
+  return value.replace(/_/g, ' ');
+}
+
+function DraftInfo({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-gray-500">{label}</div>
+      <div className="text-gray-200 mt-1 break-words">{value}</div>
+    </div>
+  );
+}
+
+function DraftList({ title, items, warning }: { title: string; items: string[]; warning?: boolean }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-gray-500">{title}</div>
+      <div className="mt-1 space-y-1">
+        {items.map((item, index) => (
+          <div
+            key={`${title}-${index}`}
+            className={`rounded border px-2 py-1.5 text-xs break-words ${
+              warning
+                ? 'border-amber-900/50 bg-amber-950/20 text-amber-100'
+                : 'border-gray-800 bg-gray-950/40 text-gray-300'
+            }`}
+          >
+            {item}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
