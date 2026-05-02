@@ -558,7 +558,9 @@ cd mail-dashboard
 npx playwright install
 ```
 
-Control Center E2E smoke is deferred; keep using the existing helper/unit tests and Synthetic QA mode for that surface until a focused browser smoke is added.
+Phase 4F.2c extends the same Playwright suite to the Control Center / Operator Approval UI. The Control Center smoke tests mock every `/api/mail/*` request, fail on unmocked mail API calls, and do not call finance-api, Gmail, IMAP, Ollama, iMessage, a mailbox, or a real database.
+
+The Control Center smoke verifies synthetic read-only mode, pending approve/reject/expire controls, approved **Mock verify + audit** labeling, terminal blocked approvals with blockers and no retry/bulk execute, stuck started approvals requiring manual review, cleanup preview as read-only until explicit confirmed cleanup, and JSON export without approval execution.
 
 Rule AI audit and quality metrics:
 

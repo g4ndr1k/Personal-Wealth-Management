@@ -260,7 +260,7 @@ export default function ControlCenter() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-testid="control-center">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-white">Control Center</h2>
@@ -356,7 +356,7 @@ export default function ControlCenter() {
       )}
 
       {cleanupPreview && (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3" data-testid="cleanup-preview">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-[10px] uppercase tracking-wider text-gray-500">Cleanup preview is read-only</div>
@@ -486,7 +486,7 @@ function ApprovalRow({
   const target = approvalTarget(approval);
 
   return (
-    <div className={`bg-gray-900 border rounded-lg p-4 ${selected ? 'border-indigo-700' : 'border-gray-800'}`}>
+    <div className={`bg-gray-900 border rounded-lg p-4 ${selected ? 'border-indigo-700' : 'border-gray-800'}`} data-testid="approval-row">
       <button className="w-full text-left" onClick={onOpen}>
         <div className="flex flex-wrap items-center gap-2">
           <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${stateClass(approval.status)}`}>{label(approval.status)}</span>
@@ -598,7 +598,7 @@ function ApprovalDetail({
   const mailboxUidvalidity = message.uidvalidity ?? approval.uidvalidity ?? 'n/a';
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-auto self-start">
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-auto self-start" data-testid="approval-detail">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap gap-2">

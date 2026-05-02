@@ -388,7 +388,21 @@ Covered flows:
 
 The sender suppression smoke captures the outgoing Save Rule body and verifies draft metadata is stripped before save: no `status`, `saveable`, `safety_status`, warnings, explanation, provider, model, or raw model error.
 
-Control Center E2E smoke is deferred. Existing helper tests and Synthetic QA fixtures remain the safety coverage for that dashboard surface until a focused browser smoke is added.
+## Phase 4F.2c Control Center E2E Safety Smoke Tests
+
+Phase 4F.2c is test infrastructure only. It adds Playwright browser smoke tests for the Control Center / Operator Approval safety flows.
+
+The suite continues to start Vite and mocks every `/api/mail/*` request through Playwright route interception. It fails closed on unmocked mail API calls and does not call real finance-api, Docker, Electron, Ollama, Gmail, IMAP, iMessage, the bridge, a real mailbox, or a real database.
+
+Covered Control Center flows:
+
+- synthetic QA mode is read-only and does not call approval, cleanup, or IMAP endpoints
+- pending approvals expose approve/reject/expire only, with no mock execute, bulk execute, or auto execute control
+- approved approvals expose **Mock verify + audit** only and do not imply Gmail mutation
+- blocked terminal approvals show blockers/final verification details and no retry or bulk execute path
+- stuck started approvals show manual review and allow only the mocked mark-failed endpoint
+- cleanup preview is read-only on page load and cleanup requires explicit confirmation
+- Export JSON calls only the mocked export endpoint and does not execute approvals
 
 ## 2026-05-01 Validation Checkpoint
 

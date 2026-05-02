@@ -2,6 +2,14 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-05-02 — Phase 4F.2c Control Center E2E Safety Smoke Tests
+
+- Added Playwright E2E smoke coverage for the dashboard Control Center / Operator Approval safety flows.
+- The new suite mocks every `/api/mail/*` request, fails on unmocked mail API calls, and runs without Docker, finance-api, Gmail, IMAP, Ollama, iMessage, a mailbox, or a real database.
+- Covered synthetic read-only mode, pending approve/reject/expire controls, approved mock verification labeling, terminal blocked state with blockers/no retry, stuck manual-review mark-failed flow, explicit cleanup confirmation, and JSON export without execution.
+- Added minimal stable dashboard test anchors for the Control Center root, approval rows, approval detail, and cleanup preview.
+- Preserved the safety boundary: no live backend calls, no Gmail/IMAP mutation, no real approval execution, no cloud LLM, and no autonomous or bulk execute path.
+
 ## 2026-05-01 — Phase 4F.1g Rule AI Draft Audit Trail And Quality Metrics
 
 - Added local `mail_rule_ai_draft_audit` and `mail_rule_ai_golden_probe_runs` tables for privacy-conscious Rule AI observability.
@@ -295,7 +303,7 @@ Human-readable project history. Reverse chronological order.
 - Covered sender suppression draft save flow, unsupported draft blocking, golden probe disabled/pass/fail states, Rule AI Quality rendering, and Rule Explanation dry-run rendering.
 - Verified that Save Rule is available only for saveable drafts and that AI draft metadata is stripped before the human `POST /api/mail/rules` save payload.
 - Tests do not require Docker, finance-api, Electron, Ollama, Gmail, IMAP, iMessage, or a real mailbox/database.
-- Control Center E2E smoke remains a follow-up; helper/unit coverage and synthetic QA fixtures continue to cover that surface for now.
+- Control Center E2E smoke was added in Phase 4F.2c.
 
 ## 2026-05-02 — Phase 4F.2a Rule Explanation / Dry-Run Inspector
 
