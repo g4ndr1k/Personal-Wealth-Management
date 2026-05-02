@@ -615,7 +615,11 @@ Use the consolidated release verification command before handoff:
 
 It runs targeted backend safety suites, the full backend suite, dashboard helper tests, Playwright E2E, dashboard build, and preflight. It does not require local Rule AI to be enabled. The automated tests mock external/runtime dependencies where appropriate: dashboard E2E mocks all `/api/mail/*` routes, and backend Rule AI tests use fake local clients instead of real Ollama.
 
+GitHub Actions automation lives in `.github/workflows/mail-agent-phase4.yml`. It runs on pull requests, pushes to `main`, manual dispatch, and a weekly scheduled safety check. The workflow is intentionally service-free: no secrets, no Docker mail-agent, no Mac bridge, no NAS mount, no real Ollama, no Gmail/IMAP, and no iMessage. Backend CI uses `scripts/mailagent_preflight.py --ci` for static safety defaults and endpoint/doc markers, then runs targeted and full backend tests. Dashboard CI installs Chromium, runs helper tests, runs mocked Playwright E2E with `npm run test:e2e:ci`, and builds the dashboard.
+
 Expected preflight warnings may include local Rule AI enabled on a test machine, missing NAS mount, or bridge Messages/chat DB degradation. These are environment warnings, not evidence that Rule AI draft/probe/explain can mutate Gmail/IMAP or send iMessage.
+
+The real local-Qwen golden probe remains manual/operator-run only. CI does not enable Rule AI, start Ollama, or run the golden probe against a local model.
 
 Phase 4F.1g adds local Rule AI draft/probe observability. `mail_rule_ai_draft_audit` records each successful draft endpoint response as a best-effort audit row, and `mail_rule_ai_golden_probe_runs` records aggregate golden probe results. These tables are quality metrics only: they do not save rules, do not execute actions, and do not change mailbox state.
 

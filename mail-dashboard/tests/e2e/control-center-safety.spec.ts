@@ -437,7 +437,7 @@ test('approved approval exposes mock verification only', async ({ page }) => {
 
   await row.getByRole('button', { name: 'Mock verify + audit' }).click();
   await expect.poll(() => mutationCalls(api.requests).some((request) => request.path === '/api/mail/approvals/approval-approved-1/execute')).toBe(true);
-  await expect(page.getByTestId('approval-detail').getByText(/mock/i)).toBeVisible();
+  await expect(page.getByTestId('approval-detail').getByText('Mock only')).toBeVisible();
   await expect(page.getByTestId('approval-detail').getByText(/verification|audit/i).first()).toBeVisible();
 
   expect(mutationCalls(api.requests).map((request) => request.path)).toEqual([

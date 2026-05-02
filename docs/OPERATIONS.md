@@ -76,6 +76,15 @@ Run the consolidated Phase 4 safety verification before handoff or release:
 
 The script runs targeted backend safety suites, the full backend suite, dashboard helper tests, Playwright E2E, dashboard build, and `scripts/mailagent_preflight.py`. The Playwright tests mock every `/api/mail/*` route and do not call the real backend, Gmail, IMAP, Ollama, iMessage, bridge, a mailbox, or a real database.
 
+CI runs the repeatable subset in `.github/workflows/mail-agent-phase4.yml` on pull requests, pushes to `main`, manual dispatch, and a weekly scheduled run. It uses fake env vars only (`FINANCE_API_KEY=test-ci-key`, temp `AGENT_DB_PATH`, `MAILAGENT_CI=1`) and does not require repository secrets, app passwords, NAS mounts, Docker, Mac services, Ollama, Gmail/IMAP, or iMessage/bridge.
+
+CI jobs:
+
+- `backend-tests`: `python3 scripts/mailagent_preflight.py --ci`, targeted backend safety suites, and full `agent/tests`.
+- `dashboard-tests`: `npm run test:rules-ui`, `npm run test:e2e:ci`, and `npm run build`.
+
+CI preflight is static-only. It checks `config/settings.example.toml` safety defaults, required docs/scripts, endpoint markers, dashboard scripts, and Playwright configuration. Local preflight remains the operator environment inventory and may report local warnings.
+
 Known non-fatal preflight warnings:
 
 - `[mail.rule_ai].enabled=true` may appear on a local test machine; example/safe config should remain disabled by default.

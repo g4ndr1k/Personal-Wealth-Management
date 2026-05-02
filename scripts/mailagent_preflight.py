@@ -4,12 +4,18 @@ mailagent_preflight.py — read-only inventory of the mail-agent stack.
 
 Usage (from repo root):
     python3 scripts/mailagent_preflight.py
+    python3 scripts/mailagent_preflight.py --ci
 
 Outputs a markdown report to stdout and saves it to docs/preflight-<date>.md.
 Nothing is written to any database or runtime state.
+
+CI mode is static-only: it checks committed safety defaults and expected
+scripts/docs without probing local bridge, NAS, SQLite, Gmail/IMAP, Ollama,
+or Playwright.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -59,6 +65,122 @@ def _load_toml(path: Path) -> dict | None:
             return tomllib.load(f)
     except Exception:
         return None
+
+
+def _expect_bool(
+        lines: list[str],
+        cfg: dict,
+        dotted: str,
+        expected: bool,
+        label: str | None = None) -> None:
+    current: object = cfg
+    for part in dotted.split("."):
+        if not isinstance(current, dict) or part not in current:
+            lines.append(_fail(f"Missing `{dotted}` in config/settings.example.toml"))
+            return
+        current = current[part]
+    name = label or dotted
+    if current is expected:
+        lines.append(_ok(f"`{name}` default is {expected}"))
+    else:
+        lines.append(_fail(f"`{name}` default is {current!r}; expected {expected!r}"))
+
+
+def inspect_ci_static() -> list[str]:
+    lines: list[str] = [_section("CI Static Safety Preflight")]
+    lines.append(
+        "CI mode performs committed-file checks only. It does not probe bridge, "
+        "NAS, SQLite live DBs, Gmail/IMAP, Ollama, Docker, or Playwright."
+    )
+
+    required_paths = [
+        "config/settings.example.toml",
+        "scripts/mailagent_verify_phase4.sh",
+        "scripts/mail_rule_ai_golden_probe.py",
+        "docs/MAIL_AGENT_SAFETY_MATRIX.md",
+        "docs/OPERATIONS.md",
+        "docs/MAIL_AGENT.md",
+        "docs/TROUBLESHOOTING.md",
+        "mail-dashboard/package.json",
+        "mail-dashboard/playwright.config.ts",
+    ]
+    lines.append("\n### Required files")
+    for rel in required_paths:
+        path = REPO / rel
+        lines.append(_ok(f"`{rel}` exists") if path.exists() else _fail(f"`{rel}` missing"))
+
+    cfg_path = REPO / "config" / "settings.example.toml"
+    cfg = _load_toml(cfg_path)
+    lines.append("\n### Safe example defaults")
+    if cfg is None:
+        lines.append(_fail("Could not parse config/settings.example.toml"))
+        return lines
+
+    _expect_bool(lines, cfg, "mail.rule_ai.enabled", False)
+    _expect_bool(lines, cfg, "mail.imap_mutations.enabled", False)
+    _expect_bool(lines, cfg, "mail.imap_mutations.dry_run_default", True)
+    for key in (
+            "allow_mark_read",
+            "allow_mark_unread",
+            "allow_add_label",
+            "allow_move_to_folder",
+            "allow_create_folder",
+            "allow_copy_delete_fallback"):
+        _expect_bool(lines, cfg, f"mail.imap_mutations.{key}", False)
+    _expect_bool(lines, cfg, "classifier.cloud_fallback_enabled", False)
+    _expect_bool(lines, cfg, "pipeline.enabled", False)
+
+    rule_ai = cfg.get("mail", {}).get("rule_ai", {})
+    if rule_ai.get("provider") == "ollama":
+        lines.append(_ok("Rule AI example provider remains local Ollama"))
+    else:
+        lines.append(_fail("Rule AI example provider is not local Ollama"))
+
+    model = rule_ai.get("model")
+    if model == "qwen2.5:7b-instruct-q4_K_M":
+        lines.append(_ok("Rule AI example model remains qwen2.5:7b-instruct-q4_K_M"))
+    else:
+        lines.append(_warn(f"Rule AI example model is {model!r}; current narrow-flow recommendation is qwen2.5:7b-instruct-q4_K_M"))
+
+    lines.append("\n### Static endpoint markers")
+    api_mail_path = REPO / "agent" / "app" / "api_mail.py"
+    api_src = api_mail_path.read_text(encoding="utf-8") if api_mail_path.exists() else ""
+    for marker in (
+            "/rules/ai/draft",
+            "/rules/ai/golden-probe",
+            "/rules/ai/audit/recent",
+            "/rules/ai/audit/summary",
+            "/rules/ai/golden-probe/runs",
+            "/rules/explain",
+            "/approvals/{approval_id}/execute",
+            "/approvals/cleanup/preview"):
+        lines.append(_ok(f"`{marker}` marker present") if marker in api_src else _fail(f"`{marker}` marker missing"))
+
+    matrix_path = REPO / "docs" / "MAIL_AGENT_SAFETY_MATRIX.md"
+    matrix = matrix_path.read_text(encoding="utf-8") if matrix_path.exists() else ""
+    for phrase in (
+            "Draft endpoint writes audit only",
+            "Golden probe writes quality run only",
+            "Explain endpoint is read-only",
+            "Save Rule is the only Rule AI path that creates rule rows",
+            "Gmail/IMAP mutation remains disabled/deferred"):
+        lines.append(_ok(f"Safety matrix states: {phrase}") if phrase in matrix else _fail(f"Safety matrix missing: {phrase}"))
+
+    dashboard_pkg = REPO / "mail-dashboard" / "package.json"
+    if dashboard_pkg.exists():
+        package = json.loads(dashboard_pkg.read_text(encoding="utf-8"))
+        scripts = package.get("scripts", {})
+        for script in ("test:rules-ui", "test:e2e", "test:all", "build"):
+            lines.append(_ok(f"dashboard npm script `{script}` exists") if script in scripts else _fail(f"dashboard npm script `{script}` missing"))
+
+    playwright_cfg = REPO / "mail-dashboard" / "playwright.config.ts"
+    pw_src = playwright_cfg.read_text(encoding="utf-8") if playwright_cfg.exists() else ""
+    if "name: 'chromium'" in pw_src and "5175" in pw_src and "webServer" in pw_src:
+        lines.append(_ok("Playwright config is Chromium-only with deterministic Vite webServer port"))
+    else:
+        lines.append(_fail("Playwright config is missing Chromium-only/project/webServer/port markers"))
+
+    return lines
 
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
@@ -515,8 +637,22 @@ def inspect_filesystem() -> list[str]:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def build_report() -> str:
+def build_report(*, ci: bool = False) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if ci:
+        sections: list[list[str]] = [
+            [f"# Mail-Agent CI Static Preflight Report\n",
+             f"**Generated:** {ts}  ",
+             f"**Repo:** `{REPO}`  ",
+             f"**Python:** {sys.version.split()[0]}  "],
+            inspect_ci_static(),
+        ]
+        all_lines: list[str] = []
+        for sec in sections:
+            all_lines.extend(sec)
+            all_lines.append("")
+        return "\n".join(all_lines)
+
     sections: list[list[str]] = [
         [f"# Mail-Agent Preflight Report\n",
          f"**Generated:** {ts}  ",
@@ -539,8 +675,22 @@ def build_report() -> str:
 
 
 def main():
-    report = build_report()
+    parser = argparse.ArgumentParser(description="Mail Agent preflight report")
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        default=os.environ.get("MAILAGENT_CI") == "1",
+        help="Run static CI-safe checks only; do not probe local services.",
+    )
+    args = parser.parse_args()
+
+    report = build_report(ci=args.ci)
     print(report)
+
+    if args.ci:
+        if "❌" in report:
+            sys.exit(1)
+        return
 
     docs_dir = REPO / "docs"
     docs_dir.mkdir(exist_ok=True)

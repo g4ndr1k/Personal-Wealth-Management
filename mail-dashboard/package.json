@@ -9,6 +9,7 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "test:rules-ui": "node --test --experimental-strip-types tests/ruleUiHelpers.test.ts",
     "test:e2e": "playwright test",
+    "test:e2e:ci": "playwright test --project=chromium",
     "test:all": "npm run test:rules-ui && npm run test:e2e && npm run build",
     "preview": "vite preview",
     "dist": "npm run build && electron-builder"

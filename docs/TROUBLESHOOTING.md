@@ -12,6 +12,8 @@ Before debugging a release handoff, run:
 
 This runs backend safety tests, the full backend suite, dashboard helper tests, Playwright E2E, dashboard build, and preflight. Playwright mocks all `/api/mail/*` routes and should not be debugged by enabling real Gmail/IMAP, Ollama, iMessage, bridge calls, or a real mailbox.
 
+CI verification is defined in `.github/workflows/mail-agent-phase4.yml`. It uses `MAILAGENT_CI=1`, fake API keys, temp DB paths, and static `config/settings.example.toml` checks. It must not depend on repository secrets, app passwords, NAS mounts, Docker, local Mac services, a bridge process, real Ollama, Gmail/IMAP, or iMessage.
+
 Expected non-fatal preflight warnings:
 
 - Rule AI enabled locally may warn; keep example/safe config at `[mail.rule_ai].enabled=false`.
@@ -19,6 +21,10 @@ Expected non-fatal preflight warnings:
 - Bridge Messages/chat DB degradation is unrelated to Rule AI draft/probe/explain safety.
 
 If verification fails because a dashboard test reports an unmocked `/api/mail/*` request, add an explicit test route mock. Do not allow E2E tests to fall through to a live backend.
+
+If CI preflight fails, inspect `config/settings.example.toml` first. Safe defaults should keep `[mail.rule_ai].enabled=false`, `[mail.imap_mutations].enabled=false`, `dry_run_default=true`, mutation allow flags false, `classifier.cloud_fallback_enabled=false`, and `pipeline.enabled=false`.
+
+If Playwright fails in CI, download the uploaded `mail-dashboard-playwright-report` and `mail-dashboard-test-results` artifacts. Do not fix CI by starting a real backend or adding secrets; the tests are expected to run fully mocked.
 
 ## PDF Stuck As "New" Or "Never"
 

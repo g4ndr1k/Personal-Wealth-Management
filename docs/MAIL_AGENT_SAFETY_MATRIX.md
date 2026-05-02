@@ -7,6 +7,10 @@ Current safety model:
 - AI drafts only.
 - Deterministic validation checks every draft.
 - Human Save Rule is required before rule rows are created.
+- Draft endpoint writes audit only.
+- Golden probe writes quality run only.
+- Explain endpoint is read-only.
+- Save Rule is the only Rule AI path that creates rule rows.
 - Draft and probe endpoints write observability rows only.
 - Explanation is read-only.
 - Approval execution is mock-only / final-verification-only in this phase.
@@ -30,6 +34,8 @@ Current safety model:
 | Approval cleanup | 4D.4 | No | Yes, lifecycle/audit updates for expired/archive cleanup | No | No | No | No | Yes, explicit cleanup request; force required when disabled | Disabled by default | `agent/tests/test_action_approvals.py`, `mail-dashboard` `test:e2e` |
 | Rule AI Golden Probe CLI | 4F.1d | No | No direct DB write; calls draft endpoint only when operator runs it | No | No | No | No | Manual operator command | Not automatic | `agent/tests/test_rule_ai_golden_probe.py` |
 | Preflight | 4F.1g / 4F.2d | No | No runtime DB writes; writes markdown report file | No | Health/readiness probes only; no draft/probe/explain bridge calls | No Gmail/IMAP mutation | No | Manual operator command | Manual | `scripts/mailagent_verify_phase4.sh` |
+| CI static preflight `scripts/mailagent_preflight.py --ci` | 4F.2e | No | No | No | No | No | No | No | GitHub Actions / manual CI check | `.github/workflows/mail-agent-phase4.yml` |
+| GitHub Actions Phase 4 workflow | 4F.2e | No production writes; tests use temp DBs | Test-local only | No | No | No | No | No | Pull request, `main`, weekly schedule, manual dispatch | `.github/workflows/mail-agent-phase4.yml` |
 
 ## Explicit Safety Notes
 
@@ -40,3 +46,5 @@ Current safety model:
 - Approval execution remains mock-only / final-verification-only at this phase. Final verification may read mailbox identity through the read-only adapter, then mock execution writes audit metadata only.
 - Gmail/IMAP mutation remains disabled/deferred. No `STORE`, `MOVE`, `COPY`, `CREATE`, `EXPUNGE`, Gmail label mutation, Gmail Spam move, reply, forward, delete, unsubscribe, or webhook execution is added by Phase 4F.2d.
 - Playwright safety tests mock all `/api/mail/*` routes and fail closed on unmocked mail API calls.
+- CI uses fake env vars only, does not require secrets, does not start Docker or local Mac services, and does not call real Ollama, Gmail/IMAP, iMessage, bridge, or NAS mounts.
+- CI static preflight checks committed safety defaults and static markers only. Local preflight remains the operator environment inventory and may report non-fatal local warnings.

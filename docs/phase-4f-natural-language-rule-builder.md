@@ -416,6 +416,18 @@ The command runs targeted backend safety suites, the full backend suite, dashboa
 
 The safety matrix explicitly preserves the current boundary: draft writes audit only, golden probe writes quality runs only, explain is read-only, Save Rule is the only Rule AI path that writes rule rows, approval execution is mock-only / final-verification-only, and Gmail/IMAP mutation remains disabled/deferred.
 
+## Phase 4F.2e CI / Scheduled Verification Readiness
+
+Phase 4F.2e adds repeatable automation around the same safety suite. The GitHub Actions workflow lives at:
+
+```text
+.github/workflows/mail-agent-phase4.yml
+```
+
+It runs on pull requests, pushes to `main`, manual dispatch, and a weekly scheduled check. Backend CI runs static CI-safe preflight, targeted safety suites, and the full backend suite. Dashboard CI runs helper tests, Chromium Playwright E2E, and build.
+
+CI is intentionally service-free: no secrets, no Docker mail-agent, no NAS mount, no local Mac bridge, no real Ollama, no Gmail/IMAP, and no iMessage. `scripts/mailagent_preflight.py --ci` checks committed safety defaults and static markers only; real local-Qwen golden probing remains a manual operator command.
+
 ## 2026-05-01 Validation Checkpoint
 
 Manual validation after schema hardening established the current local-model recommendation for this narrow flow:

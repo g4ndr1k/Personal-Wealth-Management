@@ -1,0 +1,128 @@
+name: Mail Agent Phase 4 Safety Verification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FINANCE_API_KEY: test-ci-key
+  AGENT_DB_PATH: /tmp/agent-test.db
+  SETTINGS_FILE: ${{ github.workspace }}/config/settings.example.toml
+  MAILAGENT_CI: "1"
+  MAIL_RULE_AI_ENABLED: "false"
+
+jobs:
+  backend-tests:
+    name: Backend safety tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pytest \
+            fastapi \
+            "pydantic>=2" \
+            httpx \
+            tomlkit \
+            keyring \
+            email-validator
+
+      - name: CI static preflight
+        run: python3 scripts/mailagent_preflight.py --ci
+
+      - name: Compile safety scripts
+        run: |
+          python3 -m py_compile \
+            scripts/mailagent_preflight.py \
+            scripts/mail_rule_ai_golden_probe.py
+
+      - name: Run targeted backend safety suites
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/agent
+        run: |
+          python -m pytest agent/tests/test_rule_explain.py -q
+          python -m pytest agent/tests/test_rule_ai_builder.py -q
+          python -m pytest agent/tests/test_rule_ai_golden_probe.py -q
+          python -m pytest agent/tests/test_rule_ai_save_compatibility.py -q
+          python -m pytest agent/tests/test_rule_ai_audit.py -q
+          python -m pytest agent/tests/test_action_execution.py -q
+          python -m pytest agent/tests/test_action_approvals.py -q
+          python -m pytest agent/tests/test_imap_mutations.py -q
+
+      - name: Run full backend suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/agent
+        run: python -m pytest agent/tests -q
+
+  dashboard-tests:
+    name: Dashboard safety tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: mail-dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mail-dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run dashboard helper tests
+        run: npm run test:rules-ui
+
+      - name: Run mocked Playwright E2E
+        run: npm run test:e2e:ci
+
+      - name: Build dashboard
+        run: npm run build
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mail-dashboard-playwright-report
+          path: mail-dashboard/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload Playwright test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mail-dashboard-test-results
+          path: mail-dashboard/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

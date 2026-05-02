@@ -2,6 +2,15 @@
 
 Human-readable project history. Reverse chronological order.
 
+## 2026-05-02 — Phase 4F.2e CI / Scheduled Verification Readiness
+
+- Added GitHub Actions workflow `.github/workflows/mail-agent-phase4.yml` for pull requests, pushes to `main`, manual runs, and a weekly scheduled safety run.
+- Split CI into backend safety tests and dashboard safety tests. Backend runs CI static preflight, targeted Phase 4 safety suites, and the full `agent/tests` suite. Dashboard runs helper tests, mocked Playwright E2E, and production build.
+- Added `scripts/mailagent_preflight.py --ci` / `MAILAGENT_CI=1` static safety preflight that checks committed defaults, required docs/scripts, endpoint markers, dashboard scripts, and Playwright config without probing bridge, NAS, live SQLite, Gmail/IMAP, Ollama, Docker, or Playwright.
+- Hardened Playwright CI output with Chromium-only `test:e2e:ci`, deterministic Vite server usage, HTML report on CI, and trace/screenshot/video artifacts only on failure.
+- Documented local vs CI verification in operations, Mail Agent, troubleshooting, and the safety matrix.
+- Preserved the safety boundary: no product behavior change, no secrets required, no real Ollama, no Gmail/IMAP, no iMessage/bridge, no Docker mail-agent, and no cloud LLM.
+
 ## 2026-05-02 — Phase 4F.2d Release Stabilization
 
 - Added [MAIL_AGENT_SAFETY_MATRIX.md](MAIL_AGENT_SAFETY_MATRIX.md) covering Rule AI draft/probe/audit/explain endpoints, human Save Rule, Control Center approvals, mock verification, cleanup, CLI golden probe, and preflight.
